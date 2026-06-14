@@ -1,5 +1,5 @@
 import { D } from '../../engine/decimal'
-import { RESOURCE_IDS, type ResourceId, type GameState } from '../../engine/state'
+import { RESOURCE_IDS, type ResourceId, type Village } from '../../engine/state'
 import { formatNumber, formatInt, formatRate } from '../../engine/format'
 import {
   BUILDINGS,
@@ -59,16 +59,16 @@ interface BuildingRefs {
 }
 
 /**
- * Human-readable CURRENT effect of one building, computed from live state. Linear
- * effects (production/storage/population) show the level's total contribution; the
- * global effects (cost_reduction/recruit_speed) show the derived percentage from
+ * Human-readable CURRENT effect of one building, computed from the active village.
+ * Linear effects (production/storage/population) show the level's total contribution;
+ * the global effects (cost_reduction/recruit_speed) show the derived percentage from
  * the engine's own roll-up functions, so the card never disagrees with the engine.
  *
  * EXHAUSTIVE over the BuildingEffect union: a new effect kind is a COMPILE error
  * here (the `never` in `default`), keeping the data-driven contract honest.
  */
-function effectText(state: GameState, id: BuildingId): string {
-  const level = state.buildings[id]
+function effectText(v: Village, id: BuildingId): string {
+  const level = v.buildings[id]
   if (level <= 0) return 'Zbuduj poziom 1, aby aktywować.'
 
   const e = BUILDINGS[id].effect
@@ -80,9 +80,9 @@ function effectText(state: GameState, id: BuildingId): string {
     case 'population':
       return 'Limit populacji: +' + formatInt(D(e.perLevel).mul(level))
     case 'cost_reduction':
-      return 'Koszt rozbudowy: -' + Math.round((1 - costReduction(state).toNumber()) * 100) + '%'
+      return 'Koszt rozbudowy: -' + Math.round((1 - costReduction(v).toNumber()) * 100) + '%'
     case 'recruit_speed':
-      return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(state)) * 100) + '%'
+      return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(v)) * 100) + '%'
     default: {
       const _exhaustive: never = e
       return String(_exhaustive)
@@ -177,7 +177,7 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
     button.setAttribute('aria-label', 'Rozbuduj: ' + def.name)
     button.style.marginTop = 'auto'
     button.addEventListener('click', () => {
-      ctx.onBuild(id)
+      ctx.onBuild(ctx.activeVillageId.value, id)
       update()
     })
 
@@ -193,23 +193,27 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
     bRefs[id] = { level, effect, bar, barFill, cost, maxed, costItems, button }
   }
 
-  /** Refresh every card from the live state (levels / effects / costs / buttons). */
+  /**
+   * Refresh every card from the ACTIVE village's economy. Read inside `update()`
+   * (not captured at build time) so switching the active village re-renders the
+   * cards against the newly selected village's buildings / resources.
+   */
   const update = (): void => {
-    const s = ctx.store.state
+    const v = ctx.store.state.villages[ctx.activeVillageId.value]
     for (const id of BUILDING_IDS) {
       const ref = bRefs[id]
       const def = BUILDINGS[id]
-      const level = s.buildings[id]
+      const level = v.buildings[id]
 
       ref.level.textContent = 'poz. ' + level + ' / ' + def.maxLevel
-      ref.effect.textContent = effectText(s, id)
+      ref.effect.textContent = effectText(v, id)
 
       const lvlPct = pct(def.maxLevel > 0 ? level / def.maxLevel : 0)
       ref.barFill.style.width = lvlPct + '%'
       ref.bar.setAttribute('aria-valuenow', String(level))
       ref.bar.setAttribute('aria-valuetext', 'poziom ' + level + ' z ' + def.maxLevel)
 
-      const { cost, affordable, maxed } = nextCostAffordable(s, id)
+      const { cost, affordable, maxed } = nextCostAffordable(v, id)
       ref.maxed.hidden = !maxed
       ref.cost.hidden = maxed
       ref.button.disabled = maxed || !affordable
@@ -221,7 +225,7 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
           // Shortfall cued THREE non-colour ways (WCAG 1.4.1): a CSS ⚠ glyph + bold
           // (.is-short), a hover title, and a visually-hidden text marker for AT —
           // never colour alone.
-          const short = s.resources[r].lt(cost[r])
+          const short = v.resources[r].lt(cost[r])
           ci.item.classList.toggle('is-short', short)
           ci.item.title = short ? RESOURCE_NAMES[r] + ': brak surowca' : ''
           ci.mark.textContent = short ? ' (brak)' : ''

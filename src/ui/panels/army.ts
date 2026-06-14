@@ -196,11 +196,12 @@ export function createArmyPanel(ctx: UiCtx): Panel {
     // hoverable so its reason tooltip / aria-live message actually reach the user;
     // the click handler stays a guarded no-op when recruitment is rejected.
     button.addEventListener('click', () => {
-      const cur = ctx.store.state
+      const villageId = ctx.activeVillageId.value
+      const v = ctx.store.state.villages[villageId]
       const count = readCount()
-      const verdict = canRecruit(cur, id, count)
+      const verdict = canRecruit(v, id, count)
       if (verdict.ok) {
-        ctx.onRecruit(id, count)
+        ctx.onRecruit(villageId, id, count)
         recMsg.textContent = 'Rozpoczęto szkolenie: ' + def.name + ' ×' + count + '.'
       } else {
         recMsg.textContent = verdict.reason ?? 'Nie można rekrutować.'
@@ -239,25 +240,25 @@ export function createArmyPanel(ctx: UiCtx): Panel {
 
   // ---- Reactivity ----------------------------------------------------------
   const update = (): void => {
-    const s = ctx.store.state
-    const unlocked = barracksUnlocked(s)
-    const usedPop = usedPopulation(s)
+    const v = ctx.store.state.villages[ctx.activeVillageId.value]
+    const unlocked = barracksUnlocked(v)
+    const usedPop = usedPopulation(v)
 
     status.textContent = unlocked
       ? 'Populacja: ' +
         formatInt(usedPop) +
         ' / ' +
-        formatInt(s.popCap) +
+        formatInt(v.popCap) +
         ' • wolne: ' +
-        formatInt(freePopulation(s))
+        formatInt(freePopulation(v))
       : 'Zbuduj Koszary (poziom 1), aby rozpocząć rekrutację.'
 
-    setBar(popBar, s.popCap.gt(0) ? pctOf(usedPop.div(s.popCap).mul(100).toNumber()) : 0)
+    setBar(popBar, v.popCap.gt(0) ? pctOf(usedPop.div(v.popCap).mul(100).toNumber()) : 0)
 
-    const speedMult = recruitSpeedMult(s)
+    const speedMult = recruitSpeedMult(v)
     for (const id of UNIT_IDS) {
       const ref = cards[id]
-      ref.owned.textContent = 'masz: ' + formatInt(s.units[id])
+      ref.owned.textContent = 'masz: ' + formatInt(v.units[id])
       ref.time.textContent = 'Czas: ' + formatTime(UNITS[id].recruitSeconds * speedMult) + '/szt.'
 
       // Cost + shortfall track the *typed* count (the same count the button
@@ -269,7 +270,7 @@ export function createArmyPanel(ctx: UiCtx): Panel {
       for (const r of RESOURCE_IDS) {
         const ci = ref.costItems[r]
         ci.val.textContent = formatInt(total[r])
-        const short = s.resources[r].lt(total[r])
+        const short = v.resources[r].lt(total[r])
         ci.item.classList.toggle('is-short', short)
         ci.item.title = short ? RESOURCE_NAMES[r] + ': brak surowca' : ''
         ci.mark.textContent = short ? ' (brak)' : ''
@@ -277,7 +278,7 @@ export function createArmyPanel(ctx: UiCtx): Panel {
 
       // Button reflects canRecruit for the SAME typed count; the reason becomes
       // the tooltip + aria cue. Steppers/input are hard-locked only with no barracks.
-      const verdict = canRecruit(s, id, count)
+      const verdict = canRecruit(v, id, count)
       ref.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
       ref.button.title = verdict.ok ? '' : (verdict.reason ?? '')
       ref.input.disabled = !unlocked
@@ -287,17 +288,17 @@ export function createArmyPanel(ctx: UiCtx): Panel {
     // Queue: rebuild only when its signature changes (small + bounded), so the
     // steady-state path stays allocation-free. The head order shows the live
     // countdown to the NEXT unit; the rest are just listed.
-    const sig = s.recruitQueue
+    const sig = v.recruitQueue
       .map((o) => o.unitId + ':' + o.count + ':' + Math.ceil(o.remaining))
       .join('|')
     if (sig !== lastQueueSig) {
       lastQueueSig = sig
       queueList.textContent = ''
-      if (s.recruitQueue.length === 0) {
+      if (v.recruitQueue.length === 0) {
         queueList.appendChild(h('li', 'queue-empty muted', 'Kolejka pusta.'))
       } else {
-        for (let i = 0; i < s.recruitQueue.length; i++) {
-          const o = s.recruitQueue[i]
+        for (let i = 0; i < v.recruitQueue.length; i++) {
+          const o = v.recruitQueue[i]
           const li = h('li', i === 0 ? 'queue-item is-active' : 'queue-item')
           li.appendChild(h('span', 'queue-name', UNITS[o.unitId].name + ' ×' + o.count))
           const eta = i === 0 ? 'następny za ' + formatTime(o.remaining) : 'w kolejce'

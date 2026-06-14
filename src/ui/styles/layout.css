@@ -188,6 +188,78 @@ html {
   height: 8px;
 }
 
+/* ---- Przełącznik wiosek (aktywna wioska dla HUD-u i wszystkich paneli) --- */
+/* HUD i aktywna zakładka ZAWSZE odzwierciedlają jedną wioskę; ten przełącznik
+ * wybiera którą. Przy jednej wiosce degraduje się do etykiety z nazwą
+ * (.village-current); przy wielu — radiogroup „pigułek". */
+.hud-villages {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.village-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+/* Nazwa jedynej wioski (tryb pojedynczy — brak przełącznika). */
+.village-current {
+  font-family: var(--font-display);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+
+/* Nazwa AKTYWNEJ wioski przy liczniku (tryb wielu wiosek) — jawnie przypisuje
+ * liczby HUD-u i treść paneli do konkretnej wioski. Pusta przy jednej wiosce. */
+.hud-active-village {
+  font-family: var(--font-display);
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+
+/* Pigułka wyboru wioski. Cel dotykowy 44px; nie kurczy się ani nie zawija
+ * (przewija się poziomo na wąskich ekranach — patrz blok responsywny). */
+.village-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: var(--space-1) var(--space-3);
+  color: var(--muted);
+  background-color: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.village-btn:hover {
+  color: var(--text);
+  background-color: var(--panel-2);
+  border-color: var(--accent);
+}
+
+/* Aktywna wioska wyróżniona NIE tylko kolorem (WCAG 1.4.1): wypełniona złota
+ * pigułka vs obrysowana przezroczysta + pogrubienie + znacznik ✓ (FE0E wymusza
+ * wariant tekstowy zamiast emoji) — spójnie z konwencją .tab/.cost-item. */
+.village-btn.is-active {
+  color: var(--bg);
+  background-color: var(--accent);
+  border-color: var(--accent);
+  font-weight: var(--weight-bold);
+}
+
+.village-btn.is-active::before {
+  content: '\2713\FE0E\00A0';
+}
+
 /* ============================================================================
  * b) PASEK ZAKŁADEK (tablist)
  * ========================================================================== */
@@ -359,6 +431,25 @@ html {
 
   .hud-bar {
     display: none;
+  }
+
+  /* Lista wiosek (jak tablist): przy wielu wioskach (M2.3) zamiast zawijać i
+   * piętrzyć sticky HUD, przewija się POZIOMO. Cel dotykowy 44px zachowany. */
+  .village-switch {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .village-switch::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .village-switch::-webkit-scrollbar-thumb {
+    background-color: var(--border);
+    border-radius: var(--radius-pill);
   }
 }
 

@@ -9,15 +9,21 @@ import { UNIT_IDS, type UnitId } from '../content/units'
  * The single source of truth. Everything the simulation needs lives here so it
  * can be serialized, migrated and replayed deterministically.
  *
- * M0 is a minimal-but-live vertical slice: three resources accrue over time so
- * the deployed page is visibly a running game. M1 expands this into the full
- * economy, buildings and units — all added as data, not new state shapes.
+ * Since M2.1 the run is multi-village: each {@link Village} owns its own economy
+ * (the nine per-village fields below), and {@link GameState} holds the map of
+ * villages plus a stable {@link GameState.villageOrder} that fixes iteration and
+ * display order. New villages are added as data via {@link createVillage} — no new
+ * state shapes. The battle log stays GLOBAL (one rolling feed across all
+ * villages); every report carries the {@link BattleReport.villageId} it came from.
  */
 
 export type ResourceId = 'wood' | 'clay' | 'iron'
 export const RESOURCE_IDS: readonly ResourceId[] = ['wood', 'clay', 'iron']
 
 export type ResourceMap = Record<ResourceId, Decimal>
+
+/** Stable per-village identifier (`'v0'`, `'v1'`, …). See {@link nextVillageId}. */
+export type VillageId = string
 
 /**
  * One queued training order. `count` units of `unitId` remain; `remaining` is the
@@ -41,14 +47,15 @@ export interface RecruitOrder {
  * no runtime dependency on a system module: marches.ts imports this TYPE back, and
  * state.ts imports nothing from marches.ts, so there is no initialisation cycle.
  *
- * CONVENTION (documented once, used everywhere): `state.units` holds ALL living
- * owned units — both at home AND currently away on a march. A march's `units` is
- * the dispatched subset (still counted in `state.units`, so population/upkeep stays
- * honest and a march can never let you over-recruit). "Units at home" is therefore
- * a DERIVED quantity: `stationedUnits = state.units − Σ march.units` (see
- * marches.ts). Casualties are subtracted from `state.units` at the moment they
- * occur (battle resolution / a lost raid), never on dispatch. `units` counts are
- * plain integers (like the roster); `loot` is on Decimal (the economy rule).
+ * CONVENTION (documented once, used everywhere): `village.units` holds ALL living
+ * owned units of that village — both at home AND currently away on a march. A
+ * march's `units` is the dispatched subset (still counted in `village.units`, so
+ * population/upkeep stays honest and a march can never let you over-recruit).
+ * "Units at home" is therefore a DERIVED quantity:
+ * `stationedUnits = village.units − Σ march.units` (see marches.ts). Casualties are
+ * subtracted from `village.units` at the moment they occur (battle resolution / a
+ * lost raid), never on dispatch. `units` counts are plain integers (like the
+ * roster); `loot` is on Decimal (the economy rule).
  */
 export interface March {
   /** Barbarian camp tier this army is attacking. */
@@ -67,16 +74,24 @@ export interface March {
  * One entry in the rolling battle log (last ~20 events). Plain JSON only — loot is
  * pre-summed to a decimal STRING, never a live Decimal — so the log serializes and
  * round-trips without any Decimal tagging. `won` is always from the PLAYER's point
- * of view; `losses` is the total number of own units lost in the event.
+ * of view; `losses` is the total number of own units lost in the event; `villageId`
+ * records WHICH village the report belongs to (the log is global since M2.1).
  */
 export type BattleReport =
-  | { kind: 'attack'; targetLevel: number; won: boolean; lootSum: string; losses: number }
-  | { kind: 'raid'; won: boolean; looted: string; losses: number }
+  | {
+      kind: 'attack'
+      villageId: VillageId
+      targetLevel: number
+      won: boolean
+      lootSum: string
+      losses: number
+    }
+  | { kind: 'raid'; villageId: VillageId; won: boolean; looted: string; losses: number }
 
 /**
  * Base seconds between incoming barbarian raids. Owned here (not in raids.ts) so
- * createInitialState and the save migration can seed `raidTimer` without importing
- * a system module (which would form a cycle); raids.ts imports this constant the
+ * createVillage and the save migration can seed `raidTimer` without importing a
+ * system module (which would form a cycle); raids.ts imports this constant the
  * other way for re-arming. Generous (15 min) so a fresh village has breathing room
  * and the recruitment unit tests — which simulate well under this span — never see
  * a raid perturb their unit counts. Balance knob (the raid "interwał"): tuned up
@@ -84,6 +99,65 @@ export type BattleReport =
  * leaves the standing army no room to accumulate — see CHANGELOG "Balance".
  */
 export const RAID_BASE_INTERVAL = 900
+
+/**
+ * One village: a self-contained economy. Holds exactly the nine fields every
+ * RNG-free system reads/writes (resources, production, storageCap, popCap,
+ * buildings, units, recruitQueue, marches, raidTimer) plus an id and a display
+ * name. Systems take a `Village` (not the whole `GameState`); the global battle
+ * log is threaded in explicitly where combat needs it.
+ */
+export interface Village {
+  /** Stable id (`'v0'`, `'v1'`, …); matches the key under {@link GameState.villages}. */
+  id: VillageId
+  /** Human-facing display name (the capital starts as "Stolica"). */
+  name: string
+
+  resources: ResourceMap
+  /**
+   * Production per second, DERIVED from buildings and cached here so the hot tick
+   * (simulate) reads a plain field instead of recomputing every step. On Decimal
+   * (not number) so it can compound with tree/prestige multipliers far past 2^53.
+   * Recompute after any change to `buildings`.
+   */
+  production: Record<ResourceId, Decimal>
+  /** Storage cap, DERIVED from buildings (warehouse). Cached. */
+  storageCap: Decimal
+  /** Population cap, DERIVED from buildings (farm). Cached; unit upkeep budget. */
+  popCap: Decimal
+  /**
+   * Owned level per building (0..maxLevel). The authoritative economy input:
+   * production / storageCap / popCap are DERIVED from these levels by
+   * {@link recomputeVillageDerived}.
+   */
+  buildings: Record<BuildingId, number>
+  /**
+   * Trained, idle units by id. Plain integer counts (bounded by popCap), not
+   * Decimal — see {@link RecruitOrder}. The authoritative roster: a unit becomes a
+   * count here only once its training order completes.
+   */
+  units: Record<UnitId, number>
+  /**
+   * FIFO training queue. The head order trains first; {@link RecruitOrder.count}
+   * and `remaining` are advanced by the recruitment system every tick (online and
+   * offline alike), so an order popping mid-tick is byte-identical across replays.
+   */
+  recruitQueue: RecruitOrder[]
+  /**
+   * Armies currently in transit (outbound to a camp or returning with loot).
+   * Advanced on the SAME fixed tick grid as recruitment (see tick.ts) so combat
+   * timing is identical online / offline / in the sim. See {@link March} for the
+   * "village.units = all owned" convention.
+   */
+  marches: March[]
+  /**
+   * Seconds until the next incoming raid. Counts down only while the village is
+   * "worth raiding" (it has grown past its starting footprint — see raids.ts), so
+   * a brand-new hamlet is left alone. Re-armed to {@link RAID_BASE_INTERVAL} after
+   * each raid resolves.
+   */
+  raidTimer: number
+}
 
 export interface GameState {
   /** Save schema version — drives migrations. */
@@ -97,53 +171,20 @@ export interface GameState {
   /** Epoch ms of the last simulated moment — basis for offline progress. */
   lastSeen: number
 
-  resources: ResourceMap
+  /** Every owned village, keyed by id. Each entry's `id` equals its key. */
+  villages: Record<VillageId, Village>
   /**
-   * Owned level per building (0..maxLevel). The authoritative economy input: all
-   * the fields below are DERIVED from these levels by {@link recomputeDerived}.
+   * Stable iteration + display order of village ids. Always non-empty and in
+   * exact correspondence with the keys of `villages`. The tick iterates this
+   * order so multi-village simulation stays deterministic.
    */
-  buildings: Record<BuildingId, number>
+  villageOrder: VillageId[]
   /**
-   * Production per second, DERIVED from buildings and cached here so the hot tick
-   * (simulate) reads a plain field instead of recomputing every step. On Decimal
-   * (not number) so it can compound with tree/prestige multipliers far past 2^53.
-   * Recompute after any change to `buildings`.
+   * GLOBAL rolling log of the last ~20 battles (attacks + raids) across ALL
+   * villages, newest last. Each report carries the village it came from via
+   * {@link BattleReport.villageId}.
    */
-  production: Record<ResourceId, Decimal>
-  /** Shared storage cap, DERIVED from buildings (warehouse). Cached. */
-  storageCap: Decimal
-  /** Population cap, DERIVED from buildings (farm). Cached; unit upkeep budget. */
-  popCap: Decimal
-
-  /**
-   * Trained, idle units by id. Plain integer counts (bounded by popCap), not
-   * Decimal — see {@link RecruitOrder}. The authoritative roster: a unit becomes a
-   * count here only once its training order completes.
-   */
-  units: Record<UnitId, number>
-  /**
-   * FIFO training queue. The head order trains first; {@link RecruitOrder.count}
-   * and `remaining` are advanced by the recruitment system every tick (online and
-   * offline alike), so an order popping mid-tick is byte-identical across replays.
-   */
-  recruitQueue: RecruitOrder[]
-
-  /**
-   * Armies currently in transit (outbound to a camp or returning with loot).
-   * Advanced on the SAME fixed tick grid as recruitment (see tick.ts) so combat
-   * timing is identical online / offline / in the sim. See {@link March} for the
-   * "state.units = all owned" convention.
-   */
-  marches: March[]
-  /** Rolling log of the last ~20 battles (attacks + raids), newest last. */
   battleLog: BattleReport[]
-  /**
-   * Seconds until the next incoming raid. Counts down only while the village is
-   * "worth raiding" (it has grown past its starting footprint — see raids.ts), so
-   * a brand-new hamlet is left alone. Re-armed to {@link RAID_BASE_INTERVAL} after
-   * each raid resolves.
-   */
-  raidTimer: number
 }
 
 /** Base storage cap before any warehouse levels. Storage scales with warehouse. */
@@ -152,23 +193,23 @@ const BASE_STORAGE_CAP = D(1000)
 const BASE_POP_CAP = D(10)
 
 /**
- * Recompute every derived field (production / storageCap / popCap) from the
- * current building levels, mutating `state` in place. Pure w.r.t. I/O and the
- * single place that knows how building effects roll up — call it after ANY change
- * to `state.buildings`, and once at state creation / save import so the cached
- * fields are always consistent with the levels.
+ * Recompute one village's derived fields (production / storageCap / popCap) from
+ * its current building levels, mutating `v` in place. The single place that knows
+ * how building effects roll up — call it after ANY change to `v.buildings`, and
+ * once at village creation / save import so the cached fields are always
+ * consistent with the levels.
  *
  * `cost_reduction` effects are intentionally NOT applied here: they affect build
  * costs and are consumed by buildingCost (src/systems/buildings.ts), not the
  * tick. The switch is exhaustive over BuildingEffect['kind'].
  */
-export function recomputeDerived(state: GameState): void {
+export function recomputeVillageDerived(v: Village): void {
   const production: Record<ResourceId, Decimal> = { wood: D(0), clay: D(0), iron: D(0) }
   let storageCap = BASE_STORAGE_CAP
   let popCap = BASE_POP_CAP
 
   for (const id of BUILDING_IDS) {
-    const level = state.buildings[id]
+    const level = v.buildings[id]
     if (!(level > 0)) continue
     const effect = BUILDINGS[id].effect
     switch (effect.kind) {
@@ -190,13 +231,22 @@ export function recomputeDerived(state: GameState): void {
     }
   }
 
-  state.production = production
-  state.storageCap = storageCap
-  state.popCap = popCap
+  v.production = production
+  v.storageCap = storageCap
+  v.popCap = popCap
 }
 
 /**
- * Building levels a fresh run starts with (also reused by save migration v1->v2).
+ * Recompute the derived fields of EVERY village, in {@link GameState.villageOrder}.
+ * Name kept (save.ts imports it) — call it after a bulk change or at save import so
+ * all cached fields are consistent with the building levels they derive from.
+ */
+export function recomputeDerived(state: GameState): void {
+  for (const id of state.villageOrder) recomputeVillageDerived(state.villages[id])
+}
+
+/**
+ * Building levels a fresh village starts with (also reused by save migration).
  * DERIVED from each building's `initialLevel` data field so adding a building is a
  * single edit to src/content/buildings.ts — no engine change here, and migrate()
  * picks the new key up automatically because it spreads this map.
@@ -206,38 +256,65 @@ export const INITIAL_BUILDINGS = Object.fromEntries(
 ) as Record<BuildingId, number>
 
 /**
- * Unit roster a fresh run starts with: every unit at 0. DERIVED from UNIT_IDS so
- * adding a unit is a single edit to src/content/units.ts (no engine change here),
- * and the save migration reuses this map to seed the field on old saves.
+ * Unit roster a fresh village starts with: every unit at 0. DERIVED from UNIT_IDS
+ * so adding a unit is a single edit to src/content/units.ts (no engine change
+ * here), and the save migration reuses this map to seed the field on old saves.
  */
 export const INITIAL_UNITS = Object.fromEntries(
   UNIT_IDS.map((id) => [id, 0]),
 ) as Record<UnitId, number>
 
+/**
+ * Build a fresh, empty village with the starting building/unit footprint, the
+ * starter resource pool and an armed raid clock. Derived fields are reconciled
+ * with the starting buildings before returning (so production / storageCap /
+ * popCap are immediately consistent).
+ */
+export function createVillage(id: VillageId, name: string): Village {
+  const v: Village = {
+    id,
+    name,
+    resources: { wood: D(50), clay: D(50), iron: D(50) },
+    // Derived fields are filled by recomputeVillageDerived below; seeded to zero so
+    // the object has its final shape (and key order) before the recompute overwrites.
+    production: { wood: D(0), clay: D(0), iron: D(0) },
+    storageCap: D(0),
+    popCap: D(0),
+    buildings: { ...INITIAL_BUILDINGS },
+    units: { ...INITIAL_UNITS },
+    recruitQueue: [],
+    marches: [],
+    raidTimer: RAID_BASE_INTERVAL,
+  }
+  // Make production / storageCap / popCap consistent with the starting buildings.
+  // With the initial level-1 economy this reproduces M0's base rates exactly.
+  recomputeVillageDerived(v)
+  return v
+}
+
 export function createInitialState(seed: string, now: number): GameState {
-  const state: GameState = {
+  const capital = createVillage('v0', 'Stolica')
+  return {
     version: SAVE_VERSION,
     seed,
     rngState: RNG.fromString(seed).getState(),
     createdAt: now,
     lastSeen: now,
-    resources: { wood: D(50), clay: D(50), iron: D(50) },
-    buildings: { ...INITIAL_BUILDINGS },
-    // Derived fields are filled by recomputeDerived below; seeded to zero so the
-    // object has its final shape (and key order) before the recompute overwrites.
-    production: { wood: D(0), clay: D(0), iron: D(0) },
-    storageCap: D(0),
-    popCap: D(0),
-    units: { ...INITIAL_UNITS },
-    recruitQueue: [],
-    marches: [],
+    villages: { v0: capital },
+    villageOrder: ['v0'],
     battleLog: [],
-    raidTimer: RAID_BASE_INTERVAL,
   }
-  // Make production / storageCap / popCap consistent with the starting buildings.
-  // With the initial level-1 economy this reproduces M0's base rates exactly.
-  recomputeDerived(state)
-  return state
+}
+
+/**
+ * First unused village id of the form `'v'+N` (lowest N with no entry in
+ * `villages`). Used when founding/capturing a village (M2.3) so ids stay stable
+ * and never collide with an existing one.
+ */
+export function nextVillageId(state: GameState): VillageId {
+  let n = 0
+  while (state.villages['v' + n] !== undefined) n++
+  return 'v' + n
 }
 
 /**

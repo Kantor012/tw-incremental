@@ -3,11 +3,17 @@ import {
   createInitialState,
   RESOURCE_IDS,
   type GameState,
+  type Village,
   type BattleReport,
 } from '../src/engine/state'
 import { BUILDING_IDS } from '../src/content/buildings'
 import { UNIT_IDS, type UnitId } from '../src/content/units'
 import { usedPopulation } from '../src/systems/recruitment'
+
+/** The first (capital) village — the one the bot drives. */
+function firstVillage(state: GameState): Village {
+  return state.villages[state.villageOrder[0]]
+}
 
 /**
  * Balance metrics captured at the end of a run. Decimals are stored as their
@@ -17,17 +23,20 @@ export interface RunMetrics {
   seed: string
   ticks: number
   simSeconds: number
-  /** Final resource amounts, keyed by resource id, as exact decimal strings. */
+  /**
+   * Final resource amounts, keyed by resource id, as exact decimal strings —
+   * SUMMED across every village (the run-wide economy total). One village in M2.1.
+   */
   resources: Record<string, string>
   /** How many building upgrades the bot purchased over the whole run. */
   upgradesBought: number
-  /** Total production/second at run start (all buildings at their initial level). */
+  /** Total production/second at run start, summed across all villages (initial levels). */
   productionStart: string
-  /** Total production/second at run end — compare to start for the growth target. */
+  /** Total production/second at run end (summed across villages) — vs start for growth. */
   productionEnd: string
-  /** Final owned level per building (source-of-truth economy input). */
+  /** Final owned level per building for the CAPITAL (first village; levels are per-village). */
   buildings: Record<string, number>
-  /** Final TRAINED unit count per id (state.units — completed orders only). */
+  /** Final TRAINED unit count per id, SUMMED across villages (completed orders only). */
   units: Record<string, number>
   /**
    * Units the bot ORDERED over the run, per id — the recruitment-sink throughput.
@@ -37,9 +46,9 @@ export interface RunMetrics {
   unitsRecruited: Record<string, number>
   /** Sum of {@link unitsRecruited} across all unit types. */
   unitsRecruitedTotal: number
-  /** Population committed at run end (trained + queued), exact decimal string. */
+  /** Population committed at run end in the CAPITAL (trained + queued), exact decimal string. */
   usedPopulation: string
-  /** Population cap at run end (farm-derived), exact decimal string. */
+  /** Population cap at run end in the CAPITAL (farm-derived), exact decimal string. */
   popCap: string
   /**
    * First SAMPLED tick at which {@link contentConsumed} held (all buildings maxed
@@ -172,10 +181,13 @@ export function applyReport(c: CombatStats, r: BattleReport): void {
   }
 }
 
-/** Total production/second across all resources (Decimal, exact). */
+/** Total production/second across all resources of EVERY village (Decimal, exact). */
 export function totalProduction(state: GameState): Decimal {
   let total = ZERO
-  for (const id of RESOURCE_IDS) total = total.add(state.production[id])
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    for (const r of RESOURCE_IDS) total = total.add(v.production[r])
+  }
   return total
 }
 
@@ -187,23 +199,36 @@ export function collect(
   state: GameState,
   stats: RunStats,
 ): RunMetrics {
+  const first = firstVillage(state)
+
+  // Resources: SUMMED across every village — the run-wide economy total (additive).
+  // With the single M2.1 village this is just the capital's pool.
   const resources: Record<string, string> = {}
   for (const id of RESOURCE_IDS) {
-    resources[id] = state.resources[id].toString()
+    let sum = ZERO
+    for (const vid of state.villageOrder) sum = sum.add(state.villages[vid].resources[id])
+    resources[id] = sum.toString()
   }
 
+  // Building levels: reported for the CAPITAL (first village) — a building level is
+  // per-village structural state, not additive. The bot drives this village, so its
+  // levels carry the M1.1/M1.2 progression targets (e.g. barracks-built).
   const buildings: Record<string, number> = {}
   for (const id of BUILDING_IDS) {
-    buildings[id] = state.buildings[id]
+    buildings[id] = first.buildings[id]
   }
 
+  // Units: SUMMED across villages (the total standing army); unitsRecruited is the
+  // run-level order counter the bot accumulated (it only recruits in the capital).
   const units: Record<string, number> = {}
   const unitsRecruited: Record<string, number> = {}
   let unitsRecruitedTotal = 0
   let finalArmyTotal = 0
   for (const id of UNIT_IDS) {
-    units[id] = state.units[id]
-    finalArmyTotal += state.units[id]
+    let owned = 0
+    for (const vid of state.villageOrder) owned += state.villages[vid].units[id]
+    units[id] = owned
+    finalArmyTotal += owned
     unitsRecruited[id] = stats.unitsRecruited[id]
     unitsRecruitedTotal += stats.unitsRecruited[id]
   }
@@ -224,8 +249,8 @@ export function collect(
     units,
     unitsRecruited,
     unitsRecruitedTotal,
-    usedPopulation: usedPopulation(state).toString(),
-    popCap: state.popCap.toString(),
+    usedPopulation: usedPopulation(first).toString(),
+    popCap: first.popCap.toString(),
     contentFrontierTick: stats.contentFrontierTick,
     windowsWithProgress: stats.windowsWithProgress,
     windowCount: stats.windowCount,

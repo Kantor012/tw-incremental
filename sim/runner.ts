@@ -82,25 +82,32 @@ function emptyUnitCounts(): Record<UnitId, number> {
  * at the top of a tick — then `simulate` accrues production and advances training.
  * Ordered units are accumulated per type into `recruited`; the count of builds and
  * the count of ordered units are returned so callers can track progress.
+ *
+ * Since M2.1 the bot drives the FIRST village (`state.villages[state.villageOrder[0]]`):
+ * build / recruit / sendAttack all operate on that one village's economy, and the
+ * global battle log (`state.battleLog`) is threaded into sendAttack. `simulate` then
+ * advances EVERY village on the fixed grid (see tick.ts). With the single M2.1
+ * village this reproduces the old single-village run exactly.
  */
 function step(state: GameState, dt: number, recruited: Record<UnitId, number>): StepResult {
   let built = 0
   let rec = 0
   let attacked = 0
   let actions = 0
+  const v = state.villages[state.villageOrder[0]]
   while (actions < MAX_ACTIONS_PER_STEP) {
-    const action = chooseAction(state)
+    const action = chooseAction(v)
     if (action === null) break
     if (action.kind === 'build') {
-      if (!build(state, action.id)) break
+      if (!build(v, action.id)) break
       built++
     } else if (action.kind === 'recruit') {
-      if (!recruit(state, action.unitId, action.count)) break
+      if (!recruit(v, action.unitId, action.count)) break
       recruited[action.unitId] += action.count
       rec += action.count
     } else {
       // attack: dispatch the home army at a barbarian camp (loot source + unit sink).
-      if (!sendAttack(state, action.targetLevel, action.units)) break
+      if (!sendAttack(v, state.battleLog, action.targetLevel, action.units)) break
       attacked++
     }
     actions++

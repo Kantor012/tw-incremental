@@ -1,4 +1,5 @@
-import type { GameStore } from '../engine/state'
+import type { GameStore, VillageId } from '../engine/state'
+import type { Signal } from '../engine/store'
 import type { GameBus } from '../engine/eventbus'
 import type { BuildingId } from '../content/buildings'
 import type { UnitId } from '../content/units'
@@ -26,16 +27,23 @@ export interface UiCtx {
   store: GameStore
   /** Typed pub/sub bus for cross-system signals (save/load/tick/...). */
   bus: GameBus
-  /** Upgrade one building level; returns true on success (spent + level++). */
-  onBuild: (id: BuildingId) => boolean
-  /** Queue `count` of a unit for training; returns true on success (spent + enqueued). */
-  onRecruit: (id: UnitId, count: number) => boolean
   /**
-   * Dispatch an army at a barbarian camp of `targetLevel`; returns true on a
-   * successful send (the march is queued and the dispatched units leave the home
-   * garrison until they return).
+   * Currently selected village. The village selector (layout.ts) WRITES it; panels
+   * and the HUD READ the active village as
+   * `store.state.villages[activeVillageId.value]`. A signal so a selection change
+   * re-renders the active tab without rebuilding the shell.
    */
-  onAttack: (targetLevel: number, units: Record<UnitId, number>) => boolean
+  activeVillageId: Signal<VillageId>
+  /** Upgrade one building level in `villageId`; returns true on success (spent + level++). */
+  onBuild: (villageId: VillageId, id: BuildingId) => boolean
+  /** Queue `count` of a unit for training in `villageId`; returns true on success (spent + enqueued). */
+  onRecruit: (villageId: VillageId, id: UnitId, count: number) => boolean
+  /**
+   * Dispatch an army from `villageId` at a barbarian camp of `targetLevel`; returns
+   * true on a successful send (the march is queued and the dispatched units leave
+   * the home garrison until they return).
+   */
+  onAttack: (villageId: VillageId, targetLevel: number, units: Record<UnitId, number>) => boolean
   /** Serialize the current run to a save code string. */
   onExport: () => string
   /** Load a save code; returns true when it parsed and was applied. */

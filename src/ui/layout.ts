@@ -1,5 +1,5 @@
 import { effect } from '../engine/store'
-import { RESOURCE_IDS, type ResourceId } from '../engine/state'
+import { RESOURCE_IDS, type ResourceId, type VillageId } from '../engine/state'
 import { formatNumber, formatInt, formatRate, formatTime } from '../engine/format'
 import { usedPopulation } from '../systems/recruitment'
 import type { UiCtx, Panel } from './types'
@@ -120,6 +120,148 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   brand.appendChild(brandText)
   hudInner.appendChild(brand)
 
+  // ---- Village switcher (picks the village the HUD + active panel reflect) --
+  // The HUD and the active tab always reflect exactly ONE village; this control
+  // selects which by WRITING ctx.activeVillageId (panels/HUD read it back). Built
+  // once: its buttons are reconciled only when the village SET (ids/names) changes,
+  // and selecting a village just re-flags the active button — so the hot per-frame
+  // path never rebuilds DOM. At a single village it degrades to a plain name label
+  // (no switcher), yet the same code scales to N villages the instant villageOrder
+  // grows (M2.3). A small "Wioski: N" indicator sits beside it.
+  const villageCluster = h('div', 'hud-villages')
+  const villageList = h('div', 'village-switch')
+  // Panel-level attribution: in the multi-village group the HUD numbers AND every
+  // panel reflect the ACTIVE village, yet the panels never repeat its name. This
+  // small persistent label (written in updateVillageActive) names the active
+  // village beside the count, so a user scrolled deep in a tab still knows which
+  // village they operate on. Empty at a single village — .village-current already
+  // carries the lone name there.
+  const villageActiveName = h('span', 'hud-active-village')
+  const villageCount = h('span', 'hud-village-count muted')
+  villageCluster.appendChild(villageList)
+  villageCluster.appendChild(villageActiveName)
+  villageCluster.appendChild(villageCount)
+  hudInner.appendChild(villageCluster)
+
+  // Reconciliation state: a signature of the current village SET (rebuild buttons
+  // only when ids/names actually change), the per-village button cache, and whether
+  // we are in the multi-village (group) layout.
+  let villageSetSig = ''
+  let villageBtns: { id: VillageId; btn: HTMLButtonElement }[] = []
+  let villageIsGroup = false
+
+  /** Activate village `id` (no-op when already active). */
+  const selectVillage = (id: VillageId): void => {
+    if (ctx.activeVillageId.value !== id) ctx.activeVillageId.value = id
+  }
+
+  /**
+   * Rebuild the switcher's children IFF the set of villages changed. One village →
+   * a single static label; two or more → a labelled group of toggle buttons. Cheap
+   * to call every frame: early-returns when the set signature is unchanged.
+   */
+  const rebuildVillageSwitch = (): void => {
+    const s = ctx.store.state
+    const order = s.villageOrder
+    let sig = ''
+    for (const id of order) sig += id + ':' + (s.villages[id]?.name ?? '') + '|'
+    if (sig === villageSetSig) return
+    villageSetSig = sig
+
+    villageList.textContent = ''
+    villageBtns = []
+    villageCount.textContent = 'Wioski: ' + order.length
+
+    if (order.length <= 1) {
+      // Single village: a plain, non-interactive name label (no switcher needed).
+      villageIsGroup = false
+      villageList.removeAttribute('role')
+      villageList.removeAttribute('aria-label')
+      // The lone name lives in .village-current; keep the attribution label empty
+      // so it is not duplicated.
+      villageActiveName.textContent = ''
+      const only = order[0]
+      const label = h('span', 'village-current')
+      label.textContent = only ? (s.villages[only]?.name ?? '—') : '—'
+      villageList.appendChild(label)
+      return
+    }
+
+    // Multiple villages: a single-select RADIOGROUP (WAI-ARIA APG). Each option is
+    // a role=radio button with a roving tabindex; arrow keys move focus AND select
+    // (selection-follows-focus — the radiogroup convention) via the keydown handler
+    // below. aria-checked + the .is-active class (set in updateVillageActive) carry
+    // the selection as more than colour (WCAG 1.4.1). aria-setsize/-posinset expose
+    // the "N-ta z N" position to assistive tech.
+    villageIsGroup = true
+    villageList.setAttribute('role', 'radiogroup')
+    villageList.setAttribute('aria-label', 'Wybór aktywnej wioski')
+    for (let i = 0; i < order.length; i++) {
+      const id = order[i]
+      const btn = h('button', 'village-btn')
+      btn.type = 'button'
+      btn.setAttribute('role', 'radio')
+      btn.setAttribute('aria-setsize', order.length.toString())
+      btn.setAttribute('aria-posinset', (i + 1).toString())
+      btn.textContent = s.villages[id].name
+      btn.addEventListener('click', () => selectVillage(id))
+      villageList.appendChild(btn)
+      villageBtns.push({ id, btn })
+    }
+  }
+
+  /**
+   * Flag the active village on the cached buttons (aria-checked + the .is-active
+   * class + roving tabindex) and name it in the panel-attribution label. No DOM
+   * rebuild — only attribute/text writes — so it is safe on every frame and on
+   * every selection change.
+   */
+  const updateVillageActive = (): void => {
+    if (!villageIsGroup) return
+    const s = ctx.store.state
+    const active = ctx.activeVillageId.value
+    let activeName = ''
+    for (const { id, btn } of villageBtns) {
+      const on = id === active
+      btn.setAttribute('aria-checked', on ? 'true' : 'false')
+      btn.classList.toggle('is-active', on)
+      btn.tabIndex = on ? 0 : -1
+      if (on) activeName = s.villages[id]?.name ?? ''
+    }
+    villageActiveName.textContent = activeName
+  }
+
+  // Keyboard navigation inside the radiogroup (roving tabindex, selection follows
+  // focus per ARIA APG) — like the tablist: arrows wrap, Home/End jump to the ends.
+  villageList.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (!villageIsGroup || villageBtns.length === 0) return
+    let idx = villageBtns.findIndex((b) => b.id === ctx.activeVillageId.value)
+    if (idx < 0) idx = 0
+    let next = -1
+    switch (e.key) {
+      case 'ArrowRight':
+      case 'ArrowDown':
+        next = (idx + 1) % villageBtns.length
+        break
+      case 'ArrowLeft':
+      case 'ArrowUp':
+        next = (idx - 1 + villageBtns.length) % villageBtns.length
+        break
+      case 'Home':
+        next = 0
+        break
+      case 'End':
+        next = villageBtns.length - 1
+        break
+      default:
+        return
+    }
+    e.preventDefault()
+    const target = villageBtns[next]
+    selectVillage(target.id)
+    target.btn.focus()
+  })
+
   // Resource cluster: wood / clay / iron — icon + value + rate.
   const resCluster = h('div', 'hud-resources')
   const hudRes = {} as Record<ResourceId, HudResRefs>
@@ -153,27 +295,33 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   hud.appendChild(hudInner)
   shell.appendChild(hud)
 
-  /** Refresh every HUD node from the live state. Runs on EVERY store revision. */
+  /**
+   * Refresh every HUD node from the ACTIVE village. Runs on EVERY store revision
+   * AND on every village selection (the effect tracks both signals). Falls back to
+   * the first village if the selection is momentarily stale (e.g. a just-removed
+   * village before main.ts re-seeds the signal) so the HUD never reads `undefined`.
+   */
   const updateHud = (): void => {
     const s = ctx.store.state
+    const v = s.villages[ctx.activeVillageId.value] ?? s.villages[s.villageOrder[0]]
     // Resource amounts + rates; track the fullest resource for the storage bar
     // (storage cap is per-resource, so the closest-to-capping resource is the
     // binding "how full is the magazyn" signal — when it caps, production wastes).
-    let fullest = s.resources[RESOURCE_IDS[0]]
+    let fullest = v.resources[RESOURCE_IDS[0]]
     for (const id of RESOURCE_IDS) {
       const r = hudRes[id]
-      r.value.textContent = formatNumber(s.resources[id])
-      r.rate.textContent = formatRate(s.production[id])
-      if (s.resources[id].gt(fullest)) fullest = s.resources[id]
+      r.value.textContent = formatNumber(v.resources[id])
+      r.rate.textContent = formatRate(v.production[id])
+      if (v.resources[id].gt(fullest)) fullest = v.resources[id]
     }
 
-    const cap = s.storageCap
+    const cap = v.storageCap
     storageStat.val.textContent = formatNumber(fullest) + ' / ' + formatNumber(cap)
     setBar(storageStat.bar, cap.gt(0) ? pctOf(fullest.div(cap).mul(100).toNumber()) : 0)
 
-    const used = usedPopulation(s)
-    popStat.val.textContent = formatInt(used) + ' / ' + formatInt(s.popCap)
-    setBar(popStat.bar, s.popCap.gt(0) ? pctOf(used.div(s.popCap).mul(100).toNumber()) : 0)
+    const used = usedPopulation(v)
+    popStat.val.textContent = formatInt(used) + ' / ' + formatInt(v.popCap)
+    setBar(popStat.bar, v.popCap.gt(0) ? pctOf(used.div(v.popCap).mul(100).toNumber()) : 0)
   }
 
   // ---- b) Tab bar (tablist) + c) content area (tabpanels) ------------------
@@ -292,7 +440,14 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   // effect that refreshes the HUD + ONLY the active panel on every revision.
   selectTab(activeIndex, false)
   effect(() => {
+    // Track BOTH the store revision and the active-village selection: a tick OR a
+    // village switch refreshes the switcher, the HUD and the active panel. Reading
+    // activeVillageId here is what makes switching villages re-render the HUD + tab
+    // without rebuilding the shell.
     void ctx.store.rev.value
+    void ctx.activeVillageId.value
+    rebuildVillageSwitch()
+    updateVillageActive()
     updateHud()
     entries[activeIndex].panel.update()
   })

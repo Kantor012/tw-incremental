@@ -10,11 +10,18 @@ import { h, svg, svgIcon } from '../dom'
  * createElement / textContent (never innerHTML with data); the procedural SVG glyphs
  * come from {@link svg}/{@link svgIcon}, so the "zero external assets" rule holds.
  *
+ * Scope: the battle log is GLOBAL (one rolling window across every village), so the
+ * panel reads {@link UiCtx.store}.state.battleLog directly and is independent of the
+ * active village. Each report carries its origin via {@link BattleReport.villageId};
+ * once the run has more than one village, every card shows that origin name as a
+ * small extra cue (with a single capital it would be redundant, so it stays hidden).
+ *
  * Reactivity: the battle log is an append-mostly, bounded array, so update() guards
  * a full re-render behind a content SIGNATURE — the grid is rebuilt ONLY when the
- * log actually changes (a new battle, or the rolling window dropping its oldest),
- * never per frame. While the signature is unchanged, update() is a cheap no-op. This
- * matches the no-rebuild-per-frame discipline of the marches/queue lists.
+ * log actually changes (a new battle, the rolling window dropping its oldest, or the
+ * village-origin context appearing/changing), never per frame. While the signature
+ * is unchanged, update() is a cheap no-op. This matches the no-rebuild-per-frame
+ * discipline of the marches/queue lists.
  *
  * Accessibility (WCAG): a win/loss is NEVER signalled by colour alone — every card
  * carries a ✓ / ✗ glyph AND a Polish result word in its title (the coloured left
@@ -65,8 +72,14 @@ function chip(label: string, value: string): HTMLElement {
   return wrap
 }
 
-/** Build the single-event card (newest entries are appended first). */
-function reportCard(r: BattleReport): HTMLElement {
+/**
+ * Build the single-event card (newest entries are appended first). `villageName`
+ * is the resolved origin of the report ({@link BattleReport.villageId}); when
+ * non-null it is rendered as a small muted line above the result so a global log
+ * spanning many villages stays readable. It is passed `null` while the run has a
+ * single village (the lone origin would be redundant noise).
+ */
+function reportCard(r: BattleReport, villageName: string | null): HTMLElement {
   const won = r.won
   const li = h('li', 'report-item ' + (won ? 'report-win' : 'report-lose'))
 
@@ -85,6 +98,14 @@ function reportCard(r: BattleReport): HTMLElement {
   headText.style.display = 'flex'
   headText.style.flexDirection = 'column'
   headText.style.minWidth = '0'
+
+  // Origin village (only when the run spans more than one village) — a small,
+  // muted context line above the result; never the sole cue for anything.
+  if (villageName !== null) {
+    const origin = h('span', 'report-village muted', villageName)
+    origin.style.fontSize = 'var(--text-xs)'
+    headText.appendChild(origin)
+  }
 
   const mark = won ? '✓ ' : '✗ '
   const meta = h('div', 'report-meta')
@@ -122,19 +143,26 @@ function reportCard(r: BattleReport): HTMLElement {
 
 /**
  * Compact, order-sensitive signature of the battle log. Any change (a new entry,
- * or the rolling window dropping its oldest) flips this string and triggers exactly
- * one rebuild; an unchanged log leaves update() a no-op.
+ * the rolling window dropping its oldest, or the origin context appearing/changing)
+ * flips this string and triggers exactly one rebuild; an unchanged log leaves
+ * update() a no-op. `originOf` returns the rendered origin label for a report (or
+ * `null` when origins are hidden), so the signature tracks exactly what is drawn.
  */
-function logSignature(log: readonly BattleReport[]): string {
+function logSignature(
+  log: readonly BattleReport[],
+  originOf: (r: BattleReport) => string | null,
+): string {
   return (
     log.length +
     '#' +
     log
-      .map((r) =>
-        r.kind === 'attack'
-          ? 'a' + r.targetLevel + (r.won ? '1' : '0') + r.lootSum + r.losses
-          : 'r' + (r.won ? '1' : '0') + r.looted + r.losses,
-      )
+      .map((r) => {
+        const base =
+          r.kind === 'attack'
+            ? 'a' + r.targetLevel + (r.won ? '1' : '0') + r.lootSum + r.losses
+            : 'r' + (r.won ? '1' : '0') + r.looted + r.losses
+        return r.villageId + '~' + (originOf(r) ?? '') + '~' + base
+      })
       .join('|')
   )
 }
@@ -162,8 +190,17 @@ export function createReportsPanel(ctx: UiCtx): Panel {
   let lastSig = ''
 
   const update = (): void => {
-    const log = ctx.store.state.battleLog
-    const sig = logSignature(log)
+    const state = ctx.store.state
+    const log = state.battleLog
+    // Origins are shown only once the run spans more than one village (with a lone
+    // capital the single origin would be pure noise). When shown, resolve the name
+    // from the GLOBAL village map by the report's villageId; an unknown id yields
+    // null so the line is simply omitted rather than rendering a broken label.
+    const showOrigin = state.villageOrder.length > 1
+    const originOf = (r: BattleReport): string | null =>
+      showOrigin ? (state.villages[r.villageId]?.name ?? null) : null
+
+    const sig = logSignature(log, originOf)
     if (sig === lastSig) return
     lastSig = sig
 
@@ -180,7 +217,7 @@ export function createReportsPanel(ctx: UiCtx): Panel {
 
     // Newest first: iterate the log (oldest→newest, append order) in reverse.
     for (let i = log.length - 1; i >= 0; i--) {
-      list.appendChild(reportCard(log[i]))
+      list.appendChild(reportCard(log[i], originOf(log[i])))
     }
   }
 

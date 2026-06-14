@@ -2,7 +2,8 @@ import './ui/styles/tokens.css'
 import './ui/styles/base.css'
 import './ui/styles/layout.css'
 
-import { createInitialState, GameStore, type GameState } from './engine/state'
+import { createInitialState, GameStore, type GameState, type VillageId } from './engine/state'
+import { signal } from './engine/store'
 import {
   clearLocal,
   exportSave,
@@ -44,17 +45,28 @@ const store = new GameStore(state)
 const bus = new EventBus<GameEvents>()
 const loop = new GameLoop(store, bus)
 
+// Currently selected village. The selector (layout.ts) writes it; panels + HUD read
+// the active village as `store.state.villages[activeVillageId.value]`. Seeded to the
+// first village in the stable order (always non-empty — the capital `v0`).
+const activeVillageId = signal<VillageId>(store.state.villageOrder[0])
+
 const root = document.getElementById('app')
 if (!root) throw new Error('#app')
 
 mountApp(root, {
   store,
   bus,
+  activeVillageId,
   onExport: () => exportSave(store.state),
   onImport: (s) => {
     try {
       const ns = importSave(s)
       Object.assign(store.state, ns)
+      // The previously-selected village may not exist in the imported run; fall back
+      // to that save's first village so the active selection is always valid.
+      if (store.state.villages[activeVillageId.value] === undefined) {
+        activeVillageId.value = store.state.villageOrder[0]
+      }
       store.commit()
       saveToLocal(store.state)
       return true
@@ -66,31 +78,31 @@ mountApp(root, {
     clearLocal()
     location.reload()
   },
-  onBuild: (id) => {
-    const ok = build(store.state, id)
+  onBuild: (villageId, id) => {
+    const ok = build(store.state.villages[villageId], id)
     if (ok) {
       store.commit()
       saveToLocal(store.state)
     }
     return ok
   },
-  onRecruit: (id: UnitId, count: number) => {
-    const ok = recruit(store.state, id, count)
+  onRecruit: (villageId: VillageId, id: UnitId, count: number) => {
+    const ok = recruit(store.state.villages[villageId], id, count)
     if (ok) {
       store.commit()
       saveToLocal(store.state)
     }
     return ok
   },
-  onAttack: (targetLevel: number, units: Record<UnitId, number>) => {
-    const ok = sendAttack(store.state, targetLevel, units)
+  onAttack: (villageId: VillageId, targetLevel: number, units: Record<UnitId, number>) => {
+    const ok = sendAttack(store.state.villages[villageId], store.state.battleLog, targetLevel, units)
     if (ok) {
       store.commit()
       saveToLocal(store.state)
     }
     return ok
   },
-  version: '0.4.1',
+  version: '0.5.0',
   offlineSeconds,
 })
 

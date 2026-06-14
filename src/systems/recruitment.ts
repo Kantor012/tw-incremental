@@ -1,13 +1,16 @@
 import { D, ZERO, type Decimal } from '../engine/decimal'
-import type { GameState } from '../engine/state'
+import type { Village } from '../engine/state'
 import { BUILDINGS, BUILDING_IDS, type ResourceCost } from '../content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
 
 /**
  * Recruitment engine — generic, data-driven, Node-safe (no DOM/clock). Pure
- * functions of `GameState` + the {@link UNITS} / {@link BUILDINGS} catalogues; the
- * only mutating ones are {@link recruit} (spend + enqueue) and
- * {@link advanceRecruitment} (the per-tick clock, called by simulate).
+ * functions of a single {@link Village} + the {@link UNITS} / {@link BUILDINGS}
+ * catalogues; the only mutating ones are {@link recruit} (spend + enqueue) and
+ * {@link advanceRecruitment} (the per-tick clock, called by simulate). Since M2.1
+ * every function operates on one village's economy (resources / buildings / units /
+ * recruitQueue / popCap), never the whole GameState — the tick threads each village
+ * through in turn.
  *
  * Mirrors src/systems/buildings.ts: adding a unit is a data edit to units.ts and
  * adding a second training-speed building is a data edit to buildings.ts — neither
@@ -19,8 +22,8 @@ import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
 const RECRUIT_SPEED_FLOOR = 0.25
 
 /** True once the barracks exist (level >= 1) — the gate for all recruitment. */
-export function barracksUnlocked(state: GameState): boolean {
-  return state.buildings.barracks > 0
+export function barracksUnlocked(v: Village): boolean {
+  return v.buildings.barracks > 0
 }
 
 /**
@@ -28,14 +31,14 @@ export function barracksUnlocked(state: GameState): boolean {
  * building whose effect is `recruit_speed`, clamped to {@link RECRUIT_SPEED_FLOOR}
  * so training never becomes instant. Data-driven (mirrors costReduction): a second
  * speed building is a data entry with zero engine change. A unit's live training
- * time is `UnitDef.recruitSeconds * recruitSpeedMult(state)`.
+ * time is `UnitDef.recruitSeconds * recruitSpeedMult(v)`.
  */
-export function recruitSpeedMult(state: GameState): number {
+export function recruitSpeedMult(v: Village): number {
   let mult = 1
   for (const id of BUILDING_IDS) {
     const effect = BUILDINGS[id].effect
     if (effect.kind !== 'recruit_speed') continue
-    const level = state.buildings[id]
+    const level = v.buildings[id]
     if (level > 0) mult *= Math.pow(1 - effect.perLevel, level)
   }
   return mult < RECRUIT_SPEED_FLOOR ? RECRUIT_SPEED_FLOOR : mult
@@ -46,21 +49,21 @@ export function recruitSpeedMult(state: GameState): number {
  * training. Counting queued units keeps the popCap budget honest — you cannot
  * over-commit by enqueuing more than the farm can ever feed.
  */
-export function usedPopulation(state: GameState): Decimal {
+export function usedPopulation(v: Village): Decimal {
   let used = ZERO
   for (const id of UNIT_IDS) {
-    const n = state.units[id]
+    const n = v.units[id]
     if (n > 0) used = used.add(D(UNITS[id].pop).mul(n))
   }
-  for (const order of state.recruitQueue) {
+  for (const order of v.recruitQueue) {
     if (order.count > 0) used = used.add(D(UNITS[order.unitId].pop).mul(order.count))
   }
   return used
 }
 
 /** Spare population headroom (never negative). */
-export function freePopulation(state: GameState): Decimal {
-  const free = state.popCap.sub(usedPopulation(state))
+export function freePopulation(v: Village): Decimal {
+  const free = v.popCap.sub(usedPopulation(v))
   return free.lt(0) ? ZERO : free
 }
 
@@ -80,24 +83,24 @@ export function recruitCost(unitId: UnitId, count: number): ResourceCost {
  * affordable resources, and enough free population.
  */
 export function canRecruit(
-  state: GameState,
+  v: Village,
   unitId: UnitId,
   count: number,
 ): { ok: boolean; reason?: string } {
-  if (!barracksUnlocked(state)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
+  if (!barracksUnlocked(v)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
   if (!Number.isInteger(count) || count <= 0) return { ok: false, reason: 'Niepoprawna liczba.' }
 
   const cost = recruitCost(unitId, count)
   if (
-    state.resources.wood.lt(cost.wood) ||
-    state.resources.clay.lt(cost.clay) ||
-    state.resources.iron.lt(cost.iron)
+    v.resources.wood.lt(cost.wood) ||
+    v.resources.clay.lt(cost.clay) ||
+    v.resources.iron.lt(cost.iron)
   ) {
     return { ok: false, reason: 'Brak surowców.' }
   }
 
   const need = D(UNITS[unitId].pop).mul(count)
-  if (freePopulation(state).lt(need)) return { ok: false, reason: 'Brak miejsca (populacja).' }
+  if (freePopulation(v).lt(need)) return { ok: false, reason: 'Brak miejsca (populacja).' }
 
   return { ok: true }
 }
@@ -108,22 +111,22 @@ export function canRecruit(
  * time (see {@link RecruitOrder}) so later barracks upgrades cannot perturb an
  * order already in flight — preserving deterministic offline/online replay.
  */
-export function recruit(state: GameState, unitId: UnitId, count: number): boolean {
-  if (!canRecruit(state, unitId, count).ok) return false
+export function recruit(v: Village, unitId: UnitId, count: number): boolean {
+  if (!canRecruit(v, unitId, count).ok) return false
 
   const cost = recruitCost(unitId, count)
-  state.resources.wood = state.resources.wood.sub(cost.wood)
-  state.resources.clay = state.resources.clay.sub(cost.clay)
-  state.resources.iron = state.resources.iron.sub(cost.iron)
+  v.resources.wood = v.resources.wood.sub(cost.wood)
+  v.resources.clay = v.resources.clay.sub(cost.clay)
+  v.resources.iron = v.resources.iron.sub(cost.iron)
 
-  const perUnitSeconds = UNITS[unitId].recruitSeconds * recruitSpeedMult(state)
-  state.recruitQueue.push({ unitId, count, remaining: perUnitSeconds, perUnitSeconds })
+  const perUnitSeconds = UNITS[unitId].recruitSeconds * recruitSpeedMult(v)
+  v.recruitQueue.push({ unitId, count, remaining: perUnitSeconds, perUnitSeconds })
   return true
 }
 
 /**
- * Advance the head of the training queue by `dtSeconds`, mutating `state`. Pure,
- * deterministic and Node-safe.
+ * Advance the head of the training queue by `dtSeconds`, mutating the village `v`.
+ * Pure, deterministic and Node-safe.
  *
  * This is the per-CHUNK clock primitive. Because it accumulates time via iterative
  * float subtraction with integer completion boundaries, its result is sensitive to
@@ -141,11 +144,11 @@ export function recruit(state: GameState, unitId: UnitId, count: number): boolea
  * units across several orders in one call, with the dt accounted explicitly so no
  * time is lost or double-counted.
  */
-export function advanceRecruitment(state: GameState, dtSeconds: number): void {
+export function advanceRecruitment(v: Village, dtSeconds: number): void {
   if (!(dtSeconds > 0)) return
 
   let dt = dtSeconds
-  const queue = state.recruitQueue
+  const queue = v.recruitQueue
   while (dt > 0 && queue.length > 0) {
     const order = queue[0]
     if (dt < order.remaining) {
@@ -155,7 +158,7 @@ export function advanceRecruitment(state: GameState, dtSeconds: number): void {
     } else {
       // The next unit completes; consume its share of the budget and mint it.
       dt -= order.remaining
-      state.units[order.unitId] += 1
+      v.units[order.unitId] += 1
       order.count -= 1
       if (order.count <= 0) {
         queue.shift() // order done — leftover dt spills into the next order

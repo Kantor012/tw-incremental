@@ -1,7 +1,7 @@
 import { D, ZERO, type Decimal } from '../engine/decimal'
 import {
   RESOURCE_IDS,
-  type GameState,
+  type Village,
   type BattleReport,
   type ResourceMap,
 } from '../engine/state'
@@ -13,14 +13,20 @@ import { barracksUnlocked } from './recruitment'
 /**
  * March engine — the GENERIC, deterministic mover for PvE attacks (M1.3). Sends an
  * army at a barbarian camp, resolves the battle on arrival, and hauls loot home.
- * Pure functions of `GameState` + the catalogues; the only mutating one is
- * {@link advanceMarches} (the per-tick clock, called by simulate) and
+ * Pure functions of a single {@link Village} + the catalogues; the only mutating
+ * ones are {@link advanceMarches} (the per-tick clock, called by simulate) and
  * {@link sendAttack} (dispatch). Node-safe (no DOM/clock/RNG).
  *
- * Convention (see {@link March}): `state.units` = ALL living owned units (home +
- * away). A march's `units` is the away subset, still counted in `state.units`.
+ * Since M2.1 the run is multi-village: every function operates on ONE village's
+ * economy (its `resources` / `units` / `marches`), never the whole GameState. The
+ * battle log is GLOBAL, so the two combat-resolving entry points ({@link sendAttack}
+ * and {@link advanceMarches}) take it as an explicit `log: BattleReport[]` argument
+ * and tag each report with the originating village id ({@link Village.id}).
+ *
+ * Convention (see {@link March}): `village.units` = ALL living owned units (home +
+ * away). A march's `units` is the away subset, still counted in `village.units`.
  * "At home" is derived as {@link stationedUnits}. Dispatch does NOT touch
- * `state.units`; casualties are subtracted from it at resolution. This keeps the
+ * `village.units`; casualties are subtracted from it at resolution. This keeps the
  * population budget honest (an army on the road still eats) with zero changes to
  * recruitment.ts.
  *
@@ -65,25 +71,27 @@ function totalUnits(units: Record<UnitId, number>): number {
 }
 
 /**
- * Append a battle report, trimming to the most recent {@link BATTLE_LOG_MAX}.
- * Exported so raids.ts shares the exact same cap/trim behaviour.
+ * Append a battle report to the GLOBAL log, trimming to the most recent
+ * {@link BATTLE_LOG_MAX}. Operates on the passed-in list (the global
+ * `state.battleLog`, threaded in by the tick) rather than reaching into any state —
+ * exported so raids.ts shares the exact same cap/trim behaviour.
  */
-export function pushBattleReport(state: GameState, report: BattleReport): void {
-  state.battleLog.push(report)
-  if (state.battleLog.length > BATTLE_LOG_MAX) {
-    state.battleLog.splice(0, state.battleLog.length - BATTLE_LOG_MAX)
+export function pushBattleReport(log: BattleReport[], report: BattleReport): void {
+  log.push(report)
+  if (log.length > BATTLE_LOG_MAX) {
+    log.splice(0, log.length - BATTLE_LOG_MAX)
   }
 }
 
 /**
- * Units currently AT HOME = owned roster minus everything out on a march. Returns
- * a fresh complete record, clamped non-negative per type (defensive against any
- * hand-edited save where march counts exceed the roster).
+ * Units currently AT HOME = the village's owned roster minus everything out on a
+ * march. Returns a fresh complete record, clamped non-negative per type (defensive
+ * against any hand-edited save where march counts exceed the roster).
  */
-export function stationedUnits(state: GameState): Record<UnitId, number> {
+export function stationedUnits(v: Village): Record<UnitId, number> {
   const home = emptyUnits()
-  for (const id of UNIT_IDS) home[id] = state.units[id] ?? 0
-  for (const m of state.marches) {
+  for (const id of UNIT_IDS) home[id] = v.units[id] ?? 0
+  for (const m of v.marches) {
     for (const id of UNIT_IDS) home[id] -= m.units[id] ?? 0
   }
   for (const id of UNIT_IDS) if (home[id] < 0) home[id] = 0
@@ -98,9 +106,13 @@ export function stationedUnits(state: GameState): Record<UnitId, number> {
  * unit speed up a slow stack, so we take the slowest, the standard TW rule.) Returns
  * 0 for an empty army. There-and-back is symmetric: the return leg reuses the
  * outbound army's time so survivors never travel home faster than they came.
+ *
+ * Pure: the first `Village` argument is unused (travel time depends only on the
+ * target and the army), kept for call-site symmetry with the other per-village
+ * functions and so the UI/sim can pass the active village uniformly.
  */
 export function marchTime(
-  _state: GameState,
+  _v: Village,
   targetLevel: number,
   units: Record<UnitId, number>,
 ): number {
@@ -114,20 +126,21 @@ export function marchTime(
 }
 
 /**
- * Whether an attack can be launched right now, with a PL reason when not. Gates on:
- * the barracks (the military unlock), a valid camp level, integer non-negative
- * per-type counts that do not exceed the units AT HOME, and a non-empty army.
+ * Whether an attack can be launched from `v` right now, with a PL reason when not.
+ * Gates on: the barracks (the military unlock), a valid camp level, integer
+ * non-negative per-type counts that do not exceed the units AT HOME, and a non-empty
+ * army.
  */
 export function canAttack(
-  state: GameState,
+  v: Village,
   targetLevel: number,
   units: Record<UnitId, number>,
 ): { ok: boolean; reason?: string } {
-  if (!barracksUnlocked(state)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
+  if (!barracksUnlocked(v)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
   if (!Number.isInteger(targetLevel) || targetLevel < 1 || targetLevel > MAX_TARGET_LEVEL) {
     return { ok: false, reason: 'Niepoprawny cel.' }
   }
-  const home = stationedUnits(state)
+  const home = stationedUnits(v)
   let total = 0
   for (const id of UNIT_IDS) {
     const n = units[id] ?? 0
@@ -140,24 +153,27 @@ export function canAttack(
 }
 
 /**
- * Dispatch an attack. No-op returning false when {@link canAttack} rejects.
+ * Dispatch an attack from `v`. No-op returning false when {@link canAttack} rejects.
  * Records the march (a snapshot of the dispatched army) WITHOUT debiting
- * `state.units` — those units remain owned (and population-counted) while away;
- * {@link stationedUnits} subtracts them so they can't be sent twice.
+ * `v.units` — those units remain owned (and population-counted) while away;
+ * {@link stationedUnits} subtracts them so they can't be sent twice. The global
+ * battle `log` is taken explicitly (unused on dispatch; resolution happens in
+ * {@link advanceMarches}) to keep the combat-entry-point signatures uniform.
  */
 export function sendAttack(
-  state: GameState,
+  v: Village,
+  _log: BattleReport[],
   targetLevel: number,
   units: Record<UnitId, number>,
 ): boolean {
-  if (!canAttack(state, targetLevel, units).ok) return false
+  if (!canAttack(v, targetLevel, units).ok) return false
   const sent = emptyUnits()
   for (const id of UNIT_IDS) sent[id] = units[id] ?? 0
-  state.marches.push({
+  v.marches.push({
     targetLevel,
     units: sent,
     phase: 'outbound',
-    remaining: marchTime(state, targetLevel, sent),
+    remaining: marchTime(v, targetLevel, sent),
     loot: emptyLoot(),
   })
   return true
@@ -177,18 +193,18 @@ function computeLoot(survivors: Record<UnitId, number>, targetLevel: number): Re
   return loot
 }
 
-/** Add loot to resources, clamped to the storage cap (overflow is spilled). */
-function deliverLoot(state: GameState, loot: ResourceMap): void {
+/** Add loot to the village's resources, clamped to its storage cap (overflow spilled). */
+function deliverLoot(v: Village, loot: ResourceMap): void {
   for (const id of RESOURCE_IDS) {
-    let next = state.resources[id].add(loot[id])
-    if (next.gt(state.storageCap)) next = state.storageCap
-    state.resources[id] = next
+    let next = v.resources[id].add(loot[id])
+    if (next.gt(v.storageCap)) next = v.storageCap
+    v.resources[id] = next
   }
 }
 
-/** Subtract casualties (before − after, per type) from the owned roster. */
+/** Subtract casualties (before − after, per type) from the village's owned roster. */
 function applyCasualties(
-  state: GameState,
+  v: Village,
   before: Record<UnitId, number>,
   after: Record<UnitId, number>,
 ): number {
@@ -196,8 +212,8 @@ function applyCasualties(
   for (const id of UNIT_IDS) {
     const lost = (before[id] ?? 0) - (after[id] ?? 0)
     if (lost > 0) {
-      state.units[id] -= lost
-      if (state.units[id] < 0) state.units[id] = 0
+      v.units[id] -= lost
+      if (v.units[id] < 0) v.units[id] = 0
       dead += lost
     }
   }
@@ -212,26 +228,27 @@ function lootSum(loot: ResourceMap): string {
 }
 
 /**
- * Advance every in-flight march by `dtSeconds`, mutating `state`. Deterministic and
- * Node-safe; a no-op when there are no marches. Each march can cross MULTIPLE phase
- * boundaries in a single `dt` (e.g. arrive, resolve, and fully return within one
- * large offline step):
+ * Advance every in-flight march of `v` by `dtSeconds`, mutating `v` (and appending
+ * any resolved-battle reports to the GLOBAL `log`). Deterministic and Node-safe; a
+ * no-op when there are no marches. Each march can cross MULTIPLE phase boundaries in
+ * a single `dt` (e.g. arrive, resolve, and fully return within one large offline
+ * step):
  *
  *  - outbound completes  → resolve the battle (battleOutcome of the army's attack
- *    power vs the camp's defence). Casualties leave `state.units` immediately. On a
+ *    power vs the camp's defence). Casualties leave `v.units` immediately. On a
  *    win with survivors: stash carry-capped loot, flip to `returning` with a
  *    symmetric travel time, and log the result now (loot lands on return). On a win
  *    with no survivors (attrition floored the army to 0) or a loss: log and drop the
  *    march (nothing returns).
  *  - returning completes → deliver the loot (clamped) and drop the march. Survivors
- *    were never removed from `state.units`, so there is nothing to add back.
+ *    were never removed from `v.units`, so there is nothing to add back.
  *
- * Iterates back-to-front so a completed march can be spliced without disturbing
- * the indices still to process.
+ * Every report is tagged with `villageId: v.id`. Iterates back-to-front so a
+ * completed march can be spliced without disturbing the indices still to process.
  */
-export function advanceMarches(state: GameState, dtSeconds: number): void {
+export function advanceMarches(v: Village, log: BattleReport[], dtSeconds: number): void {
   if (!(dtSeconds > 0)) return
-  const marches = state.marches
+  const marches = v.marches
   for (let i = marches.length - 1; i >= 0; i--) {
     const m = marches[i]
     let dt = dtSeconds
@@ -245,7 +262,7 @@ export function advanceMarches(state: GameState, dtSeconds: number): void {
       m.remaining = 0
 
       if (m.phase === 'returning') {
-        deliverLoot(state, m.loot)
+        deliverLoot(v, m.loot)
         marches.splice(i, 1)
         break
       }
@@ -257,17 +274,25 @@ export function advanceMarches(state: GameState, dtSeconds: number): void {
 
       if (!outcome.attackerWins) {
         const survivors = applyLosses(sent, 1) // total wipe
-        const losses = applyCasualties(state, sent, survivors)
-        pushBattleReport(state, { kind: 'attack', targetLevel: m.targetLevel, won: false, lootSum: '0', losses })
+        const losses = applyCasualties(v, sent, survivors)
+        pushBattleReport(log, {
+          kind: 'attack',
+          villageId: v.id,
+          targetLevel: m.targetLevel,
+          won: false,
+          lootSum: '0',
+          losses,
+        })
         marches.splice(i, 1)
         break
       }
 
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
-      const losses = applyCasualties(state, sent, survivors)
+      const losses = applyCasualties(v, sent, survivors)
       const loot = computeLoot(survivors, m.targetLevel)
-      pushBattleReport(state, {
+      pushBattleReport(log, {
         kind: 'attack',
+        villageId: v.id,
         targetLevel: m.targetLevel,
         won: true,
         lootSum: lootSum(loot),
@@ -282,7 +307,7 @@ export function advanceMarches(state: GameState, dtSeconds: number): void {
 
       // Symmetric return: reuse the OUTBOUND army's travel time (computed from the
       // originally dispatched stack) so survivors don't teleport home faster.
-      const returnTime = marchTime(state, m.targetLevel, sent)
+      const returnTime = marchTime(v, m.targetLevel, sent)
       m.units = survivors
       m.loot = loot
       m.phase = 'returning'

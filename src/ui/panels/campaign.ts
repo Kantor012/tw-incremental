@@ -1,4 +1,4 @@
-import type { GameState } from '../../engine/state'
+import type { Village } from '../../engine/state'
 import { D } from '../../engine/decimal'
 import { formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
@@ -83,6 +83,11 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   // background (matches buildings/army/reports/save) for consistent framing.
   const el = h('div', 'campaign-panel')
 
+  // The village this panel currently operates on. The selector (layout.ts) writes
+  // ctx.activeVillageId; every read here resolves it fresh so a selection change is
+  // picked up on the next update()/handler without rebuilding the DOM.
+  const activeVillage = (): Village => ctx.store.state.villages[ctx.activeVillageId.value]
+
   // ---- Garrison status (home vs away) --------------------------------------
   // Doubles as the "no barracks" notice required by the brief: when locked it
   // tells the player to build the Koszary first.
@@ -130,7 +135,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   const sendAllBtn = h('button', 'btn btn-ghost', 'Wyślij wszystkie dostępne')
   sendAllBtn.type = 'button'
   sendAllBtn.addEventListener('click', () => {
-    const home = stationedUnits(ctx.store.state)
+    const home = stationedUnits(activeVillage())
     for (const id of UNIT_IDS) armyPicks[id].input.value = String(home[id])
     update()
   })
@@ -156,13 +161,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
    * the displayed estimates, the button verdict and the actual dispatch can never
    * disagree.
    */
-  const readArmy = (s: GameState): Record<UnitId, number> => {
-    const home = stationedUnits(s)
+  const readArmy = (v: Village): Record<UnitId, number> => {
+    const home = stationedUnits(v)
     const army = {} as Record<UnitId, number>
     for (const id of UNIT_IDS) {
       const parsed = Math.floor(Number(armyPicks[id].input.value))
-      const v = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
-      army[id] = Math.min(v, home[id])
+      const n = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+      army[id] = Math.min(n, home[id])
     }
     return army
   }
@@ -216,10 +221,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     // reason tooltip + aria-live message reach the user; the handler stays a
     // guarded no-op when canAttack rejects (mirrors the recruitment panel).
     button.addEventListener('click', () => {
-      const s = ctx.store.state
+      const v = activeVillage()
       const lvl = rowLevels[i]
-      const army = readArmy(s)
-      const verdict = canAttack(s, lvl, army)
+      const army = readArmy(v)
+      const verdict = canAttack(v, lvl, army)
       if (!verdict.ok) {
         msg.textContent = verdict.reason ?? 'Nie można wysłać wyprawy.'
         update()
@@ -236,7 +241,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       ) {
         return
       }
-      const ok = ctx.onAttack(lvl, army)
+      const ok = ctx.onAttack(ctx.activeVillageId.value, lvl, army)
       if (ok) {
         msg.textContent = 'Wysłano wyprawę: ' + target.name + '.'
         for (const uid of UNIT_IDS) armyPicks[uid].input.value = '0'
@@ -296,10 +301,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
 
   // ---- Reactivity ----------------------------------------------------------
   const update = (): void => {
-    const s = ctx.store.state
-    const unlocked = barracksUnlocked(s)
-    const home = stationedUnits(s)
-    const army = readArmy(s)
+    const v = activeVillage()
+    const unlocked = barracksUnlocked(v)
+    const home = stationedUnits(v)
+    const army = readArmy(v)
     const composed = armySize(army)
     const carry = armyCarry(army)
     const atkPow = armyAttackPower(army)
@@ -308,7 +313,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     let homeSum = 0
     for (const id of UNIT_IDS) homeSum += home[id]
     let awaySum = 0
-    for (const m of s.marches) for (const id of UNIT_IDS) awaySum += m.units[id]
+    for (const m of v.marches) for (const id of UNIT_IDS) awaySum += m.units[id]
 
     status.textContent = unlocked
       ? 'W domu: ' + formatInt(homeSum) + ' jedn. · na marszach: ' + formatInt(awaySum)
@@ -366,7 +371,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         const cd = D(carry)
         const haul = cd.lt(totalLoot) ? cd : totalLoot
         tr.loot.textContent = formatInt(haul)
-        tr.march.textContent = formatTime(marchTime(s, lvl, army))
+        tr.march.textContent = formatTime(marchTime(v, lvl, army))
         const oc = battleOutcome(atkPow, target.defensePower)
         const pct = Math.round(oc.attackerLossFrac * 100)
         tr.forecast.textContent = oc.attackerWins
@@ -381,7 +386,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         tr.forecast.classList.remove('forecast-win', 'forecast-lose')
       }
 
-      const verdict = canAttack(s, lvl, army)
+      const verdict = canAttack(v, lvl, army)
       tr.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
       tr.button.title = verdict.ok ? '' : (verdict.reason ?? '')
       tr.button.setAttribute('aria-label', 'Atakuj obóz barbarzyńców (poziom ' + lvl + ')')
@@ -389,7 +394,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
 
     // Marches in progress — rebuilt only when their signature (level / phase /
     // whole-second ETA / composition) changes, so the steady state is poke-free.
-    const marchSig = s.marches
+    const marchSig = v.marches
       .map(
         (m) =>
           m.targetLevel +
@@ -404,10 +409,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     if (marchSig !== lastMarchSig) {
       lastMarchSig = marchSig
       marchList.textContent = ''
-      if (s.marches.length === 0) {
+      if (v.marches.length === 0) {
         marchList.appendChild(h('li', 'queue-empty muted', 'Brak marszów w toku.'))
       } else {
-        for (const m of s.marches) {
+        for (const m of v.marches) {
           const li = h(
             'li',
             'march-item ' + (m.phase === 'returning' ? 'is-returning' : 'is-outbound'),
@@ -434,9 +439,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     }
 
     // ---- Defence (incoming raids) ----
-    raidEtaVal.textContent = formatTime(s.raidTimer)
+    raidEtaVal.textContent = formatTime(v.raidTimer)
     const homeDef = armyDefensePower(home)
-    const threat = raidPower(s)
+    const threat = raidPower(v)
     homeDefVal.textContent = formatInt(homeDef)
     raidPowerVal.textContent = formatInt(Math.round(threat))
 

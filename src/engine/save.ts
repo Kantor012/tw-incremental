@@ -23,7 +23,7 @@ import { UNIT_IDS } from '../content/units'
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 4
+export const SAVE_VERSION = 5
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -123,6 +123,40 @@ export function migrate(raw: any): any {
       raidTimer: RAID_BASE_INTERVAL,
       version: 4,
     }),
+    // v4 -> v5: single village -> multi-village (M2.1). A v4 save IS the capital's
+    // economy at top level; wrap those nine per-village fields (plus a stable id and
+    // the legacy "Stolica" name) under villages.v0 and seed the bijective
+    // villageOrder. The battle log becomes GLOBAL: every legacy report is stamped
+    // with villageId 'v0' (it could only have come from the lone village). Nothing
+    // is recomputed here — importSave's recomputeDerived pass reconciles the cached
+    // derived fields afterwards, exactly as for every other migration.
+    4: (s) => ({
+      version: 5,
+      seed: s.seed,
+      rngState: s.rngState,
+      createdAt: s.createdAt,
+      lastSeen: s.lastSeen,
+      villages: {
+        v0: {
+          id: 'v0',
+          name: 'Stolica',
+          resources: s.resources,
+          production: s.production,
+          storageCap: s.storageCap,
+          popCap: s.popCap,
+          buildings: s.buildings,
+          units: s.units,
+          recruitQueue: s.recruitQueue,
+          marches: s.marches,
+          raidTimer: s.raidTimer,
+        },
+      },
+      villageOrder: ['v0'],
+      battleLog: (Array.isArray(s.battleLog) ? s.battleLog : []).map((r: any) => ({
+        ...r,
+        villageId: 'v0',
+      })),
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -139,10 +173,131 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Semantic guard for a SINGLE village. Throws on any missing/invalid field, with
+ * the village id woven into the message so a bad multi-village save points at the
+ * offending entry. These are EXACTLY the per-village checks the single-village save
+ * (v4) ran at top level — every Decimal is value-checked (not just instanceof),
+ * because a NaN / Infinity / negative would corrupt the economy and then get
+ * autosaved (CLAUDE.md hard rule #3); importSave is reachable from arbitrary pasted
+ * input, so this is the only semantic gate.
+ */
+function validateVillage(v: unknown, id: string): void {
+  if (!isObject(v)) throw new Error(`save: village ${id} not an object`)
+  if (typeof v.id !== 'string') throw new Error(`save: village ${id} invalid id`)
+  if (typeof v.name !== 'string') throw new Error(`save: village ${id} invalid name`)
+
+  // Storage cap must be strictly positive (resources clamp to it); popCap may be 0
+  // (a freshly seeded village is recomputed only after validation, and the v4->v5
+  // migration carries whatever the source save had).
+  if (!(v.storageCap instanceof Decimal) || !isFiniteDecimal(v.storageCap) || v.storageCap.lte(0)) {
+    throw new Error(`save: village ${id} invalid storageCap`)
+  }
+  if (!(v.popCap instanceof Decimal) || !isFiniteDecimal(v.popCap) || v.popCap.lt(0)) {
+    throw new Error(`save: village ${id} invalid popCap`)
+  }
+
+  const { resources, production, buildings } = v
+  if (!isObject(resources)) throw new Error(`save: village ${id} missing resources`)
+  if (!isObject(production)) throw new Error(`save: village ${id} missing production`)
+  for (const r of REQUIRED_RESOURCES) {
+    const res = resources[r]
+    if (!(res instanceof Decimal) || !isFiniteDecimal(res) || res.lt(0)) {
+      throw new Error(`save: village ${id} invalid resource ${r}`)
+    }
+    const prod = production[r]
+    if (!(prod instanceof Decimal) || !isFiniteDecimal(prod) || prod.lt(0)) {
+      throw new Error(`save: village ${id} invalid production ${r}`)
+    }
+  }
+
+  if (!isObject(buildings)) throw new Error(`save: village ${id} missing buildings`)
+  for (const bid of BUILDING_IDS) {
+    const level = buildings[bid]
+    if (
+      typeof level !== 'number' ||
+      !Number.isInteger(level) ||
+      level < 0 ||
+      level > BUILDINGS[bid].maxLevel
+    ) {
+      throw new Error(`save: village ${id} invalid building ${bid}`)
+    }
+  }
+
+  // units are plain non-negative integer counts; the training queue is a list of
+  // finite, non-negative number fields with a known unit id.
+  const { units, recruitQueue } = v
+  if (!isObject(units)) throw new Error(`save: village ${id} missing units`)
+  for (const uid of UNIT_IDS) {
+    const n = units[uid]
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+      throw new Error(`save: village ${id} invalid unit ${uid}`)
+    }
+  }
+
+  if (!Array.isArray(recruitQueue)) throw new Error(`save: village ${id} invalid recruitQueue`)
+  const validIds = UNIT_IDS as readonly string[]
+  for (const order of recruitQueue) {
+    if (!isObject(order)) throw new Error(`save: village ${id} invalid recruit order`)
+    if (typeof order.unitId !== 'string' || !validIds.includes(order.unitId)) {
+      throw new Error(`save: village ${id} invalid recruit order unitId`)
+    }
+    for (const key of ['count', 'remaining', 'perUnitSeconds'] as const) {
+      const n = order[key]
+      if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+        throw new Error(`save: village ${id} invalid recruit order ${key}`)
+      }
+    }
+  }
+
+  // marches must be a list of well-formed in-transit armies. loot Decimals are
+  // value-checked (finite, non-negative) exactly like the resource pool — a
+  // NaN/negative haul would corrupt the economy on delivery and then get autosaved.
+  const { marches, raidTimer } = v
+  if (!Array.isArray(marches)) throw new Error(`save: village ${id} invalid marches`)
+  for (const m of marches) {
+    if (!isObject(m)) throw new Error(`save: village ${id} invalid march`)
+    if (typeof m.targetLevel !== 'number' || !Number.isInteger(m.targetLevel) || m.targetLevel < 1) {
+      throw new Error(`save: village ${id} invalid march targetLevel`)
+    }
+    if (m.phase !== 'outbound' && m.phase !== 'returning') {
+      throw new Error(`save: village ${id} invalid march phase`)
+    }
+    if (typeof m.remaining !== 'number' || !Number.isFinite(m.remaining) || m.remaining < 0) {
+      throw new Error(`save: village ${id} invalid march remaining`)
+    }
+    if (!isObject(m.units)) throw new Error(`save: village ${id} invalid march units`)
+    for (const uid of UNIT_IDS) {
+      const n = m.units[uid]
+      if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+        throw new Error(`save: village ${id} invalid march unit ${uid}`)
+      }
+    }
+    if (!isObject(m.loot)) throw new Error(`save: village ${id} invalid march loot`)
+    for (const r of REQUIRED_RESOURCES) {
+      const n = m.loot[r]
+      if (!(n instanceof Decimal) || !isFiniteDecimal(n) || n.lt(0)) {
+        throw new Error(`save: village ${id} invalid march loot ${r}`)
+      }
+    }
+  }
+
+  // raid clock — a finite, non-negative number of seconds until the next raid.
+  if (typeof raidTimer !== 'number' || !Number.isFinite(raidTimer) || raidTimer < 0) {
+    throw new Error(`save: village ${id} invalid raidTimer`)
+  }
+}
+
+/**
  * Shape guard run after migration. Throws on any missing/invalid required field
  * so {@link importSave} fails loudly and {@link loadFromLocal}'s catch falls back
  * to a fresh save instead of booting a half-initialised state that would crash
  * the app on the first tick (CLAUDE.md hard rule #3).
+ *
+ * Multi-village (M2.1): the global header is checked, then `villages` /
+ * `villageOrder` must form a bijection (every ordered id has a village and every
+ * village key is ordered, exactly once — so the tick iterates each village once and
+ * never references a missing entry), every village passes {@link validateVillage},
+ * and the GLOBAL battle log is validated as before plus the new `villageId`.
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -155,113 +310,42 @@ export function validateState(s: unknown): GameState {
   if (typeof s.lastSeen !== 'number' || !Number.isFinite(s.lastSeen)) {
     throw new Error('save: invalid lastSeen')
   }
-  // Decimal fields must be value-sane, not just instanceof: NaN / Infinity /
-  // negative all parse but would corrupt the live game and then get autosaved
-  // (CLAUDE.md hard rule #3). importSave is reachable from arbitrary pasted input,
-  // so this is the only semantic gate. Storage cap must be strictly positive
-  // (resources clamp to it); popCap may be 0 (migrate seeds 0 pre-recompute).
-  if (!(s.storageCap instanceof Decimal) || !isFiniteDecimal(s.storageCap) || s.storageCap.lte(0)) {
-    throw new Error('save: invalid storageCap')
-  }
-  if (!(s.popCap instanceof Decimal) || !isFiniteDecimal(s.popCap) || s.popCap.lt(0)) {
-    throw new Error('save: invalid popCap')
-  }
 
-  const { resources, production, buildings } = s
-  if (!isObject(resources)) throw new Error('save: missing resources')
-  if (!isObject(production)) throw new Error('save: missing production')
-  for (const id of REQUIRED_RESOURCES) {
-    const res = resources[id]
-    if (!(res instanceof Decimal) || !isFiniteDecimal(res) || res.lt(0)) {
-      throw new Error(`save: invalid resource ${id}`)
-    }
-    const prod = production[id]
-    if (!(prod instanceof Decimal) || !isFiniteDecimal(prod) || prod.lt(0)) {
-      throw new Error(`save: invalid production ${id}`)
+  // villages + villageOrder must be a strict bijection: every ordered id resolves
+  // to a village, every village key is ordered, and there are no duplicates (the
+  // length check rules out a repeated id that would make the tick simulate a
+  // village twice). This is what lets every other system trust villageOrder.
+  const { villages, villageOrder } = s
+  if (!isObject(villages)) throw new Error('save: missing villages')
+  if (!Array.isArray(villageOrder) || villageOrder.length === 0) {
+    throw new Error('save: invalid villageOrder')
+  }
+  for (const id of villageOrder) {
+    if (typeof id !== 'string') throw new Error('save: invalid villageOrder id')
+    if (!isObject(villages[id])) throw new Error(`save: villageOrder id ${id} not in villages`)
+  }
+  const villageKeys = Object.keys(villages)
+  if (villageKeys.length !== villageOrder.length) {
+    throw new Error('save: villageOrder / villages length mismatch')
+  }
+  for (const key of villageKeys) {
+    if (!villageOrder.includes(key)) {
+      throw new Error(`save: village ${key} not in villageOrder`)
     }
   }
+  for (const id of villageOrder) validateVillage(villages[id], id)
 
-  if (!isObject(buildings)) throw new Error('save: missing buildings')
-  for (const id of BUILDING_IDS) {
-    const level = buildings[id]
-    if (
-      typeof level !== 'number' ||
-      !Number.isInteger(level) ||
-      level < 0 ||
-      level > BUILDINGS[id].maxLevel
-    ) {
-      throw new Error(`save: invalid building ${id}`)
-    }
-  }
-
-  // v3: units are plain non-negative integer counts; the training queue is a list
-  // of finite, non-negative number fields with a known unit id. importSave is
-  // reachable from arbitrary pasted input, so this is the only semantic gate.
-  const { units, recruitQueue } = s
-  if (!isObject(units)) throw new Error('save: missing units')
-  for (const id of UNIT_IDS) {
-    const n = units[id]
-    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
-      throw new Error(`save: invalid unit ${id}`)
-    }
-  }
-
-  if (!Array.isArray(recruitQueue)) throw new Error('save: invalid recruitQueue')
-  const validIds = UNIT_IDS as readonly string[]
-  for (const order of recruitQueue) {
-    if (!isObject(order)) throw new Error('save: invalid recruit order')
-    if (typeof order.unitId !== 'string' || !validIds.includes(order.unitId)) {
-      throw new Error('save: invalid recruit order unitId')
-    }
-    for (const key of ['count', 'remaining', 'perUnitSeconds'] as const) {
-      const v = order[key]
-      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
-        throw new Error(`save: invalid recruit order ${key}`)
-      }
-    }
-  }
-
-  // v4: marches must be a list of well-formed in-transit armies. importSave is
-  // reachable from arbitrary pasted input, so loot Decimals are value-checked
-  // (finite, non-negative) exactly like the resource pool — a NaN/negative haul
-  // would corrupt the economy on delivery and then get autosaved.
-  const { marches, battleLog, raidTimer } = s
-  if (!Array.isArray(marches)) throw new Error('save: invalid marches')
-  for (const m of marches) {
-    if (!isObject(m)) throw new Error('save: invalid march')
-    if (typeof m.targetLevel !== 'number' || !Number.isInteger(m.targetLevel) || m.targetLevel < 1) {
-      throw new Error('save: invalid march targetLevel')
-    }
-    if (m.phase !== 'outbound' && m.phase !== 'returning') {
-      throw new Error('save: invalid march phase')
-    }
-    if (typeof m.remaining !== 'number' || !Number.isFinite(m.remaining) || m.remaining < 0) {
-      throw new Error('save: invalid march remaining')
-    }
-    if (!isObject(m.units)) throw new Error('save: invalid march units')
-    for (const id of UNIT_IDS) {
-      const n = m.units[id]
-      if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
-        throw new Error(`save: invalid march unit ${id}`)
-      }
-    }
-    if (!isObject(m.loot)) throw new Error('save: invalid march loot')
-    for (const id of REQUIRED_RESOURCES) {
-      const v = m.loot[id]
-      if (!(v instanceof Decimal) || !isFiniteDecimal(v) || v.lt(0)) {
-        throw new Error(`save: invalid march loot ${id}`)
-      }
-    }
-  }
-
-  // v4: battle log — a list of plain-JSON reports (no Decimals). Validate the
-  // discriminant and the shared fields; loot is a pre-summed string, never a number.
+  // GLOBAL battle log — a list of plain-JSON reports (no Decimals). Validate the
+  // discriminant and shared fields; loot is a pre-summed string (never a number),
+  // and since M2.1 each report carries the villageId it came from.
+  const { battleLog } = s
   if (!Array.isArray(battleLog)) throw new Error('save: invalid battleLog')
   for (const r of battleLog) {
     if (!isObject(r)) throw new Error('save: invalid battle report')
     if (r.kind !== 'attack' && r.kind !== 'raid') {
       throw new Error('save: invalid battle report kind')
     }
+    if (typeof r.villageId !== 'string') throw new Error('save: invalid battle report villageId')
     if (typeof r.won !== 'boolean') throw new Error('save: invalid battle report won')
     if (typeof r.losses !== 'number' || !Number.isInteger(r.losses) || r.losses < 0) {
       throw new Error('save: invalid battle report losses')
@@ -278,11 +362,6 @@ export function validateState(s: unknown): GameState {
     } else if (typeof r.looted !== 'string') {
       throw new Error('save: invalid raid report looted')
     }
-  }
-
-  // v4: raid clock — a finite, non-negative number of seconds until the next raid.
-  if (typeof raidTimer !== 'number' || !Number.isFinite(raidTimer) || raidTimer < 0) {
-    throw new Error('save: invalid raidTimer')
   }
 
   return s as unknown as GameState

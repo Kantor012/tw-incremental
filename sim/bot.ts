@@ -1,5 +1,5 @@
 import { ZERO, type Decimal } from '../src/engine/decimal'
-import { RESOURCE_IDS, type GameState } from '../src/engine/state'
+import { RESOURCE_IDS, type Village } from '../src/engine/state'
 import { BUILDING_IDS, type BuildingId } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { nextCostAffordable } from '../src/systems/buildings'
@@ -18,9 +18,13 @@ import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
  * harness exercises the same purchase/recruit code paths a real player drives,
  * and the no-softlock invariant uses it to ask "is any progress action available?".
  *
- * Pure function of `GameState` only — no hidden counters — so the determinism /
- * save-load invariants hold and checkNoSoftlock can probe `chooseAction(state)`
- * to detect "nothing left to do" without perturbing any cadence.
+ * Since M2.1 the bot acts on ONE {@link Village} (the runner drives the first
+ * village in {@link import('../src/engine/state').GameState.villageOrder}); the
+ * functions are pure over that village + the catalogues — no hidden counters — so
+ * the determinism / save-load invariants hold and checkNoSoftlock can probe
+ * `chooseAction(village)` to detect "nothing left to do" without perturbing any
+ * cadence. Founding/managing extra villages is a later milestone (M2.2+); the bot
+ * deliberately stays single-village so the M2.1 run is identical to the old one.
  */
 export type BotAction =
   | { kind: 'build'; id: BuildingId }
@@ -57,23 +61,24 @@ const MAX_ATTACK_LOSS = 0.35
  */
 const STRIKE_MIN_ARMY = 8
 
-/** Sum of all resources — a coarse proxy used only for the build-vs-recruit gate. */
-function resourceSum(state: GameState): Decimal {
+/** Sum of a village's resources — a coarse proxy used only for the build-vs-recruit gate. */
+function resourceSum(v: Village): Decimal {
   let total = ZERO
-  for (const id of RESOURCE_IDS) total = total.add(state.resources[id])
+  for (const id of RESOURCE_IDS) total = total.add(v.resources[id])
   return total
 }
 
 /**
- * Cheapest affordable, non-maxed building, ranked by total cost across resources
- * (wood + clay + iron) on Decimal so the comparison stays exact past 2^53. Ties
- * resolve to the first id in {@link BUILDING_IDS} order — fully deterministic.
+ * Cheapest affordable, non-maxed building in `v`, ranked by total cost across
+ * resources (wood + clay + iron) on Decimal so the comparison stays exact past
+ * 2^53. Ties resolve to the first id in {@link BUILDING_IDS} order — fully
+ * deterministic.
  */
-function cheapestBuilding(state: GameState): { id: BuildingId; sum: Decimal } | null {
+function cheapestBuilding(v: Village): { id: BuildingId; sum: Decimal } | null {
   let best: BuildingId | null = null
   let bestSum: Decimal | null = null
   for (const id of BUILDING_IDS) {
-    const { cost, affordable, maxed } = nextCostAffordable(state, id)
+    const { cost, affordable, maxed } = nextCostAffordable(v, id)
     if (maxed || !affordable) continue
     const sum = cost.wood.add(cost.clay).add(cost.iron)
     if (bestSum === null || sum.lt(bestSum)) {
@@ -85,19 +90,19 @@ function cheapestBuilding(state: GameState): { id: BuildingId; sum: Decimal } | 
 }
 
 /**
- * How many of `unitId` the bot can train in ONE order right now: bounded by free
- * population (so it never over-commits the farm) and by per-resource affordability.
- * Counts are plain integers; resource division uses Decimal then floors. Returns 0
- * when nothing fits.
+ * How many of `unitId` the bot can train in ONE order right now in `v`: bounded by
+ * free population (so it never over-commits the farm) and by per-resource
+ * affordability. Counts are plain integers; resource division uses Decimal then
+ * floors. Returns 0 when nothing fits.
  */
-function recruitBatch(state: GameState, unitId: UnitId): number {
+function recruitBatch(v: Village, unitId: UnitId): number {
   const def = UNITS[unitId]
   if (def.pop <= 0) return 0
-  const free = freePopulation(state).toNumber()
+  const free = freePopulation(v).toNumber()
   let count = Math.floor(free / def.pop)
-  count = Math.min(count, affordableUnits(state.resources.wood, def.cost.wood))
-  count = Math.min(count, affordableUnits(state.resources.clay, def.cost.clay))
-  count = Math.min(count, affordableUnits(state.resources.iron, def.cost.iron))
+  count = Math.min(count, affordableUnits(v.resources.wood, def.cost.wood))
+  count = Math.min(count, affordableUnits(v.resources.clay, def.cost.clay))
+  count = Math.min(count, affordableUnits(v.resources.iron, def.cost.iron))
   return count > 0 ? count : 0
 }
 
@@ -108,15 +113,15 @@ function affordableUnits(have: Decimal, per: number): number {
 }
 
 /**
- * Cheapest recruitable unit as a full batch action, or null when nothing can be
- * trained (barracks locked, no free population, or unaffordable). Ranks by single
- * -unit cost sum; ties resolve to the first id in {@link UNIT_IDS} order.
+ * Cheapest recruitable unit in `v` as a full batch action, or null when nothing can
+ * be trained (barracks locked, no free population, or unaffordable). Ranks by
+ * single-unit cost sum; ties resolve to the first id in {@link UNIT_IDS} order.
  */
-function cheapestRecruit(state: GameState): Extract<BotAction, { kind: 'recruit' }> | null {
+function cheapestRecruit(v: Village): Extract<BotAction, { kind: 'recruit' }> | null {
   let best: UnitId | null = null
   let bestSum: Decimal | null = null
   for (const id of UNIT_IDS) {
-    if (!canRecruit(state, id, 1).ok) continue
+    if (!canRecruit(v, id, 1).ok) continue
     const c = recruitCost(id, 1)
     const sum = c.wood.add(c.clay).add(c.iron)
     if (bestSum === null || sum.lt(bestSum)) {
@@ -125,7 +130,7 @@ function cheapestRecruit(state: GameState): Extract<BotAction, { kind: 'recruit'
     }
   }
   if (best === null) return null
-  const count = recruitBatch(state, best)
+  const count = recruitBatch(v, best)
   return count >= 1 ? { kind: 'recruit', unitId: best, count } : null
 }
 
@@ -137,22 +142,23 @@ function homeArmySize(home: Record<UnitId, number>): number {
 }
 
 /**
- * Pick an attack for the army currently AT HOME, or null when none is worthwhile.
+ * Pick an attack for the army currently AT HOME in `v`, or null when none is
+ * worthwhile.
  *
  * The loop's loot SOURCE (M1.3): scan the camp ladder from the top down and return
  * the HIGHEST tier the home stack beats with losses under {@link MAX_ATTACK_LOSS}
  * AND with at least one surviving hauler (carry > 0, so loot actually comes home).
  * Sends the WHOLE home army — after dispatch the home is empty, so at most one attack
  * is issued per step and the freshly-trained / returning units rebuild the stack for
- * the next strike. Pure function of state (stationedUnits − catalogues), so it stays
- * deterministic and safe for the no-softlock probe to call.
+ * the next strike. Pure function of the village (stationedUnits − catalogues), so it
+ * stays deterministic and safe for the no-softlock probe to call.
  *
  * Returns null when the barracks are locked, the home stack is below
  * {@link STRIKE_MIN_ARMY}, or no tier is winnable within the loss budget.
  */
-function chooseAttack(state: GameState): Extract<BotAction, { kind: 'attack' }> | null {
-  if (!barracksUnlocked(state)) return null
-  const home = stationedUnits(state)
+function chooseAttack(v: Village): Extract<BotAction, { kind: 'attack' }> | null {
+  if (!barracksUnlocked(v)) return null
+  const home = stationedUnits(v)
   if (homeArmySize(home) < STRIKE_MIN_ARMY) return null
   const atkPower = armyAttackPower(home)
   if (atkPower <= 0) return null
@@ -169,7 +175,8 @@ function chooseAttack(state: GameState): Extract<BotAction, { kind: 'attack' }> 
 }
 
 /**
- * Choose the next action, or null when nothing is affordable / available.
+ * Choose the next action for village `v`, or null when nothing is affordable /
+ * available.
  *
  * M1.3 strategy:
  *  0. Build the BARRACKS first (recruitment + military gate), as in M1.2.
@@ -194,24 +201,24 @@ function chooseAttack(state: GameState): Extract<BotAction, { kind: 'attack' }> 
  * be trained — the signal checkNoSoftlock pairs with resource growth / content
  * consumption to classify a stall.
  */
-export function chooseAction(state: GameState): BotAction | null {
-  if (!barracksUnlocked(state)) {
-    const b = nextCostAffordable(state, 'barracks')
+export function chooseAction(v: Village): BotAction | null {
+  if (!barracksUnlocked(v)) {
+    const b = nextCostAffordable(v, 'barracks')
     if (!b.maxed && b.affordable) return { kind: 'build', id: 'barracks' }
     // Can't afford the barracks yet — grow the economy via the cheapest build below.
   }
 
   // M1.3: a ready home army strikes for loot before the economy spends below.
-  const attack = chooseAttack(state)
+  const attack = chooseAttack(v)
   if (attack !== null) return attack
 
-  const building = cheapestBuilding(state)
-  const recruit = barracksUnlocked(state) ? cheapestRecruit(state) : null
+  const building = cheapestBuilding(v)
+  const recruit = barracksUnlocked(v) ? cheapestRecruit(v) : null
 
   if (building === null) return recruit // recruit if possible, else null (nothing to do)
   if (recruit === null) return { kind: 'build', id: building.id }
 
   // Both available: spend the surplus on units, keep the reserve for buildings.
-  const flush = resourceSum(state).gte(building.sum.mul(BUILD_RESERVE))
+  const flush = resourceSum(v).gte(building.sum.mul(BUILD_RESERVE))
   return flush ? recruit : { kind: 'build', id: building.id }
 }
