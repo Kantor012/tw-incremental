@@ -9,12 +9,14 @@ import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
 import { recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
+import { foundVillage } from '../src/systems/villages'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
   runInvariants,
   checkArmyConsistency,
   checkWorldConsistency,
+  checkVillagePlacement,
   checkRoundTrip,
   checkNoSoftlock,
   checkOfflineDeterminism,
@@ -23,7 +25,7 @@ import {
   totalResources,
   type InvariantResult,
 } from './invariants'
-import { chooseAction } from './bot'
+import { chooseAction, chooseFounding } from './bot'
 import {
   collect,
   emptyCombatStats,
@@ -60,11 +62,12 @@ const OFFLINE_CHECK_SECONDS = 3600
  */
 const MAX_ACTIONS_PER_STEP = 8
 
-/** What one {@link step} did: building upgrades bought, units ordered, attacks sent. */
+/** What one {@link step} did: building upgrades bought, units ordered, attacks sent, villages founded. */
 interface StepResult {
   built: number
   recruited: number
   attacked: number
+  founded: number
 }
 
 /** Prefix invariant names with the phase that produced them, for the report. */
@@ -94,6 +97,7 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
   let built = 0
   let rec = 0
   let attacked = 0
+  let founded = 0
   let actions = 0
   const v = state.villages[state.villageOrder[0]]
   while (actions < MAX_ACTIONS_PER_STEP) {
@@ -106,16 +110,29 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
       if (!recruit(v, action.unitId, action.count)) break
       recruited[action.unitId] += action.count
       rec += action.count
-    } else {
+    } else if (action.kind === 'attack') {
       // attack: dispatch the home army at a CONCRETE barbarian village on the world
       // map (loot source + unit sink); travel time is the Euclidean distance to it.
       if (!sendAttack(v, state.world, state.battleLog, action.targetId, action.units)) break
       attacked++
+    } else {
+      // 'found' is never emitted by chooseAction (it is a per-village decision); the
+      // expansion move is handled once after the loop via chooseFounding below.
+      break
     }
     actions++
   }
+
+  // M2.3 expansion: AFTER the per-village loop, so founding only spends what the
+  // economy/army loop left idle (chooseFounding gates on idle resource sinks). At most
+  // one new village per step — a paced, deterministic outward expansion from the capital.
+  const found = chooseFounding(state)
+  if (found !== null && foundVillage(state, state.villageOrder[0], found.x, found.y) !== null) {
+    founded++
+  }
+
   simulate(state, dt)
-  return { built, recruited: rec, attacked }
+  return { built, recruited: rec, attacked, founded }
 }
 
 /** What a continuous run yields: the final state, sampled invariants, counters. */
@@ -147,6 +164,7 @@ function runContinuous(
 
   let upgradesBought = 0
   let totalRecruited = 0
+  let villagesFounded = 0
   const unitsRecruited = emptyUnitCounts()
   // Progress actions (builds + recruits + attacks) since the last sample — a window
   // with any action counts as progress even if the spend left the resource sum lower.
@@ -162,10 +180,11 @@ function runContinuous(
   let prevLog: BattleReport[] = state.battleLog.slice()
 
   for (let i = 0; i < ticks; i++) {
-    const { built, recruited, attacked } = step(state, dt, unitsRecruited)
+    const { built, recruited, attacked, founded } = step(state, dt, unitsRecruited)
     upgradesBought += built
     totalRecruited += recruited
-    actedInWindow += built + recruited + attacked
+    villagesFounded += founded
+    actedInWindow += built + recruited + attacked + founded
     combat.attacksSent += attacked
 
     // Fold any battle / raid reports the step produced into the running tally.
@@ -178,6 +197,7 @@ function runContinuous(
       invariants.push(...tag(runInvariants(state), phase))
       invariants.push(...tag([checkArmyConsistency(state)], phase))
       invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
       invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
@@ -196,6 +216,7 @@ function runContinuous(
     invariants.push(...tag(runInvariants(state), 'final'))
     invariants.push(...tag([checkArmyConsistency(state)], 'final'))
     invariants.push(...tag([checkWorldConsistency(state)], 'final'))
+    invariants.push(...tag([checkVillagePlacement(state)], 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
     // Whole-run progress: any action ever taken, or resources above the start.
     invariants.push(
@@ -210,6 +231,7 @@ function runContinuous(
     invariants,
     stats: {
       upgradesBought,
+      villagesFounded,
       windowsWithProgress,
       windowCount,
       unitsRecruited,

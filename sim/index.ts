@@ -96,6 +96,11 @@ function evalTargets(r: RunResult): TargetCheck[] {
         ? `frontier reached at tick ~${m.contentFrontierTick} (combat should keep the loop open!)`
         : 'frontier never reached — combat keeps the loop self-propelling',
     },
+    {
+      name: 'villages-founded',
+      ok: m.villagesFounded >= TARGETS.minVillagesFounded,
+      detail: `founded ${m.villagesFounded} (own ${m.villagesOwned}, target founded >= ${TARGETS.minVillagesFounded})`,
+    },
   ]
 }
 
@@ -176,6 +181,17 @@ function main(): void {
     console.log(
       `${m.seed.padEnd(8)} | ${m.attacksSent} (${m.battlesWon}/${m.battlesLost}) | ${m.totalLoot} | ` +
         `${m.raidsSurvived}/${m.raidsLost} | ${m.raidStolen} | ${m.unitsLost} | ${m.finalArmyTotal}`,
+    )
+  }
+  console.log('')
+
+  // --- Expansion per seed (M2.3 founding) ---
+  console.log('--- Expansion (end) ---')
+  console.log('seed     | villages founded | villages owned')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.villagesFounded).padStart(16)} | ${m.villagesOwned}`,
     )
   }
   console.log('')

@@ -69,6 +69,14 @@ export interface BalanceTargets {
    * a run that reports a frontier tick FAILS this (warning) target.
    */
   requireNoContentFrontier: boolean
+
+  // --- M2.3 expansion goal (warning) ---
+  /**
+   * The bot must FOUND at least this many new villages over a run — proof the
+   * expansion mechanic is reachable and the cost curve lets a maturing capital pay
+   * for it. >= 1 confirms multi-village play actually happens within the budget.
+   */
+  minVillagesFounded: number
 }
 
 export const TARGETS: BalanceTargets = {
@@ -110,4 +118,11 @@ export const TARGETS: BalanceTargets = {
   minLootHauled: 300000,
   minRaidsResolved: 40,
   requireNoContentFrontier: true,
+
+  // M2.3: expansion online. A maturing capital should be able to fund at least one
+  // new village within the budget without starving the economy/combat targets above
+  // (the bot founds only from IDLE surplus — see sim/bot.chooseFounding). Sized at the
+  // minimum proof-of-mechanic; a healthy run founds a handful before the geometric
+  // cost outgrows the warehouse cap.
+  minVillagesFounded: 1,
 }

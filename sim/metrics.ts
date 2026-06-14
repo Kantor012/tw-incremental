@@ -30,6 +30,13 @@ export interface RunMetrics {
   resources: Record<string, string>
   /** How many building upgrades the bot purchased over the whole run. */
   upgradesBought: number
+  /**
+   * How many NEW villages the bot founded over the run (M2.3 expansion). 0 means the
+   * founding mechanic never fired; the villages-founded balance target wants >= 1.
+   */
+  villagesFounded: number
+  /** Player villages owned at run end (capital + founded) = villagesFounded + 1. */
+  villagesOwned: number
   /** Total production/second at run start, summed across all villages (initial levels). */
   productionStart: string
   /** Total production/second at run end (summed across villages) — vs start for growth. */
@@ -94,6 +101,8 @@ export interface RunMetrics {
 /** Per-run counters the runner threads into {@link collect}. */
 export interface RunStats {
   upgradesBought: number
+  /** New villages founded over the run (M2.3). */
+  villagesFounded: number
   windowsWithProgress: number
   windowCount: number
   /** Units the bot ordered over the run, per id. */
@@ -243,6 +252,8 @@ export function collect(
     simSeconds,
     resources,
     upgradesBought: stats.upgradesBought,
+    villagesFounded: stats.villagesFounded,
+    villagesOwned: state.villageOrder.length,
     productionStart: totalProduction(start).toString(),
     productionEnd: totalProduction(state).toString(),
     buildings,

@@ -17,6 +17,7 @@ import { EventBus, type GameEvents } from './engine/eventbus'
 import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
 import { sendAttack } from './systems/marches'
+import { foundVillage } from './systems/villages'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -108,7 +109,15 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.6.0',
+  onFound: (payerVillageId: VillageId, x: number, y: number) => {
+    const id = foundVillage(store.state, payerVillageId, x, y)
+    if (id !== null) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return id
+  },
+  version: '0.7.0',
   offlineSeconds,
 })
 

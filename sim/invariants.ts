@@ -17,6 +17,7 @@ import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
+import { WORLD_SIZE } from '../src/systems/world'
 import { chooseAction } from './bot'
 
 /**
@@ -226,6 +227,51 @@ export function checkWorldConsistency(state: GameState): InvariantResult {
 
   return {
     name: 'world-consistency',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Player-village placement invariant (M2.3). Founding plants brand-new owned villages
+ * on the map, so the empire's own footprint must stay sane exactly as the barbarian map
+ * must (see {@link checkWorldConsistency}, which only guards the barbarian side and the
+ * barbarian↔player overlap — it does NOT catch two OWNED villages colliding, because it
+ * overwrites duplicate keys). Over villageOrder this asserts:
+ *  - every village has FINITE INTEGER coordinates inside the map [0, WORLD_SIZE],
+ *  - NO TWO owned villages share a map cell (a founded village must take a free tile),
+ *  - NO owned village sits on a barbarian's cell (founding must avoid occupied tiles).
+ *
+ * Together with {@link canFound}'s spacing/range gates this proves the founding engine
+ * never produces an ambiguous or overlapping settlement, however many villages a run
+ * accumulates. Each offending entry names the village id.
+ */
+export function checkVillagePlacement(state: GameState): InvariantResult {
+  const issues: string[] = []
+
+  const owned = new Map<string, string>()
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    if (!Number.isInteger(v.x) || !Number.isInteger(v.y)) {
+      issues.push(`${vid} non-integer coords (${v.x},${v.y})`)
+      continue
+    }
+    if (v.x < 0 || v.y < 0 || v.x > WORLD_SIZE || v.y > WORLD_SIZE) {
+      issues.push(`${vid} off-map (${v.x},${v.y})`)
+    }
+    const key = v.x + ',' + v.y
+    const prev = owned.get(key)
+    if (prev !== undefined) issues.push(`${vid} shares cell ${key} with ${prev}`)
+    else owned.set(key, vid)
+  }
+
+  for (const b of state.world.barbarians) {
+    const hit = owned.get(b.x + ',' + b.y)
+    if (hit !== undefined) issues.push(`${hit} shares cell ${b.x},${b.y} with barbarian ${b.id}`)
+  }
+
+  return {
+    name: 'village-placement',
     ok: issues.length === 0,
     detail: issues.length ? issues.join('; ') : undefined,
   }

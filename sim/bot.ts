@@ -1,5 +1,5 @@
 import { ZERO, type Decimal } from '../src/engine/decimal'
-import { RESOURCE_IDS, type Village, type World } from '../src/engine/state'
+import { RESOURCE_IDS, type GameState, type Village, type World } from '../src/engine/state'
 import { BUILDING_IDS, type BuildingId } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { nextCostAffordable } from '../src/systems/buildings'
@@ -13,25 +13,36 @@ import { stationedUnits } from '../src/systems/marches'
 import { targetsByDistance } from '../src/systems/world'
 import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from '../src/systems/combat'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
+import { foundCost, findFoundingSpot, canFound, playerVillageCount } from '../src/systems/villages'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
  * harness exercises the same purchase/recruit code paths a real player drives,
  * and the no-softlock invariant uses it to ask "is any progress action available?".
  *
- * Since M2.1 the bot acts on ONE {@link Village} (the runner drives the first
- * village in {@link import('../src/engine/state').GameState.villageOrder}); the
- * functions are pure over that village + the catalogues (and, since M2.2, the seed-
- * generated {@link World} for picking a concrete attack target) — no hidden counters
- * — so the determinism / save-load invariants hold and checkNoSoftlock can probe
- * `chooseAction(village, world)` to detect "nothing left to do" without perturbing any
- * cadence. Founding/managing extra villages is a later milestone (M2.3+); the bot
- * deliberately stays single-village so the run still exercises one economy at a time.
+ * The per-village economy/military decision ({@link chooseAction}) acts on ONE
+ * {@link Village} (the runner drives the first village in
+ * {@link import('../src/engine/state').GameState.villageOrder}); it is pure over that
+ * village + the catalogues (and, since M2.2, the seed-generated {@link World} for
+ * picking a concrete attack target) — no hidden counters — so the determinism /
+ * save-load invariants hold and checkNoSoftlock can probe `chooseAction(village,
+ * world)` to detect "nothing left to do" without perturbing any cadence.
+ *
+ * M2.3 adds a SEPARATE, global EXPANSION decision ({@link chooseFounding}) that reads
+ * the whole {@link GameState} (cost scales with how many villages are already owned,
+ * and a valid site must be searched on the world map). It is kept OUT of
+ * {@link chooseAction} on purpose: founding is paid from the capital but is not a
+ * per-village economy move, and folding it into the softlock probe would let "you can
+ * always found another village" mask a genuine economy stall. The runner consults it
+ * once per step AFTER the per-village loop, so expansion only spends what the
+ * recruit -> attack -> loot loop left idle. It is likewise a pure function of state,
+ * so determinism / save-load continuation hold across a founded village too.
  */
 export type BotAction =
   | { kind: 'build'; id: BuildingId }
   | { kind: 'recruit'; unitId: UnitId; count: number }
   | { kind: 'attack'; targetId: string; targetLevel: number; units: Record<UnitId, number> }
+  | { kind: 'found'; x: number; y: number }
 
 /**
  * Surplus multiplier for the build-vs-recruit tiebreak: when total resources reach
@@ -243,4 +254,63 @@ export function chooseAction(v: Village, world: World): BotAction | null {
   // Both available: spend the surplus on units, keep the reserve for buildings.
   const flush = resourceSum(v).gte(building.sum.mul(BUILD_RESERVE))
   return flush ? recruit : { kind: 'build', id: building.id }
+}
+
+/**
+ * Surplus multiplier over {@link foundCost} the capital must hold (in EVERY resource)
+ * before the bot will spend on a new village. A buffer above the bare cost so founding
+ * never drains the pool the recruit -> attack loop draws on — combined with the
+ * idle-sink gate below it means expansion only ever uses resources that would
+ * otherwise sit pinned at the warehouse cap doing nothing.
+ */
+const BOT_FOUND_RESERVE = 2
+
+/**
+ * Safety ceiling on how many villages the bot will own. The founding cost grows
+ * geometrically ({@link FOUND_COST_GROWTH}) while the capital's storage is capped, so
+ * founding self-limits to a handful of settlements well before this; the cap is a
+ * belt-and-suspenders bound so a balance change to the cost curve can never let the
+ * bot expand without limit and starve the measured economy/combat targets.
+ */
+const BOT_MAX_VILLAGES = 8
+
+/**
+ * EXPANSION decision (M2.3): occasionally found a new village, paid from the capital
+ * (`villageOrder[0]`), or null when the bot should not expand this step. Deliberately
+ * CONSERVATIVE so it cannot regress the M1.1–M1.3 targets:
+ *
+ *  1. owned village count is below {@link BOT_MAX_VILLAGES} (hard runaway guard),
+ *  2. the capital's per-village resource sinks are BOTH idle — no affordable building
+ *     upgrade ({@link cheapestBuilding} is null) AND no trainable unit
+ *     ({@link cheapestRecruit} is null, i.e. population is full / nothing affordable),
+ *     so the resources are genuinely surplus and not needed by the economy/army loop,
+ *  3. the capital still holds at least {@link BOT_FOUND_RESERVE}× {@link foundCost} in
+ *     every resource (a buffer on top of the bare price), and
+ *  4. a valid founding site exists ({@link findFoundingSpot}) that {@link canFound}
+ *     accepts (geometry + affordability).
+ *
+ * Pure function of `state` (cost / spot search / gates are all deterministic), so two
+ * identical runs found the same villages in the same order — the determinism and
+ * save-load-continuation invariants hold with expansion in play. The found site is the
+ * nearest valid tile to the capital, so the empire grows outward in steps.
+ */
+export function chooseFounding(state: GameState): Extract<BotAction, { kind: 'found' }> | null {
+  if (playerVillageCount(state) >= BOT_MAX_VILLAGES) return null
+
+  const payerId = state.villageOrder[0]
+  const payer = state.villages[payerId]
+
+  // Only expand with idle resources: never when the capital could still build or train.
+  if (cheapestBuilding(payer) !== null) return null
+  if (cheapestRecruit(payer) !== null) return null
+
+  const cost = foundCost(state)
+  if (!payer.resources.wood.gte(cost.wood.mul(BOT_FOUND_RESERVE))) return null
+  if (!payer.resources.clay.gte(cost.clay.mul(BOT_FOUND_RESERVE))) return null
+  if (!payer.resources.iron.gte(cost.iron.mul(BOT_FOUND_RESERVE))) return null
+
+  const spot = findFoundingSpot(state, payerId)
+  if (spot === null) return null
+  if (!canFound(state, payerId, spot.x, spot.y).ok) return null
+  return { kind: 'found', x: spot.x, y: spot.y }
 }

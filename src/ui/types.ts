@@ -45,6 +45,13 @@ export interface UiCtx {
    * return).
    */
   onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => boolean
+  /**
+   * Found a new owned village at map field `(x, y)`, paid from `payerVillageId`.
+   * Returns the new village's id on success (cost spent, village added, committed +
+   * persisted), or `null` when founding was rejected (geometry/affordability — the
+   * panel checks `canFound`/`foundCost` from systems/villages directly for cues).
+   */
+  onFound: (payerVillageId: VillageId, x: number, y: number) => VillageId | null
   /** Serialize the current run to a save code string. */
   onExport: () => string
   /** Load a save code; returns true when it parsed and was applied. */

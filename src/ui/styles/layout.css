@@ -92,6 +92,8 @@ html {
 .hud-brand-mark .shield {
   width: 2rem;
   height: 2rem;
+  /* Tarcza maluje się z currentColor (patrz shieldIcon) — barwę nadaje token. */
+  color: var(--accent);
 }
 
 .hud-brand-text {
@@ -617,16 +619,12 @@ html {
   outline-offset: 2px;
 }
 
-/* Wioska gracza — złoty marker. Gdy JS rysuje prostą figurę bez własnego fill,
- * przejmuje barwę akcentu; gotowa tarcza z własnymi wypełnieniami ignoruje to. */
+/* Wioska gracza — złoty marker. Tarcza (shieldIcon) maluje się z currentColor, więc
+ * podajemy barwę przez token `color` — zmiana palety jest respektowana, a reguła
+ * „zero hardkodowanych kolorów" pozostaje spełniona (aktywną wioskę wyróżnia osobny
+ * pierścień .map-active-ring, nie ten węzeł). */
 .map-node--player {
-  fill: var(--accent);
-}
-
-/* Aktywna wioska gracza wyróżniona poświatą akcentu (dodatek do innego markera
- * rysowanego przez JS). */
-.map-node--player.is-active {
-  filter: drop-shadow(0 0 3px var(--accent));
+  color: var(--accent);
 }
 
 /* Wioska barbarzyńska — czerwony znacznik (hue z tokenu; intensywność wg poziomu
@@ -812,7 +810,23 @@ html {
     bottom: var(--space-2);
     left: var(--space-2);
     flex-direction: row;
+    /* M2.3 dodało 4. przycisk („Załóż wioskę"). Dwie ikony + „Wycentruj na stolicy"
+     * + „Załóż wioskę" przekraczają szerokość telefonu, a .map-wrap ma overflow:hidden
+     * — bez zawijania ostatni przycisk byłby przycięty i nieosiągalny. Rząd rośnie w
+     * GÓRĘ od dolnej kotwicy, więc zawinięte przyciski zostają nad polem mapy. */
+    flex-wrap: wrap;
     z-index: var(--z-overlay);
+  }
+
+  /* Baner trybu zakładania przenosimy NAD dolny rząd kontrolek (tam, gdzie patrzy
+   * kciuk), zamiast zostawiać go u góry wysokiej mapy. Z zapasem na ewentualnie
+   * zawinięte do dwóch rzędów przyciski (2×44px + odstępy ≈ 6rem). */
+  .map-found-status {
+    top: auto;
+    bottom: calc(var(--space-2) + 6.5rem);
+    left: var(--space-2);
+    right: var(--space-2);
+    max-width: none;
   }
 
   .map-detail {
@@ -833,4 +847,75 @@ html {
   .map-march {
     animation: none;
   }
+}
+
+/* ============================================================================
+ * f) PANEL „WIOSKI" (zakładka „Wioski", src/ui/panels/villages.ts)
+ * --------------------------------------------------------------------------
+ * Globalny, między-wioskowy widok M2.3: każda posiadana wioska jako karta
+ * (reużywa .card-grid / .card — jedyne źródło układu siatki kart, sekcja c)
+ * z żywą ekonomią + selektorem „Wybierz", oraz SEKCJA ZAKŁADANIA nowej wioski.
+ *
+ * Panel sam opisuje wnętrza kart tokenowymi stylami inline (tak jak panel
+ * budynków), więc tutaj dokładamy WYŁĄCZNIE to, czego klasy współdzielone nie
+ * pokrywają: wizualne wydzielenie sekcji zakładania spod listy wiosek. Tylko
+ * tokeny, zero hardkodowanych kolorów.
+ * ========================================================================== */
+
+/* Sekcja zakładania to osobna strefa pod listą wiosek: linia działowa daje jej
+ * własną „ramę" (panel ustawia jeszcze inline margin-top jako oddech od listy). */
+.founding-section {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+/* ============================================================================
+ * g) TRYB ZAKŁADANIA NA MAPIE (M2.3, src/ui/panels/map.ts)
+ * --------------------------------------------------------------------------
+ * Gdy gracz uzbroi przycisk „Załóż wioskę", JS dodaje klasę .is-founding na
+ * <svg> mapy: kliknięcie SADZI nową wioskę zamiast zaznaczać cel. Tryb sygnali-
+ * zujemy NIE samym kolorem (WCAG 1.4.1) — trzema niezależnymi wskazówkami:
+ *   1) kursor zmienia się na celownik,
+ *   2) pole mapy dostaje złotą ramkę wewnętrzną,
+ *   3) tekstowy pasek-podpowiedź .map-found-status niesie instrukcję / powód.
+ * Reguły CELOWO kaskadują PO bloku mapy powyżej (sekcja e), by wygrać z kursorem
+ * grab/grabbing (.map-svg, .map-svg:active, .map-svg.is-panning) przy równej
+ * specyficzności.
+ * ========================================================================== */
+
+/* Celownik wygrywa nad grab/grabbing — także w trakcie przeciągania mapy. */
+.map-svg.is-founding,
+.map-svg.is-founding:active,
+.map-svg.is-founding.is-panning {
+  cursor: crosshair;
+}
+
+/* Złota ramka wewnętrzna oprawia pole mapy w uzbrojonym trybie zakładania —
+ * sygnał stanu niezależny od kursora i od paska podpowiedzi. */
+.map-svg.is-founding {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* Pasek-podpowiedź trybu (instrukcja albo PL powód odrzucenia pola). Czytelny
+ * baner-NAKŁADKA WEWNĄTRZ pola mapy (.map-wrap jest position:relative), nie nad nim
+ * w przepływie panelu — dzięki temu komunikat zostaje w viewporcie przy miejscu
+ * interakcji (na telefonie kontrolki są na dole mapy, więc i baner ląduje nisko —
+ * patrz blok responsywności). Obrys akcentu wiąże go z uzbrojonym trybem, a pełny
+ * --text (zamiast .muted) podnosi czytelność błędu. Widoczność przełącza JS. */
+.map-found-status {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  /* Na desktopie kontrolki siedzą w prawym górnym rogu (kolumna ~10–11rem); baner
+   * trzymamy po lewej z marginesem, by ich nie zasłaniał. */
+  max-width: min(24rem, calc(100% - 13rem));
+  z-index: var(--z-overlay);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text);
+  background-color: var(--bg-2);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
 }

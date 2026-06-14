@@ -11,6 +11,7 @@ import {
   WORLD_CENTER,
   WORLD_SIZE,
 } from '../../systems/world'
+import { canFound } from '../../systems/villages'
 import { marchTime, stationedUnits, canAttack } from '../../systems/marches'
 import { armyAttackPower, armyCarry, battleOutcome } from '../../systems/combat'
 import type { UiCtx, Panel } from '../types'
@@ -176,6 +177,18 @@ export function createMapPanel(ctx: UiCtx): Panel {
   addLegend('is-march', 'Marsz')
   el.appendChild(legend)
 
+  // ---- Founding-mode status line (M2.3) -----------------------------------
+  // Live, polite status for the "Załóż wioskę" mode: the hint while armed, then the
+  // PL reason a tapped field was rejected (geometry/affordability from canFound).
+  // Carries the meaning in text (colour is never the only cue); hidden when idle.
+  // It is an absolute OVERLAY anchored INSIDE .map-wrap (appended below, after the
+  // controls) so the feedback stays in the viewport next to where the user is acting
+  // — on phones the controls live at the bottom of the map, where this banner sits.
+  const foundStatus = h('p', 'map-found-status muted')
+  foundStatus.setAttribute('role', 'status')
+  foundStatus.setAttribute('aria-live', 'polite')
+  foundStatus.style.display = 'none'
+
   // ---- Map viewport (SVG) + overlay controls ------------------------------
   const wrap = h('div', 'map-wrap')
 
@@ -254,9 +267,16 @@ export function createMapPanel(ctx: UiCtx): Panel {
   zoomInBtn.setAttribute('aria-label', 'Przybliż mapę')
   const centerBtn = h('button', 'btn btn-ghost map-center-btn', 'Wycentruj na stolicy')
   centerBtn.type = 'button'
+  // Founding-mode toggle (M2.3). A pressed-state button (aria-pressed); when armed it
+  // also swaps to the primary fill so the active mode is signalled by more than colour.
+  const foundBtn = h('button', 'btn btn-ghost map-found-btn', 'Załóż wioskę')
+  foundBtn.type = 'button'
+  foundBtn.setAttribute('aria-pressed', 'false')
+  foundBtn.title = 'Włącz tryb zakładania i kliknij wolne pole na mapie'
   controls.appendChild(zoomOutBtn)
   controls.appendChild(zoomInBtn)
   controls.appendChild(centerBtn)
+  controls.appendChild(foundBtn)
   wrap.appendChild(controls)
   el.appendChild(wrap)
 
@@ -450,7 +470,15 @@ export function createMapPanel(ctx: UiCtx): Panel {
 
   // ---- Selection state -----------------------------------------------------
   let selectedId: string | null = null
+  // Founding mode (M2.3): when armed, a plain click on a FREE, valid field plants a
+  // new owned village (ctx.onFound) instead of selecting a target — the two click
+  // gestures are mutually exclusive so they never collide. Pan/zoom keep working (a
+  // drag still pans; suppressClick swallows the click a drag synthesises).
+  let foundMode = false
   const select = (id: string): void => {
+    // In founding mode the map click is a "place village" gesture: never select a
+    // target here (leave suppressClick for the svg-level founding handler to read).
+    if (foundMode) return
     if (suppressClick) {
       suppressClick = false
       return
@@ -458,6 +486,62 @@ export function createMapPanel(ctx: UiCtx): Panel {
     selectedId = id
     update()
   }
+
+  // ---- Founding-mode wiring (M2.3) ----------------------------------------
+  const FOUND_HINT =
+    'Tryb zakładania: kliknij wolne pole na mapie, aby założyć nową wioskę. ' +
+    'Przeciągnij, aby przesunąć mapę.'
+  /** Arm/disarm founding: reflect it on the button (pressed + primary fill), the SVG
+   * cursor/class, and the status line. Pure view state — never persisted. */
+  const setFoundMode = (on: boolean): void => {
+    foundMode = on
+    foundBtn.setAttribute('aria-pressed', on ? 'true' : 'false')
+    foundBtn.classList.toggle('btn-primary', on)
+    foundBtn.classList.toggle('btn-ghost', !on)
+    svgEl.style.cursor = on ? 'crosshair' : ''
+    svgEl.classList.toggle('is-founding', on)
+    foundStatus.textContent = on ? FOUND_HINT : ''
+    foundStatus.style.display = on ? '' : 'none'
+  }
+  foundBtn.addEventListener('click', () => setFoundMode(!foundMode))
+
+  // A plain (non-pan) click while armed plants a village on the rounded world field
+  // under the cursor. This bubbles up AFTER any node's own click (which select()
+  // ignores in this mode), so tapping an occupied/too-close field just reports its
+  // PL reason. Geometry/affordability are decided by the pure canFound; the actual
+  // mutation + persistence go through ctx.onFound.
+  svgEl.addEventListener('click', (e: MouseEvent) => {
+    if (!foundMode) return
+    if (suppressClick) {
+      suppressClick = false
+      return
+    }
+    const rect = svgEl.getBoundingClientRect()
+    if (rect.width <= 0 || rect.height <= 0) return
+    const aspect = currentAspect()
+    const curH = viewW * aspect
+    const fx = (e.clientX - rect.left) / rect.width
+    const fy = (e.clientY - rect.top) / rect.height
+    const wx = Math.round(viewCx - viewW / 2 + fx * viewW)
+    const wy = Math.round(viewCy - curH / 2 + fy * curH)
+    const v = activeVillage()
+    const verdict = canFound(ctx.store.state, v.id, wx, wy)
+    if (!verdict.ok) {
+      foundStatus.textContent =
+        'Pole (' + wx + ', ' + wy + '): ' + (verdict.reason ?? 'nie można tu założyć wioski') + '.'
+      foundStatus.style.display = ''
+      return
+    }
+    const newId = ctx.onFound(v.id, wx, wy)
+    if (newId !== null) {
+      setFoundMode(false)
+      ctx.activeVillageId.value = newId
+      update()
+    } else {
+      foundStatus.textContent = 'Nie udało się założyć wioski.'
+      foundStatus.style.display = ''
+    }
+  })
 
   // ---- Detail card ---------------------------------------------------------
   const detail = h('div', 'map-detail')
@@ -499,6 +583,17 @@ export function createMapPanel(ctx: UiCtx): Panel {
   forecast.setAttribute('role', 'status')
   forecast.setAttribute('aria-live', 'polite')
   body.appendChild(forecast)
+  // update() runs on EVERY store revision (every tick). Re-assigning an aria-live
+  // region's textContent re-announces it to assistive tech even when unchanged, so
+  // guard the write to fire only on an actual forecast change (the class toggles
+  // below are idempotent and carry no announcement).
+  let lastForecast = ''
+  const setForecast = (text: string): void => {
+    if (text !== lastForecast) {
+      forecast.textContent = text
+      lastForecast = text
+    }
+  }
 
   // Compact army composer — reuses the campaign tab's styled component classes.
   body.appendChild(h('h4', 'recruit-subtitle', 'Skład wyprawy'))
@@ -560,6 +655,10 @@ export function createMapPanel(ctx: UiCtx): Panel {
   // position:relative), not the unpositioned .map-panel — otherwise position:absolute
   // resolves against the viewport/initial containing block and the card escapes the map.
   wrap.appendChild(detail)
+  // Founding banner as an in-map overlay (see note at its creation). Appended last so
+  // it stacks above the field/detail; CSS positions it (top on desktop, above the
+  // bottom controls on phones) and toggles nothing but its look — JS owns visibility.
+  wrap.appendChild(foundStatus)
 
   /** Read the composed army from the inputs, clamped per-type to the home garrison. */
   const readArmy = (v: Village): Record<UnitId, number> => {
@@ -967,13 +1066,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
     if (composed > 0) {
       const oc = battleOutcome(armyAttackPower(army), target.defensePower)
       const pct = Math.round(oc.attackerLossFrac * 100)
-      forecast.textContent = oc.attackerWins
-        ? '✓ wygrana · straty ~' + pct + '%'
-        : '✗ porażka'
+      setForecast(oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka')
       forecast.classList.toggle('forecast-win', oc.attackerWins)
       forecast.classList.toggle('forecast-lose', !oc.attackerWins)
     } else {
-      forecast.textContent = 'Wybierz jednostki, aby zobaczyć prognozę.'
+      setForecast('Wybierz jednostki, aby zobaczyć prognozę.')
       forecast.classList.remove('forecast-win', 'forecast-lose')
     }
 

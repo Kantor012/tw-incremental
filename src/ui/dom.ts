@@ -64,26 +64,32 @@ export function svgIcon(
   return root
 }
 
-/** Procedural heraldic shield for the dashboard brand. */
+/**
+ * Procedural heraldic shield for the dashboard brand and the player villages on the
+ * map. Painted entirely from `currentColor` (+ token-derived shades), never hardcoded
+ * hex: the caller sets `color` via a token (`.hud-brand-mark .shield` and
+ * `.map-node--player` both resolve it to `var(--accent)`), so the shield follows any
+ * palette change and the project's "zero hardcoded colours" rule holds.
+ *
+ * The darker passages (the shaded left half, the chief band, the central boss) are
+ * derived with `color-mix` against `var(--bg)`; these must be set via the `style`
+ * property, not as presentation attributes, because SVG attributes don't accept the
+ * `color-mix()` / `var()` CSS grammar — inline style does.
+ */
 export function shieldIcon(): SVGSVGElement {
+  // Main face: inherits the accent token through currentColor (valid in SVG attrs).
   const face = svg('path', {
     d: 'M24 3 7 9v13c0 11 8 17 17 21 9-4 17-10 17-21V9z',
-    fill: '#d9a441',
+    fill: 'currentColor',
   })
-  const shade = svg('path', {
-    d: 'M24 3 7 9v13c0 11 8 17 17 21V3z',
-    fill: '#b9852f',
-  })
-  const band = svg('path', {
-    d: 'M7 19h34v5H7z',
-    fill: '#1a1410',
-    'fill-opacity': '0.22',
-  })
-  const boss = svg('path', {
-    d: 'M24 13l7 6-7 6-7-6z',
-    fill: '#3a2a17',
-    'fill-opacity': '0.55',
-  })
+  // Shaded left half: same hue pushed toward the background token.
+  const shade = svg('path', { d: 'M24 3 7 9v13c0 11 8 17 17 21V3z' })
+  shade.style.fill = 'color-mix(in srgb, currentColor 72%, var(--bg))'
+  // Chief band + central boss: dark heraldic detail over the face (token + opacity).
+  const band = svg('path', { d: 'M7 19h34v5H7z', 'fill-opacity': '0.22' })
+  band.style.fill = 'var(--bg)'
+  const boss = svg('path', { d: 'M24 13l7 6-7 6-7-6z', 'fill-opacity': '0.55' })
+  boss.style.fill = 'color-mix(in srgb, currentColor 32%, var(--bg))'
   return svgIcon('0 0 48 48', 'Tarcza plemienna', 'shield', [face, shade, band, boss])
 }
 

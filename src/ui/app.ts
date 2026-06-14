@@ -1,6 +1,7 @@
 import type { UiCtx } from './types'
 import { buildShell, type TabSpec } from './layout'
 import { createBuildingsPanel } from './panels/buildings'
+import { createVillagesPanel } from './panels/villages'
 import { createMapPanel } from './panels/map'
 import { createArmyPanel } from './panels/army'
 import { createCampaignPanel } from './panels/campaign'
@@ -21,6 +22,7 @@ export type { UiCtx, Panel } from './types'
 /** The dashboard's tab roster (order = display order; first is the default tab). */
 const TABS: TabSpec[] = [
   { id: 'buildings', label: 'Budynki', create: createBuildingsPanel },
+  { id: 'villages', label: 'Wioski', create: createVillagesPanel },
   { id: 'map', label: 'Mapa', create: createMapPanel },
   { id: 'army', label: 'Wojsko', create: createArmyPanel },
   { id: 'raids', label: 'Wyprawy', create: createCampaignPanel },
