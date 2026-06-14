@@ -21,13 +21,13 @@ import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
 
 /** A full (all UnitId present) roster snapshot. */
-function army(spearman = 0, swordsman = 0, axeman = 0): Record<UnitId, number> {
-  return { spearman, swordsman, axeman }
+function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble }
 }
 
-/** A barbarian village descriptor at a chosen tier and map position. */
+/** A barbarian village descriptor at a chosen tier and map position (full loyalty). */
 function barb(id: string, level: number, x: number, y: number): BarbarianVillage {
-  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})` }
+  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})`, loyalty: 100 }
 }
 
 /**
@@ -126,7 +126,7 @@ describe('advanceMarches — full attack cycle', () => {
     const t = marchTime(v, target, army(0, 0, 5)) // 54
 
     // Outbound completes → battle resolves; casualties leave village.units at once.
-    advanceMarches(v, s.battleLog, t)
+    advanceMarches(v, s.world, s.battleLog, t)
     expect(v.units.axeman).toBe(4) // 5 axemen vs lvl-1 wall: ~1 lost
     const m = v.marches[0]
     expect(m.phase).toBe('returning')
@@ -143,7 +143,7 @@ describe('advanceMarches — full attack cycle', () => {
     expect(homePlusAway(v, 'axeman')).toBe(v.units.axeman)
 
     // Return completes → loot delivered (50 + 13 each), march dropped.
-    advanceMarches(v, s.battleLog, t)
+    advanceMarches(v, s.world, s.battleLog, t)
     expect(v.marches.length).toBe(0)
     expect(v.resources.wood.toString()).toBe('63')
     expect(v.resources.clay.toString()).toBe('63')
@@ -159,7 +159,7 @@ describe('advanceMarches — full attack cycle', () => {
     sendAttack(v, s.world, s.battleLog, 'b0', army(1, 0, 0))
     const t = marchTime(v, target, army(1, 0, 0)) // spearman speed 18 → 54
 
-    advanceMarches(v, s.battleLog, t)
+    advanceMarches(v, s.world, s.battleLog, t)
     expect(v.marches.length).toBe(0) // dropped, nothing returns
     expect(v.units.spearman).toBe(0) // annihilated
     expect(s.battleLog[0]).toMatchObject({
@@ -181,8 +181,8 @@ describe('advanceMarches — full attack cycle', () => {
     sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
     const t = marchTime(v, target, army(0, 0, 5))
 
-    advanceMarches(v, s.battleLog, t) // battle
-    advanceMarches(v, s.battleLog, t) // return + deliver
+    advanceMarches(v, s.world, s.battleLog, t) // battle
+    advanceMarches(v, s.world, s.battleLog, t) // return + deliver
     expect(v.resources.wood.toString()).toBe(v.storageCap.toString())
     expect(v.resources.wood.lte(v.storageCap)).toBe(true)
   })

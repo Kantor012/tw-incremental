@@ -40,6 +40,15 @@ export const WORLD_CENTER = { x: 200, y: 200 }
 export const WORLD_SIZE = 400
 
 /**
+ * Loyalty a freshly generated barbarian village starts with (full = hardest to
+ * take). Hard-coded as a LOCAL literal-backed constant rather than imported from
+ * systems/conquest.ts on purpose: conquest.ts imports `barbarianById` from this
+ * module, so importing its `LOYALTY_MAX` back here would close a module cycle. The
+ * value mirrors conquest's `LOYALTY_MAX` (100) — they must stay in lockstep.
+ */
+const INITIAL_LOYALTY = 100
+
+/**
  * How many barbarian villages to spawn at camp tier `level`: a linear taper from
  * ~8 at level 1 down to 1 at the ceiling (many easy nearby targets, a handful of
  * distant hard ones). Summed across 1..MAX_TARGET_LEVEL this lands ~125 villages,
@@ -101,6 +110,7 @@ export function generateWorld(seed: string): World {
         y,
         level,
         name: `Wioska barbarzyńska (poz. ${level})`,
+        loyalty: INITIAL_LOYALTY,
       })
       index++
     }

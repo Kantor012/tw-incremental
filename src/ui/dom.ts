@@ -171,6 +171,14 @@ export function unitIcon(id: UnitId): SVGSVGElement {
       const edge = svg('path', { d: 'M20 6 20 11', stroke: '#c6cdd5', 'stroke-width': '1', fill: 'none' })
       return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [handle, head, edge])
     }
+    case 'noble': {
+      // The Szlachcic is a conquest tool, not a soldier — a crown reads as authority
+      // (taking a village) rather than combat. Gold body + band, a single jewel.
+      const body = svg('path', { d: 'M4 8 8 12 12 5 16 12 20 8 19 17 5 17Z', fill: '#e3b755' })
+      const band = svg('rect', { x: '5', y: '17', width: '14', height: '3', rx: '0.5', fill: '#d9a441' })
+      const gem = svg('circle', { cx: '12', cy: '13', r: '1.3', fill: '#c1663b' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [body, band, gem])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla jednostki: ' + String(_exhaustive))

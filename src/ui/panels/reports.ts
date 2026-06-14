@@ -26,15 +26,29 @@ import { h, svg, svgIcon } from '../dom'
  * Accessibility (WCAG): a win/loss is NEVER signalled by colour alone — every card
  * carries a ✓ / ✗ glyph AND a Polish result word in its title (the coloured left
  * border + badge are an addition, not the sole cue). Each card also gets a labelled
- * SVG icon (crossed swords for an outgoing attack, a shield for a defended raid).
+ * SVG icon (crossed swords for an outgoing attack, a shield for a defended raid, a
+ * crown for a conquest). The conquest card (M2.4) is a milestone rather than a
+ * win/loss, so it uses a ★ mark + the title "Przejęto wioskę" + a gold accent border.
  */
 
-/** Procedural crossed-swords glyph for an outgoing attack (offence). */
+/**
+ * Procedural crossed-swords glyph for an outgoing attack (offence). Fills/strokes are
+ * driven from design-system TOKENS (set via the `style` property, which — unlike SVG
+ * presentation attributes — accepts the `var()` grammar, exactly as dom.ts's shieldIcon
+ * and the chip() helper do), so a palette change in tokens.css follows here and the
+ * project's single-source-of-truth colour rule holds (no hardcoded hex).
+ */
 function attackIcon(): SVGSVGElement {
-  const blade = (d: string): SVGElement =>
-    svg('path', { d, stroke: '#c6cdd5', 'stroke-width': '2', 'stroke-linecap': 'round', fill: 'none' })
-  const hilt = (d: string): SVGElement =>
-    svg('path', { d, stroke: '#8a5a2b', 'stroke-width': '2', 'stroke-linecap': 'round', fill: 'none' })
+  const blade = (d: string): SVGElement => {
+    const p = svg('path', { d, 'stroke-width': '2', 'stroke-linecap': 'round', fill: 'none' })
+    p.style.stroke = 'var(--iron)' // steel blade
+    return p
+  }
+  const hilt = (d: string): SVGElement => {
+    const p = svg('path', { d, 'stroke-width': '2', 'stroke-linecap': 'round', fill: 'none' })
+    p.style.stroke = 'var(--wood)' // wooden hilt
+    return p
+  }
   return svgIcon('0 0 24 24', 'Atak na obóz', 'report-glyph', [
     blade('M4 4 14 14'),
     blade('M20 4 10 14'),
@@ -43,18 +57,37 @@ function attackIcon(): SVGSVGElement {
   ])
 }
 
-/** Procedural shield glyph for an incoming raid (defence). */
+/** Procedural shield glyph for an incoming raid (defence). Token-driven fills (see attackIcon). */
 function raidIcon(): SVGSVGElement {
-  const face = svg('path', {
-    d: 'M12 2 4 5v6c0 5 4 8 8 9 4-1 8-4 8-9V5z',
-    fill: '#9aa3ad',
-  })
-  const shade = svg('path', {
-    d: 'M12 2 4 5v6c0 5 4 8 8 9z',
-    fill: '#7d858f',
-  })
-  const boss = svg('path', { d: 'M12 7 16 10 12 13 8 10z', fill: '#3a2a17', 'fill-opacity': '0.4' })
+  const face = svg('path', { d: 'M12 2 4 5v6c0 5 4 8 8 9 4-1 8-4 8-9V5z' })
+  face.style.fill = 'var(--iron)' // steel shield face
+  const shade = svg('path', { d: 'M12 2 4 5v6c0 5 4 8 8 9z' })
+  shade.style.fill = 'color-mix(in srgb, var(--iron) 70%, black)' // shaded half
+  const boss = svg('path', { d: 'M12 7 16 10 12 13 8 10z', 'fill-opacity': '0.4' })
+  boss.style.fill = 'color-mix(in srgb, var(--wood) 40%, black)' // dark central boss
   return svgIcon('0 0 24 24', 'Najazd na osadę', 'report-glyph', [face, shade, boss])
+}
+
+/**
+ * Procedural crown glyph for a CONQUERED village (M2.4) — a milestone event, so it
+ * gets its own positive cue distinct from the win/loss ✓/✗ used by attacks/raids.
+ * The gold tones come from the accent TOKENS (set via `style` so `var()` / `color-mix`
+ * resolve — see attackIcon); the icon is one of several non-colour cues (alongside the
+ * ★ mark and the Polish title) so colour is never the sole signal.
+ */
+function conquerIcon(): SVGSVGElement {
+  const points = svg('path', {
+    d: 'M4 16 4 7 8.5 11 12 5 15.5 11 20 7 20 16Z',
+    'stroke-width': '1',
+    'stroke-linejoin': 'round',
+  })
+  points.style.fill = 'var(--accent-2)' // bright brass crown body
+  points.style.stroke = 'color-mix(in srgb, var(--accent) 70%, black)' // darker gold outline
+  const band = svg('rect', { x: '4', y: '16', width: '16', height: '4', rx: '1' })
+  band.style.fill = 'var(--accent)' // gold band
+  const gem = svg('circle', { cx: '12', cy: '18', r: '1.1' })
+  gem.style.fill = 'color-mix(in srgb, var(--bad) 55%, black)' // dark ruby
+  return svgIcon('0 0 24 24', 'Przejęcie wioski', 'report-glyph', [points, band, gem])
 }
 
 /** One labelled value chip (label muted, value as `.num`). Text carries the cue. */
@@ -80,6 +113,11 @@ function chip(label: string, value: string): HTMLElement {
  * single village (the lone origin would be redundant noise).
  */
 function reportCard(r: BattleReport, villageName: string | null): HTMLElement {
+  // Conquest is neither a win nor a loss row — it has its own card (gold accent,
+  // crown glyph) and carries no `won` field, so it is handled before the win/loss
+  // path narrows `r` to attack | raid below.
+  if (r.kind === 'conquer') return conquerCard(r, villageName)
+
   const won = r.won
   const li = h('li', 'report-item ' + (won ? 'report-win' : 'report-lose'))
 
@@ -121,6 +159,15 @@ function reportCard(r: BattleReport, villageName: string | null): HTMLElement {
     headText.appendChild(sub)
     meta.appendChild(chip('Łup', formatInt(r.lootSum)))
     meta.appendChild(chip('Straty', formatInt(r.losses)))
+    // Conquest progress (M2.4): a won strike whose surviving noble eroded the target's
+    // loyalty carries it here, so the log shows the "postęp" toward capture (e.g.
+    // „Lojalność −25 → 50") rather than an indistinguishable plain victory. Present
+    // only on such strikes (optional fields); rounded for display, exact in state.
+    if (r.loyaltyAfter !== undefined) {
+      const drop = Math.round(r.loyaltyHit ?? 0)
+      const left = Math.round(r.loyaltyAfter)
+      meta.appendChild(chip('Lojalność', '−' + drop + ' → ' + left))
+    }
   } else {
     const title = h('span', 'report-title', mark + (won ? 'Najazd odparty' : 'Osada złupiona'))
     const sub = h('span', 'report-detail muted', 'Obrona osady')
@@ -133,6 +180,64 @@ function reportCard(r: BattleReport, villageName: string | null): HTMLElement {
       meta.appendChild(chip('Straty', formatInt(r.losses)))
     }
   }
+
+  head.appendChild(iconWrap)
+  head.appendChild(headText)
+  li.appendChild(head)
+  li.appendChild(meta)
+  return li
+}
+
+/**
+ * Build the conquest card (M2.4). Mirrors {@link reportCard}'s head/meta layout but
+ * for the `conquer` variant, which has no win/loss: it is always a positive outcome,
+ * marked by a gold accent border, a crown glyph, a ★ symbol and the Polish title —
+ * never colour alone. `villageName` is the resolved attacking origin (shown only on
+ * multi-village runs, same rule as the other cards). The taken village's name comes
+ * straight from the report (`targetName`); the freshly created player village is
+ * surfaced as a status chip so the milestone reads clearly.
+ */
+function conquerCard(
+  r: Extract<BattleReport, { kind: 'conquer' }>,
+  villageName: string | null,
+): HTMLElement {
+  const li = h('li', 'report-item report-conquer')
+  // Gold (accent) left border — a distinct, additional cue beyond the icon + text.
+  // Set inline (not via a CSS class) so this panel stays self-contained.
+  li.style.borderLeftColor = 'var(--accent)'
+
+  const head = h('div', 'report-head')
+  head.style.display = 'flex'
+  head.style.alignItems = 'center'
+  head.style.gap = 'var(--space-2)'
+
+  const iconWrap = h('span', 'report-icon')
+  iconWrap.style.flex = '0 0 auto'
+  iconWrap.style.display = 'inline-flex'
+  iconWrap.appendChild(conquerIcon())
+
+  const headText = h('div', 'report-headtext')
+  headText.style.display = 'flex'
+  headText.style.flexDirection = 'column'
+  headText.style.minWidth = '0'
+
+  if (villageName !== null) {
+    const origin = h('span', 'report-village muted', villageName)
+    origin.style.fontSize = 'var(--text-xs)'
+    headText.appendChild(origin)
+  }
+
+  const title = h('span', 'report-title', '★ Przejęto wioskę')
+  const sub = h('span', 'report-detail muted', r.targetName)
+  headText.appendChild(title)
+  headText.appendChild(sub)
+
+  const meta = h('div', 'report-meta')
+  meta.style.display = 'flex'
+  meta.style.flexWrap = 'wrap'
+  meta.style.gap = 'var(--space-1)'
+  meta.style.marginTop = 'var(--space-1)'
+  meta.appendChild(chip('Status', 'Twoja wioska'))
 
   head.appendChild(iconWrap)
   head.appendChild(headText)
@@ -155,16 +260,36 @@ function logSignature(
   return (
     log.length +
     '#' +
-    log
-      .map((r) => {
-        const base =
-          r.kind === 'attack'
-            ? 'a' + r.targetLevel + (r.won ? '1' : '0') + r.lootSum + r.losses
-            : 'r' + (r.won ? '1' : '0') + r.looted + r.losses
-        return r.villageId + '~' + (originOf(r) ?? '') + '~' + base
-      })
-      .join('|')
+    log.map((r) => r.villageId + '~' + (originOf(r) ?? '') + '~' + reportBase(r)).join('|')
   )
+}
+
+/**
+ * Per-report content fingerprint used by {@link logSignature}. EXHAUSTIVE over the
+ * `kind` union (no `default` short-circuit, a `never` assignment instead): adding a
+ * new report variant to {@link BattleReport} is a COMPILE error here until it gets an
+ * explicit fingerprint — the signature can never silently miss a new report's fields.
+ */
+function reportBase(r: BattleReport): string {
+  switch (r.kind) {
+    case 'attack':
+      return (
+        'a' +
+        r.targetLevel +
+        (r.won ? '1' : '0') +
+        r.lootSum +
+        r.losses +
+        (r.loyaltyAfter !== undefined ? 'L' + (r.loyaltyHit ?? 0) + '>' + r.loyaltyAfter : '')
+      )
+    case 'raid':
+      return 'r' + (r.won ? '1' : '0') + r.looted + r.losses
+    case 'conquer':
+      return 'c' + r.targetName + r.newVillageId
+    default: {
+      const _exhaustive: never = r
+      return String(_exhaustive)
+    }
+  }
 }
 
 /**

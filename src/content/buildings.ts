@@ -23,8 +23,13 @@ export type BuildingId =
   | 'warehouse'
   | 'farm'
   | 'barracks'
+  | 'academy'
 
-/** Stable iteration order for derived-stat recompute and UI listing. */
+/**
+ * Stable iteration order for derived-stat recompute and UI listing. `academy`
+ * stays LAST so older saves' building key order is unchanged (the new building is
+ * appended), keeping migration and round-trip deterministic.
+ */
 export const BUILDING_IDS: readonly BuildingId[] = [
   'hq',
   'sawmill',
@@ -33,6 +38,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'warehouse',
   'farm',
   'barracks',
+  'academy',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -52,6 +58,10 @@ export interface ResourceCost {
  *                   cost multiplier; consumed by buildingCost, NOT by recompute.
  *  - recruit_speed: fraction (0..1) cut per level from unit training time; consumed
  *                   by the recruitment system (recruitSpeedMult), NOT by recompute.
+ *  - noble_unlock:  BINARY (no perLevel) — having this building at level >= 1 lets
+ *                   the village recruit the noble (see units.ts `requires`) and so
+ *                   conquer barbarian villages. Pure gate: contributes nothing to a
+ *                   tick-derived stat, so recompute treats it as a no-op.
  */
 export type BuildingEffect =
   | { kind: 'production'; resource: ResourceId; perLevel: number }
@@ -59,6 +69,7 @@ export type BuildingEffect =
   | { kind: 'population'; perLevel: number }
   | { kind: 'cost_reduction'; perLevel: number }
   | { kind: 'recruit_speed'; perLevel: number }
+  | { kind: 'noble_unlock' }
 
 export interface BuildingDef {
   id: BuildingId
@@ -182,6 +193,20 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     effect: { kind: 'recruit_speed', perLevel: 0.05 },
     // Starts at 0: building it to level 1 is the first real expansion goal — the
     // gate that unlocks unit recruitment (a brand-new resource sink in M1.2).
+    initialLevel: 0,
+  },
+  academy: {
+    id: 'academy',
+    name: 'Pałac',
+    desc: 'Pozwala szkolić szlachcica i przejmować wioski barbarzyńskie.',
+    category: 'military',
+    // Binary gate (noble_unlock) — level 1 already unlocks the noble; the few extra
+    // levels exist only so the building reads like the others (finite ceiling).
+    maxLevel: 3,
+    baseCost: { wood: 15000, clay: 15000, iron: 15000 },
+    costFactor: 1.6,
+    effect: { kind: 'noble_unlock' },
+    // Starts at 0: building it is the late-M2 expansion goal that opens conquest.
     initialLevel: 0,
   },
 }

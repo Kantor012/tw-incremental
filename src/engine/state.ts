@@ -100,8 +100,34 @@ export type BattleReport =
       won: boolean
       lootSum: string
       losses: number
+      /**
+       * Conquest PROGRESS recorded on a WON attack whose army still carried a
+       * surviving noble (M2.4): `loyaltyHit` is how much loyalty this strike actually
+       * removed from the target (clamped — it never drives loyalty below 0), and
+       * `loyaltyAfter` is the target's loyalty AFTER the hit. Both ABSENT on losses, on
+       * noble-free attacks, and on every report from a pre-M2.4 save — hence OPTIONAL:
+       * their absence simply means "no conquest progress on this strike", so no save
+       * migration is needed (the v7 schema makes them optional and the v6→v7 migration
+       * leaves old, pre-noble attack reports without them). Plain finite numbers in the
+       * loyalty band [0, 100], never Decimal — the log stays Decimal-free JSON.
+       */
+      loyaltyHit?: number
+      loyaltyAfter?: number
     }
   | { kind: 'raid'; villageId: VillageId; won: boolean; looted: string; losses: number }
+  | {
+      /**
+       * A barbarian village was CONQUERED (M2.4): a won attack carrying a surviving
+       * noble drove the target's loyalty to <= 0, so it became a player village.
+       */
+      kind: 'conquer'
+      /** The attacking village that delivered the final loyalty hit. */
+      villageId: VillageId
+      /** Display name of the barbarian village that was taken. */
+      targetName: string
+      /** Id of the brand-new player village created in its place. */
+      newVillageId: VillageId
+    }
 
 /**
  * Base seconds between incoming barbarian raids. Owned here (not in raids.ts) so
@@ -181,11 +207,12 @@ export interface Village {
 
 /**
  * One barbarian village on the world map (M2.2). A purely SPATIAL descriptor — its
- * id, map coordinates, camp tier and display name. The combat-relevant numbers
+ * id, map coordinates, camp tier and display name. The STATIC combat numbers
  * (defence, loot) are NOT stored: they are derived on demand from `level` via
  * {@link barbarianTarget} (the single source of those curves), so the world stays a
- * compact, Decimal-free bag of plain numbers/strings that serializes trivially.
- * Generated deterministically from the seed by `generateWorld` (systems/world.ts).
+ * compact, Decimal-free bag of plain numbers/strings that serializes trivially. The
+ * one MUTABLE field is `loyalty` (M2.4 conquest). Generated deterministically from
+ * the seed by `generateWorld` (systems/world.ts).
  */
 export interface BarbarianVillage {
   /** Stable id (`'b0'`, `'b1'`, …) — what a {@link March.targetId} points at. */
@@ -198,6 +225,13 @@ export interface BarbarianVillage {
   level: number
   /** Display name (PL). */
   name: string
+  /**
+   * Conquest loyalty in [0, 100] (M2.4). Starts full (100 = hardest to take). A won
+   * attack carrying a surviving noble subtracts from it (conquest.ts); it slowly
+   * regenerates each sub-step. When it reaches <= 0 the village is conquered. MUTABLE
+   * world state (unlike the derived combat numbers), so it serializes and migrates.
+   */
+  loyalty: number
 }
 
 /**
@@ -284,6 +318,8 @@ export function recomputeVillageDerived(v: Village): void {
         break // consumed by buildingCost, not a tick-derived stat
       case 'recruit_speed':
         break // consumed by recruitSpeedMult (recruitment), not a tick-derived stat
+      case 'noble_unlock':
+        break // binary gate consumed by recruitment (unitUnlocked), not a tick-derived stat
     }
   }
 

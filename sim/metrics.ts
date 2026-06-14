@@ -35,7 +35,14 @@ export interface RunMetrics {
    * founding mechanic never fired; the villages-founded balance target wants >= 1.
    */
   villagesFounded: number
-  /** Player villages owned at run end (capital + founded) = villagesFounded + 1. */
+  /**
+   * How many barbarian villages the bot CONQUERED over the run (M2.4 conquest). Derived
+   * from the village ledger — `villagesOwned - 1 (capital) - villagesFounded` — so it is
+   * exact regardless of battle-log trimming. 0 means the loyalty -> capture pipeline
+   * never completed; the villages-conquered balance target wants >= 1.
+   */
+  villagesConquered: number
+  /** Player villages owned at run end (capital + founded + conquered). */
   villagesOwned: number
   /** Total production/second at run start, summed across all villages (initial levels). */
   productionStart: string
@@ -127,6 +134,12 @@ export interface CombatStats {
   raidsLost: number
   raidStolen: Decimal
   unitsLost: number
+  /**
+   * Conquest reports (`kind:'conquer'`) seen in the rolling log (M2.4). A cross-check
+   * for the authoritative {@link RunMetrics.villagesConquered} (which is derived from the
+   * village ledger and never undercounts on a trimmed log).
+   */
+  conquests: number
 }
 
 /** A fresh zeroed combat tally. */
@@ -140,36 +153,45 @@ export function emptyCombatStats(): CombatStats {
     raidsLost: 0,
     raidStolen: ZERO,
     unitsLost: 0,
+    conquests: 0,
   }
 }
 
-/** Structural equality of two battle logs (plain JSON — no Decimals in a report). */
-function sameLog(a: BattleReport[], b: BattleReport[]): boolean {
+/** Structural equality of two single battle reports (plain JSON — no Decimals). */
+function sameReport(a: BattleReport, b: BattleReport): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
 /**
  * The battle reports appended to the rolling log between two snapshots.
  *
- * The log is append-then-trim-to-20 (see marches.pushBattleReport), so once it is at
- * the cap a naive `length` delta undercounts. With dt=1 only a handful of events can
- * occur per step (raids fire at most every 600s; a march emits one report when its
- * outbound leg completes), far below the cap, so the number ADDED is small. We
- * recover it as the smallest `k` for which appending `next`'s last `k` entries to
- * `prev` and re-trimming reproduces `next` exactly. This is exact whenever the log is
- * not yet full (`k = next.length - prev.length`); on a full, trimmed log the smallest
- * `k` is the true count except in the degenerate case of an identical-entry suffix,
- * where it can undercount by a few — acceptable here since these are reporting metrics
- * / soft targets, not hard invariants (attacksSent is counted exactly elsewhere).
+ * The log only ever GROWS at the back and is TRIMMED at the front (marches.
+ * pushBattleReport appends then drops the oldest past the cap; conquest.applyConquest
+ * appends a 'conquer' report too), so `next` always shares a contiguous segment with the
+ * TAIL of `prev`, and everything in `next` after that overlap is new. We recover the new
+ * entries by finding the LARGEST overlap — the longest prefix of `next` equal to an
+ * equally-long suffix of `prev` — and returning `next` after it.
+ *
+ * Largest-overlap = fewest-new, the conservative reading when repeated identical reports
+ * make the join ambiguous (it can only ever UNDERcount by collapsing a run of identical
+ * entries — fine for soft reporting metrics; attacksSent is counted exactly elsewhere).
+ * This is robust to `prev` exceeding the cap (an untrimmed conquest push) — the case
+ * where the old "append next's suffix to prev and re-trim" reconstruction fell through to
+ * its treat-everything-as-new fallback and wildly OVER-counted after each capture.
  */
-export function newBattleReports(prev: BattleReport[], next: BattleReport[], cap = 20): BattleReport[] {
-  for (let k = 0; k <= next.length; k++) {
-    const added = next.slice(next.length - k)
-    const combined = prev.concat(added)
-    const trimmed = combined.slice(Math.max(0, combined.length - cap))
-    if (sameLog(trimmed, next)) return added
+export function newBattleReports(prev: BattleReport[], next: BattleReport[]): BattleReport[] {
+  const maxOverlap = Math.min(prev.length, next.length)
+  for (let o = maxOverlap; o >= 0; o--) {
+    let match = true
+    for (let i = 0; i < o; i++) {
+      if (!sameReport(prev[prev.length - o + i], next[i])) {
+        match = false
+        break
+      }
+    }
+    if (match) return next.slice(o)
   }
-  return next.slice() // unreachable in practice; treat all as new
+  return next.slice() // no overlap at all — everything is new
 }
 
 /** Fold one battle report into a running {@link CombatStats} tally. */
@@ -179,7 +201,7 @@ export function applyReport(c: CombatStats, r: BattleReport): void {
     else c.battlesLost += 1
     c.totalLoot = c.totalLoot.add(D(r.lootSum))
     c.unitsLost += r.losses
-  } else {
+  } else if (r.kind === 'raid') {
     // raid: `won` is the PLAYER's view — true = repelled (survived), false = got through.
     if (r.won) c.raidsSurvived += 1
     else {
@@ -187,6 +209,10 @@ export function applyReport(c: CombatStats, r: BattleReport): void {
       c.raidStolen = c.raidStolen.add(D(r.looted))
     }
     c.unitsLost += r.losses
+  } else {
+    // conquer (M2.4): a won attack carrying a surviving noble flipped a barbarian
+    // village to the player. No won/losses/loot fields — it is a capture event.
+    c.conquests += 1
   }
 }
 
@@ -253,6 +279,8 @@ export function collect(
     resources,
     upgradesBought: stats.upgradesBought,
     villagesFounded: stats.villagesFounded,
+    // Conquered = owned − capital − founded. Exact from the ledger (no log dependency).
+    villagesConquered: Math.max(0, state.villageOrder.length - 1 - stats.villagesFounded),
     villagesOwned: state.villageOrder.length,
     productionStart: totalProduction(start).toString(),
     productionEnd: totalProduction(state).toString(),

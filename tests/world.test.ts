@@ -199,9 +199,9 @@ describe('targetsByDistance', () => {
     // Synthetic world: b0 and b2 are equidistant from the origin; b2 must follow b0.
     const tieWorld: World = {
       barbarians: [
-        { id: 'b0', x: 10, y: 0, level: 1, name: 'a' },
-        { id: 'b1', x: 50, y: 0, level: 2, name: 'b' },
-        { id: 'b2', x: 0, y: 10, level: 3, name: 'c' },
+        { id: 'b0', x: 10, y: 0, level: 1, name: 'a', loyalty: 100 },
+        { id: 'b1', x: 50, y: 0, level: 2, name: 'b', loyalty: 100 },
+        { id: 'b2', x: 0, y: 10, level: 3, name: 'c', loyalty: 100 },
       ],
     }
     const sorted = targetsByDistance(villageAt(0, 0), tieWorld)

@@ -8,6 +8,7 @@ import {
 } from '../src/engine/state'
 import {
   barracksUnlocked,
+  unitUnlocked,
   recruitSpeedMult,
   usedPopulation,
   freePopulation,
@@ -242,6 +243,95 @@ describe('recruit_speed (barracks upgrades)', () => {
     const fresh = v.recruitQueue[1].perUnitSeconds
     expect(fresh).toBeCloseTo(80 * 0.9025)
     expect(fresh).toBeLessThan(snapshot)
+  })
+})
+
+/**
+ * M2.4 — the noble (Szlachcic) is gated by the ACADEMY, not the barracks. Recruitment
+ * therefore gates per-unit via {@link unitUnlocked} (v.buildings[UNITS[id].requires] > 0):
+ * the infantry triad needs the barracks, the noble needs the academy. The noble is the
+ * conquest tool — very expensive, population-heavy and slow — but otherwise rides the
+ * same recruit/queue/clock path as every other unit.
+ */
+describe('unit unlock gating (unitUnlocked)', () => {
+  it('the infantry triad needs the barracks; the noble needs the academy', () => {
+    const v = cap(armed()) // barracks lvl 1, no academy
+    expect(unitUnlocked(v, 'spearman')).toBe(true)
+    expect(unitUnlocked(v, 'swordsman')).toBe(true)
+    expect(unitUnlocked(v, 'axeman')).toBe(true)
+    // The noble is academy-gated: a present (even high) barracks never unlocks it.
+    expect(unitUnlocked(v, 'noble')).toBe(false)
+    v.buildings.barracks = 10
+    expect(unitUnlocked(v, 'noble')).toBe(false)
+    // The academy is the gate — and it does NOT retroactively unlock the triad path.
+    v.buildings.academy = 1
+    expect(unitUnlocked(v, 'noble')).toBe(true)
+  })
+
+  it('without the academy the noble triad-path is closed even with a barracks', () => {
+    const v = cap(armed())
+    // unitUnlocked is independent of barracksUnlocked for the noble.
+    expect(barracksUnlocked(v)).toBe(true)
+    expect(unitUnlocked(v, 'noble')).toBe(false)
+  })
+})
+
+describe('noble (Szlachcic — academy-gated conquest unit)', () => {
+  it('catalogue: 8k/8k/8k cost, pop 10, 600s training, requires the academy, carries nothing', () => {
+    const def = UNITS.noble
+    expect(def.id).toBe('noble')
+    expect(def.name).toBe('Szlachcic')
+    expect(def.requires).toBe('academy')
+    expect(def.cost).toEqual({ wood: 8000, clay: 8000, iron: 8000 })
+    expect(def.pop).toBe(10)
+    expect(def.recruitSeconds).toBe(600)
+    expect(def.carry).toBe(0) // not a raider — it conquers, it does not loot
+  })
+
+  it('canRecruit refuses the noble without the academy (reason names the Pałac) and recruit() is a no-op', () => {
+    const state = armed() // resources plentiful, barracks present, NO academy
+    const v = cap(state)
+
+    const verdict = canRecruit(v, 'noble', 1)
+    expect(verdict.ok).toBe(false)
+    expect(verdict.reason).toMatch(/pałac/i) // the unlock building is surfaced by name
+
+    const before = serialize(state)
+    expect(recruit(v, 'noble', 1)).toBe(false)
+    expect(serialize(state)).toBe(before) // nothing spent, nothing queued
+    expect(v.recruitQueue.length).toBe(0)
+    expect(v.units.noble).toBe(0)
+  })
+
+  it('with the academy built, the noble recruits, debits its price, and trains off the shared clock', () => {
+    const state = armed()
+    const v = cap(state)
+    v.buildings.academy = 1
+    recomputeVillageDerived(v)
+    v.popCap = D(100) // headroom for a pop-10 unit (set AFTER recompute resets it)
+
+    const cost = recruitCost('noble', 1)
+    expect(cost.wood.toString()).toBe('8000')
+    expect(cost.clay.toString()).toBe('8000')
+    expect(cost.iron.toString()).toBe('8000')
+
+    const wood = v.resources.wood
+    expect(canRecruit(v, 'noble', 1).ok).toBe(true)
+    expect(recruit(v, 'noble', 1)).toBe(true)
+    expect(v.resources.wood.toString()).toBe(wood.sub(cost.wood).toString())
+
+    // One queued order, snapshotted at the noble's base time times the live speed mult.
+    expect(v.recruitQueue.length).toBe(1)
+    const order = v.recruitQueue[0]
+    expect(order.unitId).toBe('noble')
+    expect(order.perUnitSeconds).toBeCloseTo(600 * recruitSpeedMult(v))
+    // pop-10 unit is fully counted while queued.
+    expect(usedPopulation(v).toString()).toBe('10')
+
+    // The same advanceRecruitment clock mints it.
+    advanceRecruitment(v, order.perUnitSeconds)
+    expect(v.units.noble).toBe(1)
+    expect(v.recruitQueue.length).toBe(0)
   })
 })
 

@@ -11,9 +11,17 @@ import {
 } from '../src/systems/recruitment'
 import { stationedUnits } from '../src/systems/marches'
 import { targetsByDistance } from '../src/systems/world'
-import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from '../src/systems/combat'
+import {
+  battleOutcome,
+  armyAttackPower,
+  armyDefensePower,
+  armyCarry,
+  applyLosses,
+} from '../src/systems/combat'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { foundCost, findFoundingSpot, canFound, playerVillageCount } from '../src/systems/villages'
+import { raidPower } from '../src/systems/raids'
+import { nobleCount, LOYALTY_NOBLE_HIT } from '../src/systems/conquest'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -37,6 +45,18 @@ import { foundCost, findFoundingSpot, canFound, playerVillageCount } from '../sr
  * once per step AFTER the per-village loop, so expansion only spends what the
  * recruit -> attack -> loot loop left idle. It is likewise a pure function of state,
  * so determinism / save-load continuation hold across a founded village too.
+ *
+ * M2.4 adds a second global decision ({@link chooseConquest}, consulted once per step
+ * BEFORE the per-village loop so it gets first claim on resources / the reserved
+ * population): build the Pałac, train a noble strike force behind a raid-repelling home
+ * garrison, and march it into a barbarian camp until the camp's loyalty hits 0 and it
+ * flips to a player village. It is self-limited ({@link BOT_MAX_CONQUESTS}) so it leaves
+ * the village cap room for founding. Its enabler is the M2.4 shift in the loot strategy:
+ * {@link chooseAttack} now marches only the {@link marchSurplus} beyond a garrison the
+ * bot actively holds above the raid threshold ({@link garrisonRecruit}), because a
+ * successful raid wipes the ENTIRE home stack — so without a standing wall the fragile
+ * nobles could never survive at home. Both are pure functions of state, so determinism /
+ * save-load continuation hold with conquest in play.
  */
 export type BotAction =
   | { kind: 'build'; id: BuildingId }
@@ -104,15 +124,19 @@ function cheapestBuilding(v: Village): { id: BuildingId; sum: Decimal } | null {
 
 /**
  * How many of `unitId` the bot can train in ONE order right now in `v`: bounded by
- * free population (so it never over-commits the farm) and by per-resource
- * affordability. Counts are plain integers; resource division uses Decimal then
- * floors. Returns 0 when nothing fits.
+ * the supplied `popBudget` (so it never over-commits the farm — and, via a reduced
+ * budget, so combat recruitment can leave room for the noble strike force, see
+ * {@link combatPopBudget}) and by per-resource affordability. Counts are plain
+ * integers; resource division uses Decimal then floors. Returns 0 when nothing fits.
  */
-function recruitBatch(v: Village, unitId: UnitId): number {
+function recruitBatch(
+  v: Village,
+  unitId: UnitId,
+  popBudget: number = freePopulation(v).toNumber(),
+): number {
   const def = UNITS[unitId]
   if (def.pop <= 0) return 0
-  const free = freePopulation(v).toNumber()
-  let count = Math.floor(free / def.pop)
+  let count = Math.floor(popBudget / def.pop)
   count = Math.min(count, affordableUnits(v.resources.wood, def.cost.wood))
   count = Math.min(count, affordableUnits(v.resources.clay, def.cost.clay))
   count = Math.min(count, affordableUnits(v.resources.iron, def.cost.iron))
@@ -127,10 +151,19 @@ function affordableUnits(have: Decimal, per: number): number {
 
 /**
  * Cheapest recruitable unit in `v` as a full batch action, or null when nothing can
- * be trained (barracks locked, no free population, or unaffordable). Ranks by
- * single-unit cost sum; ties resolve to the first id in {@link UNIT_IDS} order.
+ * be trained (gate locked, no free population in `popBudget`, or unaffordable). Ranks
+ * by single-unit cost sum; ties resolve to the first id in {@link UNIT_IDS} order.
+ *
+ * The noble is by far the most expensive unit, so it is never the "cheapest" pick —
+ * combat recruitment naturally trains the infantry triad, and the noble is trained
+ * separately by the conquest pipeline ({@link chooseConquest}). `popBudget` defaults
+ * to the full free population; {@link chooseAction} passes a reduced
+ * {@link combatPopBudget} so the noble strike force always has room to train.
  */
-function cheapestRecruit(v: Village): Extract<BotAction, { kind: 'recruit' }> | null {
+function cheapestRecruit(
+  v: Village,
+  popBudget: number = freePopulation(v).toNumber(),
+): Extract<BotAction, { kind: 'recruit' }> | null {
   let best: UnitId | null = null
   let bestSum: Decimal | null = null
   for (const id of UNIT_IDS) {
@@ -143,7 +176,7 @@ function cheapestRecruit(v: Village): Extract<BotAction, { kind: 'recruit' }> | 
     }
   }
   if (best === null) return null
-  const count = recruitBatch(v, best)
+  const count = recruitBatch(v, best, popBudget)
   return count >= 1 ? { kind: 'recruit', unitId: best, count } : null
 }
 
@@ -152,6 +185,81 @@ function homeArmySize(home: Record<UnitId, number>): number {
   let n = 0
   for (const id of UNIT_IDS) n += home[id] ?? 0
   return n
+}
+
+/** A fresh complete zero roster (every UnitId present). */
+function emptyRoster(): Record<UnitId, number> {
+  const r = {} as Record<UnitId, number>
+  for (const id of UNIT_IDS) r[id] = 0
+  return r
+}
+
+/** Defence of the COMBAT garrison currently at home (nobles excluded — they march off). */
+function combatGarrisonDef(v: Village): number {
+  return armyDefensePower({ ...stationedUnits(v), noble: 0 })
+}
+
+/** Defence the home garrison must hold to repel the next raid with a safety margin. */
+function raidThreshold(v: Village): number {
+  return raidPower(v) * RAID_REPEL_MARGIN
+}
+
+/** Whether the home combat garrison already out-defends the next raid. */
+function homeRepelsRaid(v: Village): boolean {
+  return combatGarrisonDef(v) >= raidThreshold(v)
+}
+
+/**
+ * The COMBAT units (nobles never) that can march RIGHT NOW while leaving a home garrison
+ * that still repels the next raid by {@link RAID_REPEL_MARGIN}. This is the linchpin of
+ * M2.4 survival: a raid that out-powers the home garrison wipes EVERY home unit (loss
+ * fraction 1, see raids.ts), and units only dodge raids by being in transit — so the
+ * pre-M2.4 bot kept its whole stack on the road and let the home be wiped. That makes
+ * holding the fragile nobles at home impossible. Instead the bot now ALWAYS keeps a
+ * raid-proof wall at home ({@link garrisonRecruit} tops it up) and marches only the
+ * surplus: home defence stays >= threshold, so raids are repelled and the nobles
+ * accumulate safely behind the garrison.
+ *
+ * raidPower scales with the WHOLE owned army (home + away), and dispatch doesn't change
+ * `v.units`, so the surplus is computed against a fixed bar: send the fraction of each
+ * combat unit whose removal still leaves the threshold at home (floored, so a hair MORE
+ * than needed stays). Returns an all-zero roster when nothing can be spared (whole
+ * garrison is needed — early game, or a stack already out).
+ */
+function marchSurplus(v: Village): Record<UnitId, number> {
+  const combatHome = { ...stationedUnits(v), noble: 0 }
+  const homeDef = armyDefensePower(combatHome)
+  if (homeDef <= 0) return emptyRoster()
+  const surplusDef = homeDef - raidThreshold(v)
+  const out = emptyRoster()
+  if (surplusDef <= 0) return out
+  const frac = surplusDef / homeDef
+  for (const id of UNIT_IDS) {
+    if (id === 'noble') continue
+    out[id] = Math.floor(combatHome[id] * frac)
+  }
+  return out
+}
+
+/**
+ * A defensive recruit that shores the home garrison up to the raid threshold, or null
+ * when it already holds (or nothing can be trained). Recruits the cheap Pikinier (the
+ * bot's main unit; spear defence is enough in bulk) sized to close the defence gap,
+ * bounded by {@link combatPopBudget} (so it never eats the noble reserve) and
+ * affordability. This is what keeps the wall standing as raidPower climbs with the army
+ * and the building count — established cheaply early (low threshold) and topped up
+ * thereafter, so the garrison is NEVER wiped and the conquest pipeline has a safe home.
+ */
+function garrisonRecruit(v: Village): Extract<BotAction, { kind: 'recruit' }> | null {
+  if (!barracksUnlocked(v)) return null
+  const gap = raidThreshold(v) - combatGarrisonDef(v)
+  if (gap <= 0) return null
+  const want = Math.ceil(gap / UNITS.spearman.defInfantry)
+  const batch = Math.min(want, recruitBatch(v, 'spearman', combatPopBudget(v)))
+  if (batch >= 1 && canRecruit(v, 'spearman', batch).ok) {
+    return { kind: 'recruit', unitId: 'spearman', count: batch }
+  }
+  return null
 }
 
 /**
@@ -168,19 +276,24 @@ function homeArmySize(home: Record<UnitId, number>): number {
  * (countForLevel >= 1) and the ring radius is ~tier·DISTANCE_PER_LEVEL, the chosen
  * level — and so the march time — matches the pre-spatial behaviour, preserving balance.
  *
- * Sends the WHOLE home army — after dispatch the home is empty, so at most one attack
- * is issued per step and the freshly-trained / returning units rebuild the stack for
- * the next strike. Pure function of the village + world (stationedUnits − catalogues),
- * so it stays deterministic and safe for the no-softlock probe to call.
+ * Sends the {@link marchSurplus} (the combat units beyond the raid-repelling garrison),
+ * not the whole stack — the home wall stays up so raids are repelled and the nobles are
+ * safe. As the surplus shrinks per dispatch, a few loot marches may go out per step until
+ * the rest is needed at home. Pure function of the village + world (stationedUnits −
+ * catalogues), so it stays deterministic and safe for the no-softlock probe to call.
  *
- * Returns null when the barracks are locked, the home stack is below
+ * Returns null when the barracks are locked, the sparable surplus is below
  * {@link STRIKE_MIN_ARMY}, or no tier is winnable within the loss budget.
  */
 function chooseAttack(v: Village, world: World): Extract<BotAction, { kind: 'attack' }> | null {
   if (!barracksUnlocked(v)) return null
-  const home = stationedUnits(v)
-  if (homeArmySize(home) < STRIKE_MIN_ARMY) return null
-  const atkPower = armyAttackPower(home)
+  // March only the SURPLUS beyond a raid-repelling home garrison (see marchSurplus): the
+  // home stack survives raids, so the accumulating nobles (excluded here anyway — carry 0)
+  // stay alive. Early game / a stack already out leaves no surplus, so the army builds up
+  // at home until it can spare a striking force.
+  const army = marchSurplus(v)
+  if (homeArmySize(army) < STRIKE_MIN_ARMY) return null
+  const atkPower = armyAttackPower(army)
   if (atkPower <= 0) return null
 
   // Highest beatable camp tier within the loss budget and with surviving carry.
@@ -191,7 +304,7 @@ function chooseAttack(v: Village, world: World): Extract<BotAction, { kind: 'att
     if (!outcome.attackerWins) continue
     if (outcome.attackerLossFrac > MAX_ATTACK_LOSS) continue
     // Survivors must still be able to carry loot home, else the march nets nothing.
-    if (armyCarry(applyLosses(home, outcome.attackerLossFrac)) <= 0) continue
+    if (armyCarry(applyLosses(army, outcome.attackerLossFrac)) <= 0) continue
     bestLevel = lvl
     break
   }
@@ -200,7 +313,7 @@ function chooseAttack(v: Village, world: World): Extract<BotAction, { kind: 'att
   // Resolve the tier to the nearest concrete village of that level (fastest march).
   for (const b of targetsByDistance(v, world)) {
     if (b.level === bestLevel) {
-      return { kind: 'attack', targetId: b.id, targetLevel: b.level, units: home }
+      return { kind: 'attack', targetId: b.id, targetLevel: b.level, units: army }
     }
   }
   return null
@@ -240,13 +353,39 @@ export function chooseAction(v: Village, world: World): BotAction | null {
     // Can't afford the barracks yet — grow the economy via the cheapest build below.
   }
 
+  // M2.4: hold the home garrison above the raid threshold BEFORE anything else. A
+  // successful raid wipes the ENTIRE home stack (loss fraction 1), so the wall must come
+  // first — and while it is still below threshold, DON'T spend on the academy / economy /
+  // loot. That spending would both drain the resources the wall needs AND raise the
+  // building count, which pushes raidPower (hence the threshold) up FASTER than the wall
+  // can rise — the very deadlock that kept the garrison from ever bootstrapping. Holding
+  // off keeps the building count (and threshold) low so the wall is cheap to establish;
+  // once it holds, normal play resumes and tops it up incrementally (raids repelled, so
+  // the garrison is never wiped again).
+  if (barracksUnlocked(v) && !homeRepelsRaid(v)) {
+    return garrisonRecruit(v) // a defensive spearman batch, or null to accumulate for it
+  }
+
+  // M2.4: the Pałac is the conquest unlock — buy level 1 the moment it is affordable (its
+  // higher levels are left to the cheapest-building economy). Placed AFTER the garrison
+  // gate so the wall always takes precedence.
+  if (v.buildings.academy === 0) {
+    const a = nextCostAffordable(v, 'academy')
+    if (!a.maxed && a.affordable) return { kind: 'build', id: 'academy' }
+  }
+
   // M1.3: a ready home army strikes for loot before the economy spends below.
   // M2.2: the strike targets a concrete world village (chooseAttack reads `world`).
+  // M2.4: chooseAttack now marches only the SURPLUS beyond a raid-repelling home
+  // garrison (see marchSurplus), so the home stack always survives raids — which is what
+  // keeps the accumulating nobles alive (a successful raid wipes the whole home garrison).
   const attack = chooseAttack(v, world)
   if (attack !== null) return attack
 
   const building = cheapestBuilding(v)
-  const recruit = barracksUnlocked(v) ? cheapestRecruit(v) : null
+  // Combat recruitment uses a REDUCED population budget so the noble strike force always
+  // has room to train (see combatPopBudget); the noble itself is never the cheapest pick.
+  const recruit = barracksUnlocked(v) ? cheapestRecruit(v, combatPopBudget(v)) : null
 
   if (building === null) return recruit // recruit if possible, else null (nothing to do)
   if (recruit === null) return { kind: 'build', id: building.id }
@@ -254,6 +393,149 @@ export function chooseAction(v: Village, world: World): BotAction | null {
   // Both available: spend the surplus on units, keep the reserve for buildings.
   const flush = resourceSum(v).gte(building.sum.mul(BUILD_RESERVE))
   return flush ? recruit : { kind: 'build', id: building.id }
+}
+
+/**
+ * Size of the noble strike force the bot accumulates AT HOME before marching a conquest
+ * (M2.4). The combat model floors survivors, so a won march keeps `N-1` of `N` nobles
+ * even in a crushing win (floor(N·(1−ε))); with {@link LOYALTY_NOBLE_HIT}=25 a
+ * full-loyalty (100) camp needs 4 surviving nobles, so 5 sent capture it in ONE march —
+ * holds even for the worst case of nobles attacking with no escort (loss ≈ 9% → 4
+ * survive). A balance floor: smaller and a single march can't finish a full camp.
+ */
+const CONQUEST_TARGET_NOBLES = 5
+
+/** Population reserved for the noble strike force so combat recruitment never starves it. */
+const NOBLE_POP_RESERVE = CONQUEST_TARGET_NOBLES * UNITS.noble.pop
+
+/**
+ * Self-limit on how many barbarian villages the bot will CONQUER over a run. Conquest
+ * adds a player village (it counts toward {@link playerVillageCount}), so an unbounded
+ * siege loop would crowd out {@link chooseFounding} under {@link BOT_MAX_VILLAGES}; this
+ * keeps room for both the founding AND the conquest balance targets. >= the conquest
+ * target (1) with headroom to prove the mechanic repeats deterministically.
+ */
+const BOT_MAX_CONQUESTS = 2
+
+/** Count of a single unit type still queued for training in `v`. */
+function queuedUnits(v: Village, unitId: UnitId): number {
+  let n = 0
+  for (const order of v.recruitQueue) if (order.unitId === unitId) n += order.count
+  return n
+}
+
+/**
+ * Free population a COMBAT recruit may use: the full headroom MINUS whatever the noble
+ * strike force still needs ({@link NOBLE_POP_RESERVE} less the pop already held by owned
+ * or queued nobles). Before any noble exists this withholds 50 pop so the academy-funded
+ * conquest pipeline can always train its strike force even when the farm is otherwise
+ * full of infantry; once the nobles exist (and so count against `freePopulation`) the
+ * reserve relaxes to 0 and combat reclaims the headroom. No reserve before the Pałac.
+ */
+function combatPopBudget(v: Village): number {
+  const free = freePopulation(v).toNumber()
+  if (v.buildings.academy <= 0) return free
+  const noblePop = (v.units.noble + queuedUnits(v, 'noble')) * UNITS.noble.pop
+  const reserve = Math.max(0, NOBLE_POP_RESERVE - noblePop)
+  return Math.max(0, free - reserve)
+}
+
+/** How many of `state`'s villages were CONQUERED (named by {@link applyConquest}). */
+function conqueredVillageCount(state: GameState): number {
+  let n = 0
+  for (const id of state.villageOrder) {
+    if (state.villages[id].name.startsWith('Zdobyta')) n++
+  }
+  return n
+}
+
+/** Safety factor the home garrison's defence must keep over the next raid's power. */
+const RAID_REPEL_MARGIN = 1.15
+
+/**
+ * Pick a conquest march for `v` (ALL home nobles + the combat surplus as escort), or
+ * null when none is finishable this strike. Scans barbarians nearest-first ({@link
+ * targetsByDistance}) and takes the first still-loyal camp the strike force (a) beats
+ * and (b) crushes hard enough that enough nobles SURVIVE to drop its remaining loyalty
+ * to <= 0 in this single march — `survivingNobles >= ceil(loyalty / LOYALTY_NOBLE_HIT)`.
+ * Because the nearest camps are the low tiers (small walls), the escort makes the loss
+ * fraction tiny, so the nobles survive and the capture lands. Using only the surplus as
+ * escort keeps the garrison home, so the conquest march never exposes the village to a
+ * raid. Pure over (village + world); safe to call repeatedly.
+ */
+function chooseConquestAttack(v: Village, world: World): Extract<BotAction, { kind: 'attack' }> | null {
+  const home = stationedUnits(v)
+  const nobles = nobleCount(home)
+  if (nobles < 1) return null
+  // The strike force: ALL home nobles + the combat SURPLUS as escort. Keeping the
+  // garrison home means the conquest march doesn't expose the village to raids, and the
+  // escort makes the loss fraction tiny so the nobles survive (the nobles alone already
+  // beat a low-tier camp, but the escort guarantees the floor leaves enough of them).
+  const army = marchSurplus(v)
+  army.noble = nobles
+  const atkPower = armyAttackPower(army)
+  if (atkPower <= 0) return null
+  for (const b of targetsByDistance(v, world)) {
+    if (b.loyalty <= 0) continue // already taken / being taken
+    const target = barbarianTarget(b.level)
+    const outcome = battleOutcome(atkPower, target.defensePower)
+    if (!outcome.attackerWins) continue
+    const survivors = applyLosses(army, outcome.attackerLossFrac)
+    const needed = Math.ceil(b.loyalty / LOYALTY_NOBLE_HIT)
+    if (nobleCount(survivors) >= needed) {
+      return { kind: 'attack', targetId: b.id, targetLevel: b.level, units: army }
+    }
+  }
+  return null
+}
+
+/**
+ * CONQUEST pipeline (M2.4): the capital's one conquest move this step, or null. Drives
+ * the loyalty -> capture loop end to end once the Pałac stands:
+ *
+ *  1. STOP once {@link BOT_MAX_CONQUESTS} camps are already taken — so the village cap
+ *     leaves room for {@link chooseFounding} (both mechanics must hit their targets).
+ *  2. GATE on the academy: until it is built (by {@link chooseAction}'s priority) there
+ *     is nothing to do here.
+ *  3. STRIKE when a full noble force is home AND a camp can be finished in one march
+ *     ({@link chooseConquestAttack}) — sends all nobles + the combat surplus as escort,
+ *     keeping the raid-repelling garrison home.
+ *  4. Otherwise TRAIN toward the strike force: recruit nobles (counting any already
+ *     queued) up to {@link CONQUEST_TARGET_NOBLES}, drawing on the reserved population.
+ *
+ * State-level (like {@link chooseFounding}) because it must see the whole village ledger
+ * to self-limit; the runner consults it once per step BEFORE the per-village economy so
+ * the noble force gets first claim on the reserved population and on resources. Pure and
+ * deterministic (ledger + world + catalogues), so determinism / save-load continuation
+ * hold with conquest in play.
+ */
+export function chooseConquest(state: GameState): Extract<BotAction, { kind: 'recruit' | 'attack' }> | null {
+  if (conqueredVillageCount(state) >= BOT_MAX_CONQUESTS) return null
+
+  const v = state.villages[state.villageOrder[0]]
+  if (v.buildings.academy <= 0) return null
+
+  const home = stationedUnits(v)
+  if (nobleCount(home) >= CONQUEST_TARGET_NOBLES) {
+    const attack = chooseConquestAttack(v, state.world)
+    if (attack !== null) return attack
+  }
+
+  // Train nobles only once the home garrison repels raids — they accumulate behind that
+  // wall (a raid would otherwise wipe the home stack, nobles included). garrisonRecruit
+  // stands the wall up first, so this gate clears in the ordinary course of play.
+  if (!homeRepelsRaid(v)) return null
+
+  // Keep topping up toward the strike force (owned home + away + queued all count).
+  const have = v.units.noble + queuedUnits(v, 'noble')
+  if (have < CONQUEST_TARGET_NOBLES) {
+    const need = CONQUEST_TARGET_NOBLES - have
+    const batch = Math.min(need, recruitBatch(v, 'noble', freePopulation(v).toNumber()))
+    if (batch >= 1 && canRecruit(v, 'noble', batch).ok) {
+      return { kind: 'recruit', unitId: 'noble', count: batch }
+    }
+  }
+  return null
 }
 
 /**

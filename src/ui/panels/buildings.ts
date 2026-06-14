@@ -83,6 +83,8 @@ function effectText(v: Village, id: BuildingId): string {
       return 'Koszt rozbudowy: -' + Math.round((1 - costReduction(v).toNumber()) * 100) + '%'
     case 'recruit_speed':
       return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(v)) * 100) + '%'
+    case 'noble_unlock':
+      return 'Odblokowuje szlachcica (przejmowanie wiosek)'
     default: {
       const _exhaustive: never = e
       return String(_exhaustive)

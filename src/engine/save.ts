@@ -28,7 +28,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 6
+export const SAVE_VERSION = 7
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -229,6 +229,52 @@ export function migrate(raw: any): any {
       }
       return { ...s, villages, world: generateWorld(s.seed), version: 6 }
     },
+    // v6 -> v7: nobles + conquest (M2.4). A v6 save predates the noble unit, the
+    // academy ("Pałac") building and barbarian loyalty. Backfill those WITHOUT
+    // disturbing the player's progress:
+    //  - every village's `buildings` gains the new key (academy:0) and `units` gains
+    //    (noble:0) by spreading INITIAL_BUILDINGS / INITIAL_UNITS *first*, so the
+    //    save's own values win over the seed and existing levels/counts are preserved;
+    //  - every in-flight march's `units` gets the noble:0 slot the same way (over the
+    //    zero full roster), so its dispatched subset has the M2.4 key order;
+    //  - every barbarian gains `loyalty`, defaulting to full (100 = hardest to take)
+    //    unless the save already carries a numeric one (forward-compat).
+    // Malformed entries are left as-is so validateState rejects them loudly. Nothing
+    // is recomputed here; importSave's recomputeDerived pass runs afterwards exactly
+    // as for every other migration.
+    6: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        const marches = Array.isArray(v.marches)
+          ? v.marches.map((m: any) =>
+              isObject(m)
+                ? { ...m, units: { ...INITIAL_UNITS, ...(isObject(m.units) ? m.units : {}) } }
+                : m,
+            )
+          : v.marches
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+          units: { ...INITIAL_UNITS, ...(isObject(v.units) ? v.units : {}) },
+          marches,
+        }
+      }
+      const barbarians = Array.isArray(s.world?.barbarians)
+        ? s.world.barbarians.map((b: any) =>
+            isObject(b) ? { ...b, loyalty: typeof b.loyalty === 'number' ? b.loyalty : 100 } : b,
+          )
+        : s.world?.barbarians
+      const world = isObject(s.world) ? { ...s.world, barbarians } : s.world
+      return { ...s, villages, world, version: 7 }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -397,8 +443,9 @@ function validateVillage(v: unknown, id: string): void {
  * village key is ordered, exactly once — so the tick iterates each village once and
  * never references a missing entry), every village passes {@link validateVillage},
  * the spatial `world` (M2.2) is checked (its `barbarians` list, each with a finite
- * coordinate and a level in [1, MAX_TARGET_LEVEL]), and the GLOBAL battle log is
- * validated as before plus the new `villageId`.
+ * coordinate, a level in [1, MAX_TARGET_LEVEL] and — since M2.4 — a `loyalty` in
+ * [0, 100]), and the GLOBAL battle log is validated (each report's `villageId`, plus
+ * the M2.4 `conquer` variant alongside the existing `attack` / `raid`).
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -462,6 +509,14 @@ export function validateState(s: unknown): GameState {
       throw new Error('save: invalid barbarian level')
     }
     if (typeof b.name !== 'string') throw new Error('save: invalid barbarian name')
+    // Conquest loyalty (M2.4) — a finite number in [0, 100]. The march/regen path
+    // keeps it clamped to that band (a hit that drives it <= 0 conquers and removes
+    // the village in the same sub-step, so a persisted barbarian never carries a
+    // negative), and an out-of-range / NaN loyalty would mis-drive the conquest
+    // maths, so reject it loudly rather than autosave a corrupt world.
+    if (typeof b.loyalty !== 'number' || !Number.isFinite(b.loyalty) || b.loyalty < 0 || b.loyalty > 100) {
+      throw new Error('save: invalid barbarian loyalty')
+    }
   }
 
   // GLOBAL battle log — a list of plain-JSON reports (no Decimals). Validate the
@@ -471,10 +526,23 @@ export function validateState(s: unknown): GameState {
   if (!Array.isArray(battleLog)) throw new Error('save: invalid battleLog')
   for (const r of battleLog) {
     if (!isObject(r)) throw new Error('save: invalid battle report')
-    if (r.kind !== 'attack' && r.kind !== 'raid') {
+    if (r.kind !== 'attack' && r.kind !== 'raid' && r.kind !== 'conquer') {
       throw new Error('save: invalid battle report kind')
     }
+    // villageId is shared by all three variants (the village the report belongs to).
     if (typeof r.villageId !== 'string') throw new Error('save: invalid battle report villageId')
+    // conquer (M2.4) is a distinct shape: no won/losses, but it names the taken
+    // barbarian village and the brand-new player village created in its place.
+    if (r.kind === 'conquer') {
+      if (typeof r.targetName !== 'string') {
+        throw new Error('save: invalid conquer report targetName')
+      }
+      if (typeof r.newVillageId !== 'string') {
+        throw new Error('save: invalid conquer report newVillageId')
+      }
+      continue
+    }
+    // attack | raid share the combat fields (player POV win + own losses).
     if (typeof r.won !== 'boolean') throw new Error('save: invalid battle report won')
     if (typeof r.losses !== 'number' || !Number.isInteger(r.losses) || r.losses < 0) {
       throw new Error('save: invalid battle report losses')
@@ -488,6 +556,16 @@ export function validateState(s: unknown): GameState {
         throw new Error('save: invalid attack report targetLevel')
       }
       if (typeof r.lootSum !== 'string') throw new Error('save: invalid attack report lootSum')
+      // M2.4 conquest progress (loyaltyHit / loyaltyAfter): OPTIONAL — present only on a
+      // won attack whose army carried a surviving noble. When present each must be a
+      // finite number in the loyalty band [0, 100] (the same band a barbarian's loyalty
+      // is validated against); absent is the normal "no noble progress" case.
+      for (const key of ['loyaltyHit', 'loyaltyAfter'] as const) {
+        const n = r[key]
+        if (n !== undefined && (typeof n !== 'number' || !Number.isFinite(n) || n < 0 || n > 100)) {
+          throw new Error(`save: invalid attack report ${key}`)
+        }
+      }
     } else if (typeof r.looted !== 'string') {
       throw new Error('save: invalid raid report looted')
     }

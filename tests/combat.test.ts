@@ -9,8 +9,8 @@ import {
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 
 /** A full (all UnitId present) roster — combat fns take a complete record. */
-function army(spearman = 0, swordsman = 0, axeman = 0): Record<UnitId, number> {
-  return { spearman, swordsman, axeman }
+function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble }
 }
 
 describe('battleOutcome', () => {

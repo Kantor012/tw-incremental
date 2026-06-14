@@ -7,18 +7,25 @@
  * in-flight orders. Combat stats (attack/def/carry/speed) are STORED here now and
  * only displayed in M1.2 — the battle system (M1.3) consumes them later.
  *
- * Import discipline: this module imports NOTHING at runtime, so it is a pure leaf
- * and can never take part in an initialisation cycle (state/save/recruitment all
- * import from here, never the other way around). Costs are plain `number` (small,
+ * Import discipline: this module imports only the *type* `BuildingId` (erased at
+ * runtime), so it stays a pure leaf and can never take part in an initialisation
+ * cycle: buildings.ts does NOT import units.ts, and state/save/recruitment all
+ * import from here, never the other way around. Costs are plain `number` (small,
  * fixed catalogue data); the live economy turns them into Decimal at spend time —
  * the "economy on Decimal" rule applies to resource amounts/production, not to the
  * authored cost constants.
  */
 
-export type UnitId = 'spearman' | 'swordsman' | 'axeman'
+import type { BuildingId } from './buildings'
 
-/** Stable iteration order for population roll-up, save validation and UI listing. */
-export const UNIT_IDS: readonly UnitId[] = ['spearman', 'swordsman', 'axeman']
+export type UnitId = 'spearman' | 'swordsman' | 'axeman' | 'noble'
+
+/**
+ * Stable iteration order for population roll-up, save validation and UI listing.
+ * `noble` stays LAST so older saves' roster key order is unchanged (the new unit
+ * is appended), keeping migration and round-trip deterministic.
+ */
+export const UNIT_IDS: readonly UnitId[] = ['spearman', 'swordsman', 'axeman', 'noble']
 
 export interface UnitDef {
   id: UnitId
@@ -32,6 +39,13 @@ export interface UnitDef {
   pop: number
   /** Base seconds to train ONE unit at barracks level 1 (before recruit_speed). */
   recruitSeconds: number
+  /**
+   * Building that must be built (level >= 1) before this unit can be recruited.
+   * DATA, not engine: recruitment gates on `v.buildings[requires] > 0` (see
+   * unitUnlocked in recruitment.ts), so a unit's unlock is a single edit here.
+   * The infantry triad requires the barracks; the noble requires the academy.
+   */
+  requires: BuildingId
   /** Offensive power (battle, M1.3). */
   attack: number
   /** Defensive power vs infantry (battle, M1.3). */
@@ -59,6 +73,7 @@ export const UNITS: Record<UnitId, UnitDef> = {
     cost: { wood: 50, clay: 30, iron: 10 },
     pop: 1,
     recruitSeconds: 80,
+    requires: 'barracks',
     attack: 10,
     defInfantry: 15,
     defCavalry: 45,
@@ -79,6 +94,7 @@ export const UNITS: Record<UnitId, UnitDef> = {
     cost: { wood: 30, clay: 30, iron: 70 },
     pop: 1,
     recruitSeconds: 110,
+    requires: 'barracks',
     attack: 25,
     defInfantry: 50,
     defCavalry: 25,
@@ -92,10 +108,31 @@ export const UNITS: Record<UnitId, UnitDef> = {
     cost: { wood: 60, clay: 30, iron: 40 },
     pop: 1,
     recruitSeconds: 130,
+    requires: 'barracks',
     attack: 40,
     defInfantry: 10,
     defCavalry: 5,
     carry: 10,
     speed: 18,
+  },
+  // The Szlachcic (noble): not a battle unit but a CONQUEST tool. Sent with an
+  // attacking army, every survivor of a won fight knocks the target's loyalty down
+  // (conquest.ts); drive it to <= 0 and the barbarian village is captured. It is
+  // deliberately very expensive, population-heavy and slow, and gated behind the
+  // academy (Palac), so taking a village is a sustained investment, not a one-shot.
+  // Numbers provisional — the Balance phase tunes them against the harness targets.
+  noble: {
+    id: 'noble',
+    name: 'Szlachcic',
+    desc: 'Obniża lojalność wioski; po serii udanych ataków przejmujesz wioskę. Bardzo drogi, wolny.',
+    cost: { wood: 8000, clay: 8000, iron: 8000 },
+    pop: 10,
+    recruitSeconds: 600,
+    requires: 'academy',
+    attack: 30,
+    defInfantry: 30,
+    defCavalry: 30,
+    carry: 0,
+    speed: 35,
   },
 }

@@ -21,9 +21,23 @@ import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
 /** Hard floor on the training-speed multiplier, however many barracks levels. */
 const RECRUIT_SPEED_FLOOR = 0.25
 
-/** True once the barracks exist (level >= 1) — the gate for all recruitment. */
+/**
+ * True once the barracks exist (level >= 1). KEPT as the marches/combat gate (only
+ * battle units come from the barracks); recruitment itself now gates per-unit via
+ * {@link unitUnlocked}, since the noble is unlocked by the academy, not the barracks.
+ */
 export function barracksUnlocked(v: Village): boolean {
   return v.buildings.barracks > 0
+}
+
+/**
+ * Whether `unitId` can be recruited at all in `v`: its required building (UNITS[id]
+ * .requires — barracks for the infantry triad, academy for the noble) is at level
+ * >= 1. DATA-DRIVEN: a unit's unlock is a single `requires` edit in units.ts and a
+ * new building entry; this engine function never changes.
+ */
+export function unitUnlocked(v: Village, unitId: UnitId): boolean {
+  return v.buildings[UNITS[unitId].requires] > 0
 }
 
 /**
@@ -87,7 +101,9 @@ export function canRecruit(
   unitId: UnitId,
   count: number,
 ): { ok: boolean; reason?: string } {
-  if (!barracksUnlocked(v)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
+  if (!unitUnlocked(v, unitId)) {
+    return { ok: false, reason: `Wymaga: ${BUILDINGS[UNITS[unitId].requires].name} (poziom 1).` }
+  }
   if (!Number.isInteger(count) || count <= 0) return { ok: false, reason: 'Niepoprawna liczba.' }
 
   const cost = recruitCost(unitId, count)

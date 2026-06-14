@@ -13,9 +13,12 @@ import {
 } from '../../systems/world'
 import { canFound } from '../../systems/villages'
 import { marchTime, stationedUnits, canAttack } from '../../systems/marches'
+import { unitUnlocked } from '../../systems/recruitment'
 import { armyAttackPower, armyCarry, battleOutcome } from '../../systems/combat'
 import type { UiCtx, Panel } from '../types'
 import { h, svg, SVG_NS, unitIcon, shieldIcon } from '../dom'
+// Aliased: the detail card already has a local element named `conquestHint`.
+import { conquestHint as conquestHintText } from '../conquestCopy'
 
 /**
  * World map panel (M2.2) — the spatial twin of the "Wyprawy" (campaign) tab and
@@ -121,6 +124,18 @@ function totalLootOf(level: number): Decimal {
 /** Round to 2dp for compact, stable viewBox strings. */
 function fmt2(n: number): string {
   return (Math.round(n * 100) / 100).toString()
+}
+
+/**
+ * Set a `.bar > i` fill width + aria-valuenow from a loyalty value, clamped to a
+ * finite 0..100 (NaN/∞ → full). Shared shape with campaign.ts's setBar; kept local
+ * here so the map panel stays self-contained (no cross-panel imports).
+ */
+function setLoyaltyBar(bar: HTMLElement, loyalty: number): void {
+  const pct = Math.max(0, Math.min(100, Number.isFinite(loyalty) ? loyalty : 100))
+  const fill = bar.firstElementChild as HTMLElement | null
+  if (fill) fill.style.width = pct + '%'
+  bar.setAttribute('aria-valuenow', String(Math.round(pct)))
 }
 
 /**
@@ -577,7 +592,24 @@ export function createMapPanel(ctx: UiCtx): Panel {
   const lootVal = mkStat('Szac. łup')
   const distVal = mkStat('Odległość')
   const timeVal = mkStat('Czas marszu')
+  const loyaltyVal = mkStat('Lojalność')
   body.appendChild(stats)
+
+  // ---- Loyalty / conquest progress (M2.4) ---------------------------------
+  // A camp's loyalty (0..100) is its resistance to capture: a won attack with a
+  // surviving Szlachcic knocks it down, and at 0 the village is conquered (turns
+  // into a player village in place). Shown as a labelled bar PLUS the numeric stat
+  // above (colour is never the sole cue), with a hint that capture needs a noble.
+  const loyaltyBar = h('div', 'bar')
+  loyaltyBar.setAttribute('role', 'progressbar')
+  loyaltyBar.setAttribute('aria-valuemin', '0')
+  loyaltyBar.setAttribute('aria-valuemax', '100')
+  loyaltyBar.setAttribute('aria-label', 'Lojalność celu (100 = najtrudniej przejąć)')
+  loyaltyBar.appendChild(h('i'))
+  body.appendChild(loyaltyBar)
+
+  const conquestHint = h('p', 'map-detail-hint muted')
+  body.appendChild(conquestHint)
 
   const forecast = h('p', 'map-detail-forecast')
   forecast.setAttribute('role', 'status')
@@ -1062,6 +1094,16 @@ export function createMapPanel(ctx: UiCtx): Panel {
 
     distVal.textContent = formatNumber(distance(v.x, v.y, selected.x, selected.y), 1) + ' pól'
     timeVal.textContent = composed > 0 ? formatTime(marchTime(v, selected, army)) : '—'
+
+    // Loyalty (live: regenerates every tick) + conquest hint. The numeric stat and
+    // the bar both carry the value; the hint adapts to whether the active village can
+    // yet field a Szlachcic (academy unlocked).
+    loyaltyVal.textContent = Math.round(selected.loyalty) + ' / 100'
+    setLoyaltyBar(loyaltyBar, selected.loyalty)
+    // Shared, constant-sourced hint (kept in lockstep with the Wyprawy tab via
+    // ../conquestCopy): states the per-win loyalty drop AND that loyalty regenerates,
+    // adapting to whether this village can yet field a Szlachcic (academy unlocked).
+    conquestHint.textContent = conquestHintText(unitUnlocked(v, 'noble'))
 
     if (composed > 0) {
       const oc = battleOutcome(armyAttackPower(army), target.defensePower)

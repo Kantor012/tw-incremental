@@ -101,6 +101,11 @@ function evalTargets(r: RunResult): TargetCheck[] {
       ok: m.villagesFounded >= TARGETS.minVillagesFounded,
       detail: `founded ${m.villagesFounded} (own ${m.villagesOwned}, target founded >= ${TARGETS.minVillagesFounded})`,
     },
+    {
+      name: 'villages-conquered',
+      ok: m.villagesConquered >= TARGETS.minVillagesConquered,
+      detail: `conquered ${m.villagesConquered} (own ${m.villagesOwned}, target conquered >= ${TARGETS.minVillagesConquered})`,
+    },
   ]
 }
 
@@ -185,13 +190,14 @@ function main(): void {
   }
   console.log('')
 
-  // --- Expansion per seed (M2.3 founding) ---
+  // --- Expansion per seed (M2.3 founding + M2.4 conquest) ---
   console.log('--- Expansion (end) ---')
-  console.log('seed     | villages founded | villages owned')
+  console.log('seed     | villages founded | villages conquered | villages owned')
   for (const r of results) {
     const m = r.metrics
     console.log(
-      `${m.seed.padEnd(8)} | ${String(m.villagesFounded).padStart(16)} | ${m.villagesOwned}`,
+      `${m.seed.padEnd(8)} | ${String(m.villagesFounded).padStart(16)} | ` +
+        `${String(m.villagesConquered).padStart(18)} | ${m.villagesOwned}`,
     )
   }
   console.log('')

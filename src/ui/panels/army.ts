@@ -1,6 +1,7 @@
 import { RESOURCE_IDS, type ResourceId } from '../../engine/state'
 import { formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
+import { BUILDINGS } from '../../content/buildings'
 import {
   barracksUnlocked,
   canRecruit,
@@ -8,6 +9,7 @@ import {
   recruitSpeedMult,
   freePopulation,
   usedPopulation,
+  unitUnlocked,
 } from '../../systems/recruitment'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon, RESOURCE_NAMES } from '../dom'
@@ -48,6 +50,13 @@ interface UnitCardRefs {
   button: HTMLButtonElement
   /** +1 / +10 steppers — hard-disabled together with the input while locked. */
   steppers: HTMLButtonElement[]
+  /**
+   * Per-unit requirement notice ("Wymaga: <building>"). Shown (text, never colour
+   * alone — WCAG 1.4.1) only while the unit's `requires` building is missing; the
+   * noble's "Wymaga: Pałac" is the visible signpost toward conquest. The building
+   * name is read from the catalogue, so a re-gated unit needs no edit here.
+   */
+  lock: HTMLElement
   /**
    * Per-resource cost chip: `item` toggles the .is-short shortfall state, `val`
    * holds the TOTAL cost for the typed count, `mark` is a visually-hidden text
@@ -160,6 +169,13 @@ export function createArmyPanel(ctx: UiCtx): Panel {
 
     const timeLine = h('p', 'unit-time muted')
 
+    // Requirement notice. Visible text (not a colour cue or a hover-only title) that
+    // names the building this unit needs; toggled in update() from unitUnlocked().
+    // Built hidden — populated/revealed only while the unit is locked.
+    const lock = h('p', 'unit-lock muted')
+    lock.hidden = true
+    lock.setAttribute('role', 'note')
+
     // Controls: quantity input + (+1/+10) steppers + recruit button.
     const controls = h('div', 'recruit-controls')
     const input = h('input', 'recruit-count num')
@@ -223,10 +239,11 @@ export function createArmyPanel(ctx: UiCtx): Panel {
     card.appendChild(statLine)
     card.appendChild(costWrap)
     card.appendChild(timeLine)
+    card.appendChild(lock)
     card.appendChild(controls)
     grid.appendChild(card)
 
-    cards[id] = { owned, time: timeLine, input, button, steppers, costItems }
+    cards[id] = { owned, time: timeLine, input, button, steppers, lock, costItems }
   }
   el.appendChild(grid)
 
@@ -258,8 +275,22 @@ export function createArmyPanel(ctx: UiCtx): Panel {
     const speedMult = recruitSpeedMult(v)
     for (const id of UNIT_IDS) {
       const ref = cards[id]
+      // Per-unit unlock: the infantry triad gates on the barracks, the noble on the
+      // academy (Pałac). Each card locks/unlocks independently from its own
+      // `requires` building — so the noble card opens with the academy alone.
+      const cardUnlocked = unitUnlocked(v, id)
       ref.owned.textContent = 'masz: ' + formatInt(v.units[id])
       ref.time.textContent = 'Czas: ' + formatTime(UNITS[id].recruitSeconds * speedMult) + '/szt.'
+
+      // Requirement notice: shown as text while the unit is locked, naming the
+      // building it needs (data-driven via UNITS[id].requires), then hidden once met.
+      if (cardUnlocked) {
+        ref.lock.hidden = true
+        ref.lock.textContent = ''
+      } else {
+        ref.lock.textContent = 'Wymaga: ' + BUILDINGS[UNITS[id].requires].name
+        ref.lock.hidden = false
+      }
 
       // Cost + shortfall track the *typed* count (the same count the button
       // checks), so the visible cost/affordability cue can never contradict the
@@ -277,12 +308,13 @@ export function createArmyPanel(ctx: UiCtx): Panel {
       }
 
       // Button reflects canRecruit for the SAME typed count; the reason becomes
-      // the tooltip + aria cue. Steppers/input are hard-locked only with no barracks.
+      // the tooltip + aria cue. Steppers/input are hard-locked per-unit (the noble's
+      // controls stay live with the academy even before the barracks, and vice versa).
       const verdict = canRecruit(v, id, count)
       ref.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
       ref.button.title = verdict.ok ? '' : (verdict.reason ?? '')
-      ref.input.disabled = !unlocked
-      for (const b of ref.steppers) b.disabled = !unlocked
+      ref.input.disabled = !cardUnlocked
+      for (const b of ref.steppers) b.disabled = !cardUnlocked
     }
 
     // Queue: rebuild only when its signature changes (small + bounded), so the

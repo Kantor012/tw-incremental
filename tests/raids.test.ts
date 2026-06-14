@@ -10,8 +10,8 @@ import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
 
 /** A full (all UnitId present) roster snapshot. */
-function army(spearman = 0, swordsman = 0, axeman = 0): Record<UnitId, number> {
-  return { spearman, swordsman, axeman }
+function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble }
 }
 
 /**
@@ -64,7 +64,9 @@ describe('advanceRaids', () => {
     advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL)
 
     const r = s.battleLog[0]
-    expect(r.kind).toBe('raid')
+    // Narrow off the discriminant so won/losses (absent on the M2.4 'conquer' variant)
+    // are accessible — and the test fails loudly if a non-raid report ever lands here.
+    if (r.kind !== 'raid') throw new Error(`expected a raid report, got ${r.kind}`)
     expect(r.villageId).toBe('v0') // tagged with the originating village
     expect(r.won).toBe(false) // raid succeeded (from the player's view: lost)
     expect(r.losses).toBeGreaterThan(0)

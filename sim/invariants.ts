@@ -18,6 +18,7 @@ import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { WORLD_SIZE } from '../src/systems/world'
+import { LOYALTY_MAX } from '../src/systems/conquest'
 import { chooseAction } from './bot'
 
 /**
@@ -272,6 +273,32 @@ export function checkVillagePlacement(state: GameState): InvariantResult {
 
   return {
     name: 'village-placement',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Conquest-loyalty invariant (M2.4). Every barbarian village's `loyalty` must be a
+ * FINITE number inside the [0, {@link LOYALTY_MAX}] band at every sample — the engine
+ * clamps it on both ends (regen caps at LOYALTY_MAX in advanceWorldLoyalty; a noble hit
+ * that drives it <= 0 is pinned to 0 and the camp captured in advanceMarches), so a
+ * value outside the band, NaN or a non-number would mean the loyalty arithmetic or the
+ * save round-trip corrupted it — which would mis-drive (or never fire) capture. Captured
+ * camps are removed from `world.barbarians`, so only still-besieged camps are checked.
+ * Each offending entry names the barbarian id.
+ */
+export function checkLoyalty(state: GameState): InvariantResult {
+  const issues: string[] = []
+  for (const b of state.world.barbarians) {
+    if (typeof b.loyalty !== 'number' || !Number.isFinite(b.loyalty)) {
+      issues.push(`${b.id}.loyalty=${String(b.loyalty)}`)
+    } else if (b.loyalty < 0 || b.loyalty > LOYALTY_MAX) {
+      issues.push(`${b.id}.loyalty=${b.loyalty} out of [0,${LOYALTY_MAX}]`)
+    }
+  }
+  return {
+    name: 'loyalty-range',
     ok: issues.length === 0,
     detail: issues.length ? issues.join('; ') : undefined,
   }

@@ -8,7 +8,7 @@ import {
   costReduction,
   nextCostAffordable,
 } from '../src/systems/buildings'
-import { BUILDINGS } from '../src/content/buildings'
+import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 
 /**
  * Since M2.1 the building engine is scoped to one {@link Village} (each village owns
@@ -161,5 +161,69 @@ describe('nextCostAffordable', () => {
     const maxedInfo = nextCostAffordable(v, 'sawmill')
     expect(maxedInfo.maxed).toBe(true)
     expect(maxedInfo.affordable).toBe(false)
+  })
+})
+
+/**
+ * M2.4 — the academy (Pałac) is the conquest gate: a BINARY `noble_unlock` building
+ * that lets a village train the noble (units.ts `requires: 'academy'`) and so capture
+ * barbarian villages. It contributes to NO tick-derived stat, so recompute must treat
+ * it as a pure no-op while the generic cost/affordability/max engine still applies.
+ */
+describe('academy (Pałac — noble-unlock building)', () => {
+  it('catalogue: military, maxLevel 3, 15k cost, factor 1.6 and a binary noble_unlock effect', () => {
+    const def = BUILDINGS.academy
+    expect(def.id).toBe('academy')
+    expect(def.name).toBe('Pałac')
+    expect(def.category).toBe('military')
+    expect(def.maxLevel).toBe(3)
+    expect(def.baseCost).toEqual({ wood: 15000, clay: 15000, iron: 15000 })
+    expect(def.costFactor).toBe(1.6)
+    // Binary gate: the effect is exactly { kind: 'noble_unlock' } — no perLevel magnitude.
+    expect(def.effect).toEqual({ kind: 'noble_unlock' })
+    // A fresh village never starts with the academy (building it is a late-M2 goal).
+    expect(def.initialLevel ?? 0).toBe(0)
+  })
+
+  it('appears LAST in the stable BUILDING_IDS order', () => {
+    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('academy')
+  })
+
+  it('recomputeVillageDerived ignores it — raising the academy changes no derived stat', () => {
+    const v = createVillage('v0', 'Stolica')
+    const before = {
+      wood: v.production.wood.toString(),
+      clay: v.production.clay.toString(),
+      iron: v.production.iron.toString(),
+      storage: v.storageCap.toString(),
+      pop: v.popCap.toString(),
+    }
+
+    v.buildings.academy = BUILDINGS.academy.maxLevel
+    recomputeVillageDerived(v)
+
+    expect(v.production.wood.toString()).toBe(before.wood)
+    expect(v.production.clay.toString()).toBe(before.clay)
+    expect(v.production.iron.toString()).toBe(before.iron)
+    expect(v.storageCap.toString()).toBe(before.storage)
+    expect(v.popCap.toString()).toBe(before.pop)
+  })
+
+  it('uses the generic engine: cost grows with level and build() maxes out at level 3', () => {
+    const v = rich()
+    const atL0 = buildingCost(v, 'academy')
+    v.buildings.academy = 2
+    const atL2 = buildingCost(v, 'academy')
+    expect(atL2.wood.gt(atL0.wood)).toBe(true)
+    expect(atL2.iron.gt(atL0.iron)).toBe(true)
+
+    // From scratch: three buys reach the ceiling, the fourth is refused.
+    const v2 = rich()
+    expect(build(v2, 'academy')).toBe(true) // 0 -> 1
+    expect(build(v2, 'academy')).toBe(true) // 1 -> 2
+    expect(build(v2, 'academy')).toBe(true) // 2 -> 3 (max)
+    expect(v2.buildings.academy).toBe(BUILDINGS.academy.maxLevel)
+    expect(build(v2, 'academy')).toBe(false) // already maxed — no mutation
+    expect(v2.buildings.academy).toBe(BUILDINGS.academy.maxLevel)
   })
 })

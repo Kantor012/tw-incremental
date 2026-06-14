@@ -17,6 +17,7 @@ import {
   checkArmyConsistency,
   checkWorldConsistency,
   checkVillagePlacement,
+  checkLoyalty,
   checkRoundTrip,
   checkNoSoftlock,
   checkOfflineDeterminism,
@@ -25,7 +26,7 @@ import {
   totalResources,
   type InvariantResult,
 } from './invariants'
-import { chooseAction, chooseFounding } from './bot'
+import { chooseAction, chooseFounding, chooseConquest } from './bot'
 import {
   collect,
   emptyCombatStats,
@@ -100,6 +101,23 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
   let founded = 0
   let actions = 0
   const v = state.villages[state.villageOrder[0]]
+
+  // M2.4 conquest pipeline FIRST, so the noble strike force gets first claim on the
+  // reserved population and on resources before the per-village economy spends them.
+  // One conquest move per step (train a noble OR march the force in); self-limited and
+  // pure, so determinism / save-load continuation hold. Capital-scoped, like the loop.
+  const conquest = chooseConquest(state)
+  if (conquest !== null) {
+    if (conquest.kind === 'recruit') {
+      if (recruit(v, conquest.unitId, conquest.count)) {
+        recruited[conquest.unitId] += conquest.count
+        rec += conquest.count
+      }
+    } else if (sendAttack(v, state.world, state.battleLog, conquest.targetId, conquest.units)) {
+      attacked++
+    }
+  }
+
   while (actions < MAX_ACTIONS_PER_STEP) {
     const action = chooseAction(v, state.world)
     if (action === null) break
@@ -198,6 +216,7 @@ function runContinuous(
       invariants.push(...tag([checkArmyConsistency(state)], phase))
       invariants.push(...tag([checkWorldConsistency(state)], phase))
       invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkLoyalty(state)], phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
       invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
@@ -217,6 +236,7 @@ function runContinuous(
     invariants.push(...tag([checkArmyConsistency(state)], 'final'))
     invariants.push(...tag([checkWorldConsistency(state)], 'final'))
     invariants.push(...tag([checkVillagePlacement(state)], 'final'))
+    invariants.push(...tag([checkLoyalty(state)], 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
     // Whole-run progress: any action ever taken, or resources above the start.
     invariants.push(

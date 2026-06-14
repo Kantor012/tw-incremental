@@ -77,6 +77,17 @@ export interface BalanceTargets {
    * for it. >= 1 confirms multi-village play actually happens within the budget.
    */
   minVillagesFounded: number
+
+  // --- M2.4 conquest goal (warning) ---
+  /**
+   * The bot must CONQUER at least this many barbarian villages over a run — proof the
+   * loyalty -> capture pipeline (build the Pałac, train nobles, march them in until a
+   * camp's loyalty hits 0) is reachable within the budget. >= 1 confirms the conquest
+   * mechanic actually completes; if it cannot be hit without starving the M1/M2.3
+   * targets, the academy/noble cost or the LOYALTY_NOBLE_HIT/REGEN knobs need tuning
+   * (those live outside the harness — see manifest notes).
+   */
+  minVillagesConquered: number
 }
 
 export const TARGETS: BalanceTargets = {
@@ -125,4 +136,11 @@ export const TARGETS: BalanceTargets = {
   // minimum proof-of-mechanic; a healthy run founds a handful before the geometric
   // cost outgrows the warehouse cap.
   minVillagesFounded: 1,
+
+  // M2.4: conquest online. A mature capital should be able to build the Pałac, train a
+  // strike force of nobles and march them into a barbarian camp until its loyalty hits
+  // 0 — flipping it to a player village — at least once within the budget. Sized at the
+  // minimum proof-of-mechanic (the bot self-limits conquests so founding keeps room
+  // under the village cap — see sim/bot.chooseConquest).
+  minVillagesConquered: 1,
 }

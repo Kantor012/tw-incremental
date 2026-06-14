@@ -4,6 +4,7 @@ import { isFiniteDecimal } from './decimal'
 import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
 import { advanceRaids } from '../systems/raids'
+import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
 
 /**
  * Fixed simulation step shared by the live loop and offline catch-up: 20 ticks
@@ -21,8 +22,20 @@ export const TICK_RATE = 1 / 20
  * `Object.keys`, whose order is not guaranteed across engines/saves), so the whole
  * multi-village step is a pure function of state — the determinism the offline /
  * combat invariants assert. Each village owns its OWN economy (resources,
- * production, storageCap, …); the only shared structure is the GLOBAL battle log,
- * threaded explicitly into the combat advancers (`state.battleLog`).
+ * production, storageCap, …); the only shared structures are the GLOBAL battle log
+ * (threaded explicitly into the combat advancers) and, since M2.4, the GLOBAL
+ * {@link World} (`state.world`): marches read it to resolve targets and erode a
+ * conquered camp's loyalty.
+ *
+ * Conquest (M2.4) is a TWO-PHASE step so a capture mutates the world exactly once,
+ * never under the iterator: each {@link advanceMarches} RETURNS the captures its
+ * village earned this sub-step; they are collected and applied via
+ * {@link applyConquest} AFTER the village loop (a capture pushes onto `villages` /
+ * `villageOrder`, which must not happen mid-iteration). Finally
+ * {@link advanceWorldLoyalty} regenerates every surviving camp's loyalty ONCE per
+ * sub-step — not per village — so balance and replay never depend on how many player
+ * villages exist. Both the collection order (villageOrder, then push order) and the
+ * single regen call keep the whole thing deterministic.
  *
  * EVERYTHING advances here for each village, not just the step-sensitive subsystems,
  * because combat (marches deliver loot, raids steal resources) READS AND WRITES the
@@ -37,6 +50,11 @@ export const TICK_RATE = 1 / 20
  * the existing production tests hold.)
  */
 function subStep(state: GameState, dt: number): void {
+  // Captures (a surviving noble drove a target's loyalty to 0) are gathered across the
+  // whole village loop and applied AFTER it — never mid-iteration, where minting a new
+  // player village would resize villageOrder under the loop. Typed off advanceMarches'
+  // return so this stays decoupled from where ConquestEvent is declared.
+  const conquests: ReturnType<typeof advanceMarches> = []
   for (const id of state.villageOrder) {
     const v = state.villages[id]
     for (const r of RESOURCE_IDS) {
@@ -49,11 +67,21 @@ function subStep(state: GameState, dt: number): void {
     }
     // Each is a no-op when its subsystem is idle (empty queue / no marches / village
     // not yet worth raiding), so the steady state stays cheap. The global battle log
-    // is passed explicitly so combat from any village appends to the one shared feed.
+    // is passed explicitly so combat from any village appends to the one shared feed;
+    // the global world is passed so marches resolve targets and erode loyalty. Marches
+    // return any captures earned this step — deferred to after the loop.
     advanceRecruitment(v, dt)
-    advanceMarches(v, state.battleLog, dt)
+    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt))
     advanceRaids(v, state.battleLog, dt)
   }
+  // Apply captures once, in deterministic collection order. applyConquest no-ops on a
+  // barbId already removed this sub-step (two armies both flooring the same target), so
+  // duplicate events are harmless. A newly minted village is appended to villageOrder
+  // here, so it first produces/advances on the NEXT sub-step (it isn't in this loop).
+  for (const ev of conquests) applyConquest(state, ev.barbId, ev.attackerVillageId)
+  // Loyalty regenerates exactly ONCE per sub-step (not per village), after captures so a
+  // just-taken camp (already off world.barbarians) never regenerates.
+  advanceWorldLoyalty(state.world, dt)
 }
 
 /**

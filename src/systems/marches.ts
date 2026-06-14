@@ -12,6 +12,7 @@ import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from './combat'
 import { barracksUnlocked } from './recruitment'
 import { distance, barbarianById } from './world'
+import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
 
 /**
  * March engine — the GENERIC, deterministic mover for PvE attacks (M1.3, spatial
@@ -19,7 +20,9 @@ import { distance, barbarianById } from './world'
  * resolves the battle on arrival, and hauls loot home. Pure functions of a single
  * {@link Village} (+ the {@link World} for target lookup and the catalogues); the
  * only mutating ones are {@link advanceMarches} (the per-tick clock, called by
- * simulate) and {@link sendAttack} (dispatch). Node-safe (no DOM/clock/RNG).
+ * simulate — since M2.4 it also erodes a conquered target's loyalty in the
+ * {@link World} and returns the {@link ConquestEvent}s for the tick to apply) and
+ * {@link sendAttack} (dispatch). Node-safe (no DOM/clock/RNG).
  *
  * Since M2.2 a march targets a specific {@link BarbarianVillage} by id, and travel
  * time comes from the EUCLIDEAN distance between the source village and the target
@@ -254,25 +257,36 @@ function lootSum(loot: ResourceMap): string {
 
 /**
  * Advance every in-flight march of `v` by `dtSeconds`, mutating `v` (and appending
- * any resolved-battle reports to the GLOBAL `log`). Deterministic and Node-safe; a
- * no-op when there are no marches. Each march can cross MULTIPLE phase boundaries in
+ * any resolved-battle reports to the GLOBAL `log`). Reads `world` to resolve the
+ * concrete target and, since M2.4, to erode its loyalty when a noble survives a won
+ * attack; returns the {@link ConquestEvent}s (target reached zero loyalty) for the
+ * tick to apply AFTER every village has advanced (so a capture mutates the world
+ * exactly once, deterministically). Deterministic and Node-safe; returns an empty
+ * list when there are no marches. Each march can cross MULTIPLE phase boundaries in
  * a single `dt` (e.g. arrive, resolve, and fully return within one large offline
  * step):
  *
  *  - outbound completes  → resolve the battle (battleOutcome of the army's attack
  *    power vs the camp's defence). Casualties leave `v.units` immediately. On a
- *    win with survivors: stash carry-capped loot, flip to `returning` with a
- *    symmetric travel time, and log the result now (loot lands on return). On a win
- *    with no survivors (attrition floored the army to 0) or a loss: log and drop the
- *    march (nothing returns).
+ *    win with survivors: erode the target's loyalty by nobleCount(survivors) ×
+ *    {@link LOYALTY_NOBLE_HIT} (queuing a {@link ConquestEvent} if it hits 0), stash
+ *    carry-capped loot, flip to `returning` with a symmetric travel time, and log
+ *    the result now (loot lands on return). On a win with no survivors (attrition
+ *    floored the army to 0) or a loss: log and drop the march (nothing returns).
  *  - returning completes → deliver the loot (clamped) and drop the march. Survivors
  *    were never removed from `v.units`, so there is nothing to add back.
  *
  * Every report is tagged with `villageId: v.id`. Iterates back-to-front so a
  * completed march can be spliced without disturbing the indices still to process.
  */
-export function advanceMarches(v: Village, log: BattleReport[], dtSeconds: number): void {
-  if (!(dtSeconds > 0)) return
+export function advanceMarches(
+  v: Village,
+  world: World,
+  log: BattleReport[],
+  dtSeconds: number,
+): ConquestEvent[] {
+  const events: ConquestEvent[] = []
+  if (!(dtSeconds > 0)) return events
   const marches = v.marches
   for (let i = marches.length - 1; i >= 0; i--) {
     const m = marches[i]
@@ -315,14 +329,46 @@ export function advanceMarches(v: Village, log: BattleReport[], dtSeconds: numbe
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
       const losses = applyCasualties(v, sent, survivors)
       const loot = computeLoot(survivors, m.targetLevel)
-      pushBattleReport(log, {
+
+      // Conquest (M2.4): a won fight whose survivors still include a noble erodes
+      // the LIVE target's loyalty in the world. Look it up by the snapshotted id —
+      // it may already be gone (captured by an earlier event this sub-step, or a
+      // stale id), in which case there is nothing to erode. Loyalty is clamped to 0
+      // here; once it bottoms out we queue a ConquestEvent for the tick to apply
+      // (capture happens once, after every village's marches have advanced). Done
+      // BEFORE logging so the attack report can carry the progress it made (the
+      // actual loyalty removed + the value left), making "postęp" visible in the log.
+      let loyaltyHit: number | undefined
+      let loyaltyAfter: number | undefined
+      const nobles = nobleCount(survivors)
+      if (nobles > 0) {
+        const barb = barbarianById(world, m.targetId)
+        if (barb !== undefined) {
+          const before = barb.loyalty
+          barb.loyalty -= nobles * LOYALTY_NOBLE_HIT
+          if (barb.loyalty <= 0) {
+            barb.loyalty = 0
+            events.push({ barbId: m.targetId, attackerVillageId: v.id })
+          }
+          // The CLAMPED drop (before − after) and the resulting loyalty, for the report.
+          loyaltyHit = before - barb.loyalty
+          loyaltyAfter = barb.loyalty
+        }
+      }
+
+      const report: BattleReport = {
         kind: 'attack',
         villageId: v.id,
         targetLevel: m.targetLevel,
         won: true,
         lootSum: lootSum(loot),
         losses,
-      })
+      }
+      // Attach conquest progress only when a surviving noble actually hit a live target
+      // (otherwise the optional fields stay absent — a plain victory card).
+      if (loyaltyHit !== undefined) report.loyaltyHit = loyaltyHit
+      if (loyaltyAfter !== undefined) report.loyaltyAfter = loyaltyAfter
+      pushBattleReport(log, report)
 
       if (totalUnits(survivors) <= 0) {
         // Won but the whole army attrited to zero — no one carries the loot home.
@@ -341,4 +387,5 @@ export function advanceMarches(v: Village, log: BattleReport[], dtSeconds: numbe
       // loop continues: a large dt may also complete the return leg this step.
     }
   }
+  return events
 }

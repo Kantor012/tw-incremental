@@ -7,9 +7,10 @@ import { armyAttackPower, armyDefensePower, armyCarry, battleOutcome } from '../
 import { stationedUnits, marchTime, canAttack } from '../../systems/marches'
 import { targetsByDistance, distance, barbarianById } from '../../systems/world'
 import { raidPower } from '../../systems/raids'
-import { barracksUnlocked } from '../../systems/recruitment'
+import { barracksUnlocked, unitUnlocked } from '../../systems/recruitment'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon } from '../dom'
+import { conquestHint } from '../conquestCopy'
 
 /**
  * Campaign panel — the offensive screen (the "Wyprawy" tab). Since M2.2 the world
@@ -54,6 +55,11 @@ interface TargetCard {
   march: HTMLElement
   forecast: HTMLElement
   button: HTMLButtonElement
+  /** Loyalty number text + bar (M2.4 conquest progress). */
+  loyalty: HTMLElement
+  loyaltyBar: HTMLElement
+  /** Last rounded loyalty written to the DOM (NaN = never), so a steady tick is poke-free. */
+  loyaltyShown: number
 }
 
 /** Clamp a raw ratio*100 to a finite 0..100 percentage (NaN/∞ → full). */
@@ -193,6 +199,15 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     'Wioski barbarzyńskie ze świata, posortowane wg odległości od aktywnej wioski — dostępna alternatywa dla widoku Mapy.',
   )
   el.appendChild(targetsNote)
+  // Conquest primer (M2.4): how loyalty + the noble turn a camp into a player village.
+  // ADAPTIVE — its text is set in update() from the shared conquestHint(), toggling on
+  // whether the active village can yet field a Szlachcic (Pałac built), so a player
+  // without the academy is told to build it (matching the per-target hint on the Mapa
+  // tab) and a player with it gets the per-win drop + regeneration facts. Kept in
+  // lockstep with map.ts via the shared ../conquestCopy module.
+  const conquestNote = h('p', 'muted')
+  el.appendChild(conquestNote)
+  let lastNobleUnlocked: boolean | null = null
   // Grid template + card surface come from the shared .target-list / .target
   // classes (layout.css) — the single source of truth across tabs; no inline.
   const targetList = h('div', 'target-list')
@@ -245,6 +260,25 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       statsLine.appendChild(document.createTextNode(' · Marsz '))
       statsLine.appendChild(march)
 
+      // Loyalty / conquest progress (M2.4): the camp's resistance to capture. Number
+      // text AND a bar (colour is never the only cue); refreshed live by refreshLoyalty.
+      const loyaltyWrap = h('div', 'target-loyalty')
+      const loyaltyLabel = h('span', 'muted')
+      loyaltyLabel.appendChild(document.createTextNode('Lojalność '))
+      const loyalty = h('span', 'num')
+      loyaltyLabel.appendChild(loyalty)
+      const loyaltyBar = h('div', 'bar')
+      loyaltyBar.setAttribute('role', 'progressbar')
+      loyaltyBar.setAttribute('aria-valuemin', '0')
+      loyaltyBar.setAttribute('aria-valuemax', '100')
+      loyaltyBar.setAttribute(
+        'aria-label',
+        'Lojalność: ' + barb.name + ' (100 = najtrudniej przejąć)',
+      )
+      loyaltyBar.appendChild(h('i'))
+      loyaltyWrap.appendChild(loyaltyLabel)
+      loyaltyWrap.appendChild(loyaltyBar)
+
       const bottom = h('div', 'target-bottom')
       const forecast = h('span', 'target-forecast')
       const button = h('button', 'btn btn-primary', 'Atakuj')
@@ -289,9 +323,19 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
 
       row.appendChild(head)
       row.appendChild(statsLine)
+      row.appendChild(loyaltyWrap)
       row.appendChild(bottom)
       targetList.appendChild(row)
-      targetCards.push({ barb, loot, march, forecast, button })
+      targetCards.push({
+        barb,
+        loot,
+        march,
+        forecast,
+        button,
+        loyalty,
+        loyaltyBar,
+        loyaltyShown: Number.NaN,
+      })
     }
   }
 
@@ -326,6 +370,22 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       const verdict = canAttack(v, card.barb, army)
       card.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
       card.button.title = verdict.ok ? '' : (verdict.reason ?? '')
+    }
+  }
+
+  /**
+   * Live loyalty refresh (M2.4). Loyalty regenerates every tick, so unlike the
+   * army-gated {@link pokeTargets} this runs on EVERY update — but it writes a card
+   * only when its rounded loyalty actually changed, so a steady tick costs ~N cheap
+   * comparisons and no DOM work. (Loyalty is independent of the composed army.)
+   */
+  const refreshLoyalty = (): void => {
+    for (const card of targetCards) {
+      const rounded = Math.round(card.barb.loyalty)
+      if (rounded === card.loyaltyShown) continue
+      card.loyaltyShown = rounded
+      card.loyalty.textContent = rounded + ' / 100'
+      setBar(card.loyaltyBar, pctOf(card.barb.loyalty))
     }
   }
 
@@ -371,6 +431,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     const v = activeVillage()
     const world = ctx.store.state.world
     const unlocked = barracksUnlocked(v)
+    // Adaptive conquest primer (findings: regen + per-win drop must be stated; the
+    // Mapa/Wyprawy hints must match). Refresh only when the noble-unlock state flips.
+    const nobleUnlocked = unitUnlocked(v, 'noble')
+    if (nobleUnlocked !== lastNobleUnlocked) {
+      lastNobleUnlocked = nobleUnlocked
+      conquestNote.textContent = conquestHint(nobleUnlocked)
+    }
     const home = stationedUnits(v)
     const army = readArmy(v)
     const composed = armySize(army)
@@ -425,6 +492,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       lastArmySig = armySig
       pokeTargets(v, army, composed)
     }
+    // Loyalty changes every tick (regen / noble hits), independent of the army — so it
+    // gets its own per-tick, change-gated refresh rather than riding the army poke.
+    refreshLoyalty()
 
     // Marches in progress — rebuilt only when their signature (target / phase /
     // whole-second ETA / composition) changes, so the steady state is poke-free.
