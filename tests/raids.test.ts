@@ -14,80 +14,98 @@ function army(spearman = 0, swordsman = 0, axeman = 0): Record<UnitId, number> {
   return { spearman, swordsman, axeman }
 }
 
-/** A grown village (initial buildings) with a stocked treasury — raids are active. */
+/**
+ * A state whose capital ('v0', "Stolica") has its starting buildings and a stocked
+ * treasury — raids are active. Since M2.1 the economy lives per-village, so we mutate
+ * `s.villages.v0`; the raid system takes that {@link Village} and the GLOBAL
+ * `s.battleLog` explicitly, and every report it pushes is tagged with the village.
+ */
 function village(seed = 'r'): GameState {
   const s = createInitialState(seed, 0)
-  s.resources = { wood: D(100), clay: D(100), iron: D(100) }
+  s.villages.v0.resources = { wood: D(100), clay: D(100), iron: D(100) }
   return s
 }
 
 describe('raidPower', () => {
   it('scales with the flat base, building levels and a fraction of army defence', () => {
     const s = village()
-    s.units = army(10, 0, 0)
+    const v = s.villages.v0
+    v.units = army(10, 0, 0)
     let buildingSum = 0
-    for (const id of BUILDING_IDS) buildingSum += s.buildings[id]
-    expect(raidPower(s)).toBeCloseTo(10 + 3 * buildingSum + 0.4 * armyDefensePower(s.units))
+    for (const id of BUILDING_IDS) buildingSum += v.buildings[id]
+    expect(raidPower(v)).toBeCloseTo(10 + 3 * buildingSum + 0.4 * armyDefensePower(v.units))
   })
 })
 
 describe('advanceRaids', () => {
   it('a strong garrison repels the raid with no losses, then re-arms the timer', () => {
     const s = village()
-    s.units = army(10, 0, 0) // defence 150 ≫ raid power 88 → repelled
-    advanceRaids(s, RAID_BASE_INTERVAL)
+    const v = s.villages.v0
+    v.units = army(10, 0, 0) // defence 150 ≫ raid power 88 → repelled
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL)
 
     expect(s.battleLog.length).toBe(1)
-    expect(s.battleLog[0]).toMatchObject({ kind: 'raid', won: true, looted: '0', losses: 0 })
-    expect(s.units.spearman).toBe(10) // untouched
-    expect(s.resources.wood.toString()).toBe('100') // nothing stolen
-    expect(s.raidTimer).toBe(RAID_BASE_INTERVAL) // re-armed
+    expect(s.battleLog[0]).toMatchObject({
+      kind: 'raid',
+      villageId: 'v0',
+      won: true,
+      looted: '0',
+      losses: 0,
+    })
+    expect(v.units.spearman).toBe(10) // untouched
+    expect(v.resources.wood.toString()).toBe('100') // nothing stolen
+    expect(v.raidTimer).toBe(RAID_BASE_INTERVAL) // re-armed
   })
 
   it('a weak garrison loses units and 20% of each resource', () => {
     const s = village()
-    s.units = army(1, 0, 0) // defence 15 < raid power 34 → raid succeeds
-    advanceRaids(s, RAID_BASE_INTERVAL)
+    const v = s.villages.v0
+    v.units = army(1, 0, 0) // defence 15 < raid power 34 → raid succeeds
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL)
 
     const r = s.battleLog[0]
     expect(r.kind).toBe('raid')
+    expect(r.villageId).toBe('v0') // tagged with the originating village
     expect(r.won).toBe(false) // raid succeeded (from the player's view: lost)
     expect(r.losses).toBeGreaterThan(0)
-    expect(s.units.spearman).toBe(0) // garrison wiped
-    expect(s.resources.wood.toString()).toBe('80') // floor(100 * 0.2) stolen
-    expect(s.resources.clay.toString()).toBe('80')
-    expect(s.resources.iron.toString()).toBe('80')
-    expect(s.raidTimer).toBe(RAID_BASE_INTERVAL)
+    expect(v.units.spearman).toBe(0) // garrison wiped
+    expect(v.resources.wood.toString()).toBe('80') // floor(100 * 0.2) stolen
+    expect(v.resources.clay.toString()).toBe('80')
+    expect(v.resources.iron.toString()).toBe('80')
+    expect(v.raidTimer).toBe(RAID_BASE_INTERVAL)
   })
 
   it('never drives resources below zero, even when the pool is tiny', () => {
     const s = village()
-    s.units = army(1, 0, 0) // weak: the raid will succeed
-    s.resources = { wood: D(4), clay: D(0), iron: D(2) }
-    advanceRaids(s, RAID_BASE_INTERVAL)
+    const v = s.villages.v0
+    v.units = army(1, 0, 0) // weak: the raid will succeed
+    v.resources = { wood: D(4), clay: D(0), iron: D(2) }
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL)
 
     // floor(4*.2)=0, floor(0)=0, floor(2*.2)=0 → nothing stolen, none negative.
-    expect(s.resources.wood.gte(0)).toBe(true)
-    expect(s.resources.clay.gte(0)).toBe(true)
-    expect(s.resources.iron.gte(0)).toBe(true)
+    expect(v.resources.wood.gte(0)).toBe(true)
+    expect(v.resources.clay.gte(0)).toBe(true)
+    expect(v.resources.iron.gte(0)).toBe(true)
   })
 
   it('a fresh hamlet is not yet worth raiding (timer frozen, no raid)', () => {
     const s = createInitialState('fresh', 0)
-    advanceRaids(s, 100_000)
+    const v = s.villages.v0
+    advanceRaids(v, s.battleLog, 100_000)
     expect(s.battleLog.length).toBe(0)
-    expect(s.raidTimer).toBe(RAID_BASE_INTERVAL)
+    expect(v.raidTimer).toBe(RAID_BASE_INTERVAL)
   })
 
   it('resolves every raid that falls within one large dt (offline catch-up)', () => {
     const s = village()
-    s.units = army(10, 0, 0) // strong: repels each, garrison persists across raids
-    advanceRaids(s, RAID_BASE_INTERVAL * 3)
+    const v = s.villages.v0
+    v.units = army(10, 0, 0) // strong: repels each, garrison persists across raids
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL * 3)
 
     expect(s.battleLog.length).toBe(3)
-    for (const r of s.battleLog) expect(r).toMatchObject({ kind: 'raid', won: true })
-    expect(s.units.spearman).toBe(10)
-    expect(s.raidTimer).toBe(RAID_BASE_INTERVAL)
+    for (const r of s.battleLog) expect(r).toMatchObject({ kind: 'raid', villageId: 'v0', won: true })
+    expect(v.units.spearman).toBe(10)
+    expect(v.raidTimer).toBe(RAID_BASE_INTERVAL)
   })
 })
 
@@ -95,7 +113,7 @@ describe('determinism — raids replay identically', () => {
   it('one big simulate() equals the chunked offline path with raids firing', () => {
     const raidState = (seed: string): GameState => {
       const s = village(seed)
-      s.units = army(3, 0, 2) // defence 65 ≥ raid power 54 → repelled, garrison persists
+      s.villages.v0.units = army(3, 0, 2) // defence 65 ≥ raid power 54 → repelled, garrison persists
       return s
     }
 
