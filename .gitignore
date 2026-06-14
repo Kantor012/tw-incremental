@@ -38,8 +38,12 @@ Thumbs.db
 __pycache__/
 *.pyc
 
-# Claude Code local machine settings
-.claude/settings.local.json
+# Claude Code config — local only, not published
+.claude/
+
+# Markdown — only README is published; wszystkie inne docsy zostają lokalnie
+*.md
+!README.md
 
 # Env
 .env
