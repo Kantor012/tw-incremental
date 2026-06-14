@@ -3,6 +3,8 @@ import type { GameState } from './state'
 import { recomputeDerived, INITIAL_BUILDINGS, INITIAL_UNITS, RAID_BASE_INTERVAL } from './state'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
+import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
+import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
 /**
  * Save/load engine. Owns the on-disk schema version and all (de)serialization.
@@ -17,13 +19,16 @@ import { UNIT_IDS } from '../content/units'
  *   *benign* initialisation cycle: neither side uses the other's value at module
  *   top level — only inside function bodies (importSave/migrate here,
  *   createInitialState there) — so both modules are fully evaluated before any of
- *   those functions can run.
+ *   those functions can run. The v5→v6 migration additionally pulls in
+ *   `generateWorld` / `WORLD_CENTER` (systems/world.ts) and `barbarianTarget`
+ *   (content/barbarians.ts); those too are read ONLY inside `migrate`, so the wider
+ *   value cycle (save → world → barbarians → state → save) stays benign.
  * - Everything here must run headless (Node + browser): localStorage access is
  *   always feature-detected and wrapped in try/catch.
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 5
+export const SAVE_VERSION = 6
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -157,6 +162,73 @@ export function migrate(raw: any): any {
         villageId: 'v0',
       })),
     }),
+    // v5 -> v6: spatial world (M2.2). A v5 save predates map coordinates and the
+    // barbarian world. Give every village an (x, y): the capital ('v0') stands at
+    // WORLD_CENTER; any other village (none exist at v5 today — purely defensive) is
+    // spread deterministically onto a golden-angle spiral around the centre so coords
+    // stay stable, off-centre and in-bounds. Regenerate the barbarian world from the
+    // run seed (on world.ts's OWN RNG stream — it never touches rngState). Each
+    // in-flight march is upgraded to the M2.2 shape: it has no real target id, so
+    // 'legacy', with geometry reconstructed from the OLD distance — placed due-"east"
+    // of its village at targetX = village.x + barbarianTarget(targetLevel).distance,
+    // targetY = village.y — which preserves the source→target Euclidean distance (and
+    // hence the return-leg travel time computed by marches.ts). `remaining` is left
+    // untouched. Nothing is recomputed here; importSave's recomputeDerived pass runs
+    // afterwards exactly as for every other migration.
+    5: (s) => {
+      const clamp = (n: number): number => (n < 0 ? 0 : n > WORLD_SIZE ? WORLD_SIZE : n)
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      let spreadIndex = 0
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        // Leave a malformed entry untouched so validateState rejects it loudly.
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        let x: number
+        let y: number
+        if (
+          typeof v.x === 'number' &&
+          Number.isFinite(v.x) &&
+          typeof v.y === 'number' &&
+          Number.isFinite(v.y)
+        ) {
+          // Forward-compat: a save that already carries coords keeps them verbatim.
+          x = v.x
+          y = v.y
+        } else if (id === 'v0') {
+          x = WORLD_CENTER.x
+          y = WORLD_CENTER.y
+        } else {
+          const angle = spreadIndex * 2.399963229728653 // golden angle (rad)
+          const radius = DISTANCE_PER_LEVEL * (2 + spreadIndex)
+          x = clamp(Math.round(WORLD_CENTER.x + radius * Math.cos(angle)))
+          y = clamp(Math.round(WORLD_CENTER.y + radius * Math.sin(angle)))
+          spreadIndex++
+        }
+        const marches = Array.isArray(v.marches)
+          ? v.marches.map((m: any) =>
+              isObject(m)
+                ? {
+                    ...m,
+                    targetId: typeof m.targetId === 'string' ? m.targetId : 'legacy',
+                    targetX:
+                      typeof m.targetX === 'number'
+                        ? m.targetX
+                        : x + barbarianTarget(m.targetLevel as number).distance,
+                    targetY: typeof m.targetY === 'number' ? m.targetY : y,
+                  }
+                : m,
+            )
+          : v.marches
+        villages[id] = { ...v, x, y, marches }
+      }
+      return { ...s, villages, world: generateWorld(s.seed), version: 6 }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -185,6 +257,15 @@ function validateVillage(v: unknown, id: string): void {
   if (!isObject(v)) throw new Error(`save: village ${id} not an object`)
   if (typeof v.id !== 'string') throw new Error(`save: village ${id} invalid id`)
   if (typeof v.name !== 'string') throw new Error(`save: village ${id} invalid name`)
+
+  // Map coordinates (M2.2) — plain finite numbers (not derived). They drive march
+  // time / line drawing, so a NaN/Infinity here would poison every distance calc.
+  if (typeof v.x !== 'number' || !Number.isFinite(v.x)) {
+    throw new Error(`save: village ${id} invalid x`)
+  }
+  if (typeof v.y !== 'number' || !Number.isFinite(v.y)) {
+    throw new Error(`save: village ${id} invalid y`)
+  }
 
   // Storage cap must be strictly positive (resources clamp to it); popCap may be 0
   // (a freshly seeded village is recomputed only after validation, and the v4->v5
@@ -256,8 +337,26 @@ function validateVillage(v: unknown, id: string): void {
   if (!Array.isArray(marches)) throw new Error(`save: village ${id} invalid marches`)
   for (const m of marches) {
     if (!isObject(m)) throw new Error(`save: village ${id} invalid march`)
-    if (typeof m.targetLevel !== 'number' || !Number.isInteger(m.targetLevel) || m.targetLevel < 1) {
+    // targetLevel is the SNAPSHOT combat/loot tier (1..MAX_TARGET_LEVEL); the M2.2
+    // fields (targetId + the targetX/targetY geometry snapshot) drive line drawing
+    // and the return-leg distance, so coords must be finite. targetId is 'legacy'
+    // for marches carried over by the v5->v6 migration.
+    if (
+      typeof m.targetLevel !== 'number' ||
+      !Number.isInteger(m.targetLevel) ||
+      m.targetLevel < 1 ||
+      m.targetLevel > MAX_TARGET_LEVEL
+    ) {
       throw new Error(`save: village ${id} invalid march targetLevel`)
+    }
+    if (typeof m.targetId !== 'string') {
+      throw new Error(`save: village ${id} invalid march targetId`)
+    }
+    if (typeof m.targetX !== 'number' || !Number.isFinite(m.targetX)) {
+      throw new Error(`save: village ${id} invalid march targetX`)
+    }
+    if (typeof m.targetY !== 'number' || !Number.isFinite(m.targetY)) {
+      throw new Error(`save: village ${id} invalid march targetY`)
     }
     if (m.phase !== 'outbound' && m.phase !== 'returning') {
       throw new Error(`save: village ${id} invalid march phase`)
@@ -297,7 +396,9 @@ function validateVillage(v: unknown, id: string): void {
  * `villageOrder` must form a bijection (every ordered id has a village and every
  * village key is ordered, exactly once — so the tick iterates each village once and
  * never references a missing entry), every village passes {@link validateVillage},
- * and the GLOBAL battle log is validated as before plus the new `villageId`.
+ * the spatial `world` (M2.2) is checked (its `barbarians` list, each with a finite
+ * coordinate and a level in [1, MAX_TARGET_LEVEL]), and the GLOBAL battle log is
+ * validated as before plus the new `villageId`.
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -334,6 +435,34 @@ export function validateState(s: unknown): GameState {
     }
   }
   for (const id of villageOrder) validateVillage(villages[id], id)
+
+  // Spatial world (M2.2) — a Decimal-free bag of plain barbarian descriptors,
+  // deterministically generated from the seed. The UI and marches.ts index into
+  // it by id and read `level` to resolve combat (via barbarianTarget), so each
+  // entry must be well-formed: a bad level would mis-resolve a battle and then get
+  // autosaved, and a NaN coordinate would poison distance/march-time maths.
+  const { world } = s
+  if (!isObject(world)) throw new Error('save: missing world')
+  if (!Array.isArray(world.barbarians)) throw new Error('save: invalid world.barbarians')
+  for (const b of world.barbarians) {
+    if (!isObject(b)) throw new Error('save: invalid barbarian village')
+    if (typeof b.id !== 'string') throw new Error('save: invalid barbarian id')
+    if (typeof b.x !== 'number' || !Number.isFinite(b.x)) {
+      throw new Error('save: invalid barbarian x')
+    }
+    if (typeof b.y !== 'number' || !Number.isFinite(b.y)) {
+      throw new Error('save: invalid barbarian y')
+    }
+    if (
+      typeof b.level !== 'number' ||
+      !Number.isInteger(b.level) ||
+      b.level < 1 ||
+      b.level > MAX_TARGET_LEVEL
+    ) {
+      throw new Error('save: invalid barbarian level')
+    }
+    if (typeof b.name !== 'string') throw new Error('save: invalid barbarian name')
+  }
 
   // GLOBAL battle log — a list of plain-JSON reports (no Decimals). Validate the
   // discriminant and shared fields; loot is a pre-summed string (never a number),

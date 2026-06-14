@@ -17,16 +17,21 @@ import {
 } from '../src/engine/save'
 import { BUILDING_IDS } from '../src/content/buildings'
 import { UNIT_IDS } from '../src/content/units'
+import { barbarianTarget } from '../src/content/barbarians'
+import { WORLD_CENTER } from '../src/systems/world'
 
 /**
  * `migrate` always chains a raw save all the way up to {@link SAVE_VERSION} (now
- * v5, the multi-village shape). So every legacy save — v1, v2, v3, v4 — ends as a
- * v5 GameState: the global header (version/seed/rng/timestamps) at the top level,
- * the per-village economy wrapped under `villages.v0` (the "Stolica" capital,
- * since old saves only ever had the one village), a bijective `villageOrder`
- * `['v0']`, and a GLOBAL `battleLog` whose every report is stamped `villageId
- * 'v0'`. These tests assert each migration backfills its own fields AND that the
- * v4->v5 wrap lands every per-village field under `villages.v0`.
+ * v6, the spatial-world shape). So every legacy save — v1, v2, v3, v4, v5 — ends
+ * as a v6 GameState: the global header (version/seed/rng/timestamps) at the top
+ * level, the per-village economy wrapped under `villages.v0` (the "Stolica"
+ * capital, since old saves only ever had the one village) — now carrying integer
+ * map coordinates (the capital pinned to WORLD_CENTER) — a bijective `villageOrder`
+ * `['v0']`, a seed-generated barbarian `world`, and a GLOBAL `battleLog` whose every
+ * report is stamped `villageId 'v0'`. These tests assert each migration backfills
+ * its own fields AND that the v4->v5 wrap lands every per-village field under
+ * `villages.v0`, while the v5->v6 step adds coords + world and upgrades any carried
+ * march to the 'legacy' spatial shape.
  */
 
 /**
@@ -48,10 +53,10 @@ function rawV1() {
 }
 
 describe('migration v1 -> current', () => {
-  it('migrate() chains v1->...->v5: seeds buildings, popCap, units, queue, combat and wraps into villages.v0', () => {
+  it('migrate() chains v1->...->v6: seeds buildings, popCap, units, queue, combat, coords + world and wraps into villages.v0', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(5)
+    expect(migrated.version).toBe(6)
     expect(migrated.version).toBe(SAVE_VERSION)
     // v4->v5: the lone economy is wrapped under villages.v0 with a bijective order.
     expect(migrated.villageOrder).toEqual(['v0'])
@@ -59,6 +64,13 @@ describe('migration v1 -> current', () => {
     const v0 = migrated.villages.v0
     expect(v0.id).toBe('v0')
     expect(v0.name).toBe('Stolica')
+
+    // v5->v6 spatial fields: the capital lands at the world centre and the barbarian
+    // world is generated from the seed (non-empty). v1 had no marches to upgrade.
+    expect(v0.x).toBe(WORLD_CENTER.x)
+    expect(v0.y).toBe(WORLD_CENTER.y)
+    expect(Array.isArray(migrated.world.barbarians)).toBe(true)
+    expect(migrated.world.barbarians.length).toBeGreaterThan(0)
 
     // v1->v2 fields, now living on the village.
     expect(v0.buildings).toEqual(INITIAL_BUILDINGS)
@@ -241,11 +253,11 @@ function rawV4() {
   }
 }
 
-describe('migration v4 -> v5', () => {
+describe('migration v4 -> current', () => {
   it('wraps the lone village under villages.v0 (Stolica) and globalises the battle log', () => {
     const m = migrate(rawV4())
 
-    expect(m.version).toBe(5)
+    expect(m.version).toBe(6)
     expect(m.version).toBe(SAVE_VERSION)
     // Bijective single-village order: exactly one ordered id, exactly one village.
     expect(m.villageOrder).toEqual(['v0'])
@@ -272,6 +284,17 @@ describe('migration v4 -> v5', () => {
     expect(v0.marches[0].phase).toBe('returning')
     expect(v0.marches[0].loot.wood.toString()).toBe('50')
     expect(v0.raidTimer).toBe(500)
+
+    // The chain now runs through v5->v6: the capital gains coords + a generated
+    // world, and the carried march — which had no real target id — is upgraded to
+    // the 'legacy' spatial shape with geometry reconstructed from the old distance
+    // (placed due-"east" of the capital, preserving the source->target distance).
+    expect(v0.x).toBe(WORLD_CENTER.x)
+    expect(v0.y).toBe(WORLD_CENTER.y)
+    expect(m.world.barbarians.length).toBeGreaterThan(0)
+    expect(v0.marches[0].targetId).toBe('legacy')
+    expect(v0.marches[0].targetX).toBe(WORLD_CENTER.x + barbarianTarget(2).distance)
+    expect(v0.marches[0].targetY).toBe(WORLD_CENTER.y)
 
     // The battle log is now GLOBAL (top level), pruned of nothing here, and every
     // legacy report is stamped with the only village it could have come from.
@@ -342,6 +365,144 @@ describe('migration v4 -> v5', () => {
   })
 })
 
+/**
+ * A raw v5 save: the multi-village shape right before M2.2. The capital lives under
+ * `villages.v0` but carries NO map coordinates (no x/y), there is NO spatial `world`
+ * at the top level, and its in-flight march predates target ids — it has only a
+ * `targetLevel` (no targetId / targetX / targetY). Exactly the three things the
+ * v5->v6 migration must backfill: coords (capital -> WORLD_CENTER), a seed-generated
+ * barbarian world, and the 'legacy' march geometry reconstructed from the old
+ * per-level distance.
+ */
+function rawV5() {
+  return {
+    version: 5,
+    seed: 'v5',
+    rngState: 77,
+    createdAt: 1000,
+    lastSeen: 2000,
+    villages: {
+      v0: {
+        id: 'v0',
+        name: 'Stolica',
+        // NB: no x / y yet — that is what v5->v6 adds.
+        resources: { wood: D(10), clay: D(20), iron: D(30) },
+        production: { wood: D(2), clay: D(0.8), iron: D(0.5) },
+        storageCap: D(4000),
+        popCap: D(22),
+        buildings: { hq: 1, sawmill: 2, clay_pit: 1, iron_mine: 1, warehouse: 1, farm: 1, barracks: 1 },
+        units: { spearman: 5, swordsman: 0, axeman: 3 },
+        recruitQueue: [],
+        marches: [
+          {
+            // Pre-M2.2 march: a targetLevel snapshot but NO targetId / targetX / targetY.
+            targetLevel: 4,
+            units: { spearman: 0, swordsman: 0, axeman: 2 },
+            phase: 'returning',
+            remaining: 30,
+            loot: { wood: D(50), clay: D(40), iron: D(10) },
+          },
+        ],
+        raidTimer: 500,
+      },
+    },
+    villageOrder: ['v0'],
+    // NB: no `world` yet — that is what v5->v6 generates from the seed.
+    battleLog: [
+      { kind: 'attack', villageId: 'v0', targetLevel: 4, won: true, lootSum: '100', losses: 0 },
+    ],
+  }
+}
+
+describe('migration v5 -> v6', () => {
+  it('pins the capital to WORLD_CENTER, generates the barbarian world, and upgrades the legacy march', () => {
+    const m = migrate(rawV5())
+
+    expect(m.version).toBe(6)
+    expect(m.version).toBe(SAVE_VERSION)
+    // The multi-village shape is carried through untouched (still a single village).
+    expect(m.villageOrder).toEqual(['v0'])
+    expect(Object.keys(m.villages)).toEqual(['v0'])
+
+    const v0 = m.villages.v0
+    // Capital gets the world centre as its integer field coordinates.
+    expect(v0.x).toBe(WORLD_CENTER.x)
+    expect(v0.y).toBe(WORLD_CENTER.y)
+
+    // A non-empty barbarian world is generated from the run seed.
+    expect(m.world).toBeDefined()
+    expect(Array.isArray(m.world.barbarians)).toBe(true)
+    expect(m.world.barbarians.length).toBeGreaterThan(0)
+
+    // The carried march is upgraded to the M2.2 spatial shape: 'legacy' target id,
+    // its x reconstructed as capital.x + the OLD per-level distance (preserving the
+    // source->target Euclidean distance, hence the return-leg travel time), its y on
+    // the capital's row. The snapshot fields (targetLevel/phase/remaining/loot) are
+    // left untouched.
+    const march = v0.marches[0]
+    expect(march.targetId).toBe('legacy')
+    expect(march.targetX).toBe(WORLD_CENTER.x + barbarianTarget(4).distance)
+    expect(march.targetY).toBe(WORLD_CENTER.y)
+    expect(march.targetLevel).toBe(4)
+    expect(march.phase).toBe('returning')
+    expect(march.remaining).toBe(30)
+    expect(march.loot.wood.toString()).toBe('50')
+
+    // Pre-existing economy + header are carried through verbatim.
+    expect(v0.buildings.sawmill).toBe(2)
+    expect(v0.resources.wood.toString()).toBe('10')
+    expect(v0.raidTimer).toBe(500)
+    expect(m.seed).toBe('v5')
+    expect(m.rngState).toBe(77)
+    expect(m.battleLog).toHaveLength(1)
+    expect(m.battleLog[0].villageId).toBe('v0')
+  })
+
+  it('a migrated v5 save passes validateState (coords, world and legacy march all valid)', () => {
+    const v = validateState(migrate(rawV5()))
+    expect(v.version).toBe(SAVE_VERSION)
+    expect(v.villages.v0.x).toBe(WORLD_CENTER.x)
+    expect(v.villages.v0.y).toBe(WORLD_CENTER.y)
+    expect(v.world.barbarians.length).toBeGreaterThan(0)
+    expect(v.villages.v0.marches[0].targetId).toBe('legacy')
+    // Every generated barbarian is a well-formed, in-range descriptor.
+    for (const b of v.world.barbarians) {
+      expect(typeof b.id).toBe('string')
+      expect(Number.isFinite(b.x)).toBe(true)
+      expect(Number.isFinite(b.y)).toBe(true)
+      expect(Number.isInteger(b.level)).toBe(true)
+      expect(b.level).toBeGreaterThanOrEqual(1)
+    }
+  })
+
+  it('world generation is deterministic from the seed (stable list, stable ids)', () => {
+    const a = migrate(rawV5())
+    const b = migrate(rawV5())
+    // Same seed -> structurally identical world (no clock/Math.random in generation).
+    expect(a.world).toEqual(b.world)
+    // Ids are the stable 'b'+index sequence in generation order.
+    expect(a.world.barbarians[0].id).toBe('b0')
+  })
+
+  it('importSave of a v5 export backfills coords, world and legacy march geometry, then re-derives stats', () => {
+    // Encode exactly as exportSave would (Decimals tagged); import migrates v5->v6.
+    const b64 = exportSave(rawV5() as never)
+    const state = importSave(b64)
+
+    expect(state.version).toBe(SAVE_VERSION)
+    const v0 = state.villages.v0
+    expect(v0.x).toBe(WORLD_CENTER.x)
+    expect(v0.y).toBe(WORLD_CENTER.y)
+    expect(state.world.barbarians.length).toBeGreaterThan(0)
+    expect(v0.marches[0].targetId).toBe('legacy')
+    expect(v0.marches[0].targetX).toBe(WORLD_CENTER.x + barbarianTarget(4).distance)
+    // Loot Decimals survived the {$d} tag round-trip through the migration.
+    expect(v0.marches[0].loot.wood.toString()).toBe('50')
+    // recomputeDerived ran on import: production is consistent with sawmill lvl 2.
+    expect(v0.production.wood.toString()).toBe('2')
+  })
+})
+
 describe('save v2 round-trip', () => {
   it('serialize(deserialize(serialize(s))) === serialize(s) for a fresh state', () => {
     const state = createInitialState('rt', 5000)
@@ -389,16 +550,23 @@ describe('save v2 round-trip', () => {
     recomputeDerived(state)
     state.villages.v0.units = { spearman: 4, swordsman: 0, axeman: 6 }
     // A returning march carrying loot (Decimals) + an outbound march with zero loot.
+    // Both carry the M2.2 spatial snapshot (targetId + targetX/targetY geometry).
     state.villages.v0.marches = [
       {
+        targetId: 'b12',
         targetLevel: 3,
+        targetX: 209,
+        targetY: 198,
         units: { spearman: 0, swordsman: 0, axeman: 5 },
         phase: 'returning',
         remaining: 42.5,
         loot: { wood: D(120), clay: D(80), iron: D(15) },
       },
       {
+        targetId: 'b3',
         targetLevel: 1,
+        targetX: 197,
+        targetY: 203,
         units: { spearman: 2, swordsman: 0, axeman: 0 },
         phase: 'outbound',
         remaining: 18,
@@ -423,6 +591,11 @@ describe('save v2 round-trip', () => {
     expect(rv0.marches[0].remaining).toBe(42.5)
     expect(rv0.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 5 })
     expect(rv0.marches[0].loot.wood.toString()).toBe('120')
+    // The M2.2 spatial snapshot (target id + coords) round-trips as plain JSON.
+    expect(rv0.marches[0].targetId).toBe('b12')
+    expect(rv0.marches[0].targetX).toBe(209)
+    expect(rv0.marches[0].targetY).toBe(198)
+    expect(rv0.marches[1].targetId).toBe('b3')
     expect(rv0.marches[0].loot.clay.toString()).toBe('80')
     expect(rv0.marches[0].loot.iron.toString()).toBe('15')
     expect(rv0.marches[1].phase).toBe('outbound')

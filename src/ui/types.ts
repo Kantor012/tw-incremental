@@ -39,11 +39,12 @@ export interface UiCtx {
   /** Queue `count` of a unit for training in `villageId`; returns true on success (spent + enqueued). */
   onRecruit: (villageId: VillageId, id: UnitId, count: number) => boolean
   /**
-   * Dispatch an army from `villageId` at a barbarian camp of `targetLevel`; returns
-   * true on a successful send (the march is queued and the dispatched units leave
-   * the home garrison until they return).
+   * Dispatch an army from `villageId` at the barbarian village `targetId` (an id
+   * from `store.state.world.barbarians`); returns true on a successful send (the
+   * march is queued and the dispatched units leave the home garrison until they
+   * return).
    */
-  onAttack: (villageId: VillageId, targetLevel: number, units: Record<UnitId, number>) => boolean
+  onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => boolean
   /** Serialize the current run to a save code string. */
   onExport: () => string
   /** Load a save code; returns true when it parsed and was applied. */

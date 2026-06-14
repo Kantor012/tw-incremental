@@ -1,59 +1,55 @@
-import type { Village } from '../../engine/state'
+import type { Village, BarbarianVillage } from '../../engine/state'
 import { D } from '../../engine/decimal'
 import { formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
-import { barbarianTarget, MAX_TARGET_LEVEL } from '../../content/barbarians'
+import { barbarianTarget } from '../../content/barbarians'
 import { armyAttackPower, armyDefensePower, armyCarry, battleOutcome } from '../../systems/combat'
 import { stationedUnits, marchTime, canAttack } from '../../systems/marches'
+import { targetsByDistance, distance, barbarianById } from '../../systems/world'
 import { raidPower } from '../../systems/raids'
 import { barracksUnlocked } from '../../systems/recruitment'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon } from '../dom'
 
 /**
- * Campaign panel — the offensive screen (the old app.ts "Wyprawy" + "Obrona"
- * sections, lifted verbatim in behaviour and re-laid-out as responsive grids).
+ * Campaign panel — the offensive screen (the "Wyprawy" tab). Since M2.2 the world
+ * is SPATIAL: this lists CONCRETE barbarian villages from `store.state.world`,
+ * sorted by Euclidean distance from the active village (nearest first), instead of
+ * an abstract level ladder. It is the keyboard/screen-reader-friendly ALTERNATIVE
+ * to the Mapa tab — every reachable target appears here as a focusable card with
+ * the same dispatch path (ctx.onAttack(villageId, barb.id, units)).
  *
- * Owns: the army composer (one count input per unit, clamped to the home
- * garrison), the sliding window of barbarian camp targets (defence / loot /
- * march time / battle forecast / Attack), the in-flight march list, and the
- * defence indicator (next-raid ETA, home defence vs raid power). Recruitment
- * lives in the army panel; the rolling battle log lives in the reports panel.
+ * Owns: the shared army composer (one count input per unit, clamped to the home
+ * garrison), the distance-sorted list of barbarian-village targets (defence / loot
+ * / distance / march time / battle forecast / Attack), the in-flight march list,
+ * and the defence indicator (next-raid ETA, home defence vs raid power).
+ * Recruitment lives in the army panel; the rolling battle log lives in reports.
  *
- * Discipline (panel contract): the DOM is built ONCE here and cached;
- * {@link Panel.update} only pokes textContent / style / attributes onto existing
- * nodes — it never rebuilds the tree, with two bounded exceptions (the march list
- * and would-be lists) that rebuild ONLY when their content signature changes. The
- * shell drives update() on every store revision while this is the active tab, and
- * once when it becomes active.
+ * Discipline (panel contract): the static chrome is built ONCE; {@link Panel.update}
+ * only pokes textContent / attributes onto existing nodes, with two bounded
+ * exceptions that rebuild ONLY when their content signature changes:
+ *  - the target list rebuilds when the active village changes (the sort order is
+ *    fixed per village, since neither villages nor barbarians move in M2.2), and
+ *  - the in-flight march list rebuilds when its level/phase/ETA/composition
+ *    signature changes.
+ * The army-dependent fields on the (potentially many) target cards are only re-poked
+ * when the composed army (or the barracks unlock) changes — so a steady tick that
+ * merely accrues resources does no per-card work.
  *
- * Accessibility carried over from the old panel, unchanged in substance:
- *  - the Attack buttons use aria-disabled (not the hard `disabled` property) so
- *    they stay focusable/hoverable and their reason (title + aria-live message)
- *    actually reaches the user; the click handler is a guarded no-op when rejected.
- *  - battle phase / forecast / defence verdict are conveyed by a glyph AND a word,
- *    never by colour alone (WCAG 1.4.1).
+ * Accessibility (unchanged in substance): the Attack buttons use aria-disabled (not
+ * the hard `disabled` property) so they stay focusable/hoverable and their reason
+ * (title + aria-live message) reaches the user; battle forecast / defence verdict
+ * are conveyed by a glyph AND a word, never by colour alone (WCAG 1.4.1).
  *
- * Layout note: the targets sit in an intrinsically-responsive card grid (the
- * shared .target-list class: auto-fill + minmax), so desktop shows several
- * columns and mobile collapses to one — no media query needed. Grid template +
- * card surface live ENTIRELY in the design-system classes (.target-list /
- * .target in layout.css), shared with every other tab so framing never diverges;
- * no inline layout styles. Every card's INNER markup reuses the shared,
- * already-styled component classes so the a11y affordances carry over untouched.
+ * Layout: the cards sit in the shared intrinsically-responsive .target-list grid
+ * (auto-fill + minmax) with the .target card surface — the same design-system
+ * classes every other tab uses; no inline layout styles.
  */
 
-/**
- * Fixed window of camp tiers shown at once. The window SLIDES with the player's
- * reach (see update()), so the DOM rows are built once and only their text/state
- * is poked per frame — the same no-rebuild discipline as everywhere else.
- */
-const TARGET_WINDOW = 6
-
-/** Cached handles for one barbarian-target card. */
-interface TargetRowRefs {
-  level: HTMLElement
-  defense: HTMLElement
+/** Cached handles for the army-dependent fields of one barbarian-target card. */
+interface TargetCard {
+  /** The concrete barbarian village this card dispatches at (stable per build). */
+  barb: BarbarianVillage
   loot: HTMLElement
   march: HTMLElement
   forecast: HTMLElement
@@ -72,25 +68,30 @@ function setBar(bar: HTMLElement, pct: number): void {
   bar.setAttribute('aria-valuenow', Math.round(pct).toString())
 }
 
+/** Total camp loot (sum across resources) for a camp tier, as a Decimal. */
+function campTotalLoot(level: number) {
+  const t = barbarianTarget(level)
+  return t.loot.wood.add(t.loot.clay).add(t.loot.iron)
+}
+
 /**
- * Build the campaign panel. Reads {@link UiCtx} for the live store and the
- * `onAttack` commit; every cue (availability, the battle forecast, the button
- * verdict) is read straight from the combat / march engines so the visible state
- * can never disagree with what a dispatch will actually do.
+ * Build the campaign panel. Reads {@link UiCtx} for the live store, the world and
+ * the `onAttack` commit; every cue (availability, the battle forecast, the button
+ * verdict) is read straight from the combat / march / world engines so the visible
+ * state can never disagree with what a dispatch will actually do.
  */
 export function createCampaignPanel(ctx: UiCtx): Panel {
   // No outer .panel frame: every tab is a grid of cards directly on the page
   // background (matches buildings/army/reports/save) for consistent framing.
   const el = h('div', 'campaign-panel')
 
-  // The village this panel currently operates on. The selector (layout.ts) writes
-  // ctx.activeVillageId; every read here resolves it fresh so a selection change is
-  // picked up on the next update()/handler without rebuilding the DOM.
+  // The village this panel currently operates on, resolved fresh on every read so a
+  // selection change is picked up on the next update()/handler without a rebuild.
   const activeVillage = (): Village => ctx.store.state.villages[ctx.activeVillageId.value]
 
   // ---- Garrison status (home vs away) --------------------------------------
-  // Doubles as the "no barracks" notice required by the brief: when locked it
-  // tells the player to build the Koszary first.
+  // Doubles as the "no barracks" notice: when locked it tells the player to build
+  // the Koszary first.
   const status = h('p', 'recruit-status muted')
   status.setAttribute('role', 'status')
   status.setAttribute('aria-live', 'polite')
@@ -182,85 +183,151 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   msg.setAttribute('role', 'status')
   msg.setAttribute('aria-live', 'polite')
 
-  // ---- Targets (sliding window, responsive card grid) ----------------------
+  // ---- Targets (concrete barbarian villages, nearest first) ----------------
   el.appendChild(h('h3', 'recruit-subtitle', 'Cele'))
+  // Keyboard/screen-reader alternative to the Mapa tab: it lists the SAME targets,
+  // sorted by distance, with the same dispatch path.
+  const targetsNote = h(
+    'p',
+    'muted',
+    'Wioski barbarzyńskie ze świata, posortowane wg odległości od aktywnej wioski — dostępna alternatywa dla widoku Mapy.',
+  )
+  el.appendChild(targetsNote)
   // Grid template + card surface come from the shared .target-list / .target
   // classes (layout.css) — the single source of truth across tabs; no inline.
   const targetList = h('div', 'target-list')
-
-  const targetRows: TargetRowRefs[] = []
-  // The level currently shown in each row (updated per frame); the click handler
-  // reads THIS so a row always attacks the tier it is currently displaying.
-  const rowLevels: number[] = []
-  for (let i = 0; i < TARGET_WINDOW; i++) {
-    rowLevels.push(i + 1)
-    // Card chrome comes from the shared .target class (layout.css) — no inline.
-    const row = h('div', 'target')
-
-    const head = h('div', 'target-head')
-    head.appendChild(h('span', 'target-name', 'Obóz barbarzyńców'))
-    const level = h('span', 'target-level num')
-    head.appendChild(level)
-
-    const statsLine = h('p', 'target-stats muted')
-    const defense = h('span', 'num')
-    const loot = h('span', 'num')
-    const march = h('span', 'num')
-    statsLine.appendChild(document.createTextNode('Obrona '))
-    statsLine.appendChild(defense)
-    statsLine.appendChild(document.createTextNode(' · Łup '))
-    statsLine.appendChild(loot)
-    statsLine.appendChild(document.createTextNode(' · Marsz '))
-    statsLine.appendChild(march)
-
-    const bottom = h('div', 'target-bottom')
-    const forecast = h('span', 'target-forecast')
-    const button = h('button', 'btn btn-primary', 'Atakuj')
-    button.type = 'button'
-    // aria-disabled (not `disabled`) keeps the control focusable/hoverable so its
-    // reason tooltip + aria-live message reach the user; the handler stays a
-    // guarded no-op when canAttack rejects (mirrors the recruitment panel).
-    button.addEventListener('click', () => {
-      const v = activeVillage()
-      const lvl = rowLevels[i]
-      const army = readArmy(v)
-      const verdict = canAttack(v, lvl, army)
-      if (!verdict.ok) {
-        msg.textContent = verdict.reason ?? 'Nie można wysłać wyprawy.'
-        update()
-        return
-      }
-      const target = barbarianTarget(lvl)
-      const outcome = battleOutcome(armyAttackPower(army), target.defensePower)
-      // Guard against accidentally throwing the whole army at a camp it will lose to.
-      if (
-        !outcome.attackerWins &&
-        !window.confirm(
-          'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
-        )
-      ) {
-        return
-      }
-      const ok = ctx.onAttack(ctx.activeVillageId.value, lvl, army)
-      if (ok) {
-        msg.textContent = 'Wysłano wyprawę: ' + target.name + '.'
-        for (const uid of UNIT_IDS) armyPicks[uid].input.value = '0'
-      } else {
-        msg.textContent = 'Nie udało się wysłać wyprawy.'
-      }
-      update()
-    })
-    bottom.appendChild(forecast)
-    bottom.appendChild(button)
-
-    row.appendChild(head)
-    row.appendChild(statsLine)
-    row.appendChild(bottom)
-    targetList.appendChild(row)
-    targetRows.push({ level, defense, loot, march, forecast, button })
-  }
   el.appendChild(targetList)
   el.appendChild(msg)
+
+  // Rebuilt only when the active village (hence the sort order) changes; the army
+  // signature gates the per-card poke so a plain tick does no per-card work.
+  let targetCards: TargetCard[] = []
+  let lastTargetSig = ''
+  let lastArmySig = ''
+
+  /**
+   * (Re)build the target card list from `targetsByDistance(v, world)`. Sets every
+   * STATIC field (name, level, defence, distance, the per-target Attack handler and
+   * its aria-label) once; the army-dependent fields (loot/march/forecast/verdict)
+   * are filled by {@link pokeTargets}. Called only when the active village changes.
+   */
+  const rebuildTargets = (v: Village): void => {
+    const world = ctx.store.state.world
+    const targets = targetsByDistance(v, world)
+    targetList.textContent = ''
+    targetCards = []
+    if (targets.length === 0) {
+      targetList.appendChild(h('p', 'queue-empty muted', 'Brak celów na mapie.'))
+      return
+    }
+    for (const barb of targets) {
+      const camp = barbarianTarget(barb.level)
+      const dist = Math.round(distance(v.x, v.y, barb.x, barb.y))
+
+      // Card chrome comes from the shared .target class (layout.css) — no inline.
+      const row = h('div', 'target')
+
+      const head = h('div', 'target-head')
+      head.appendChild(h('span', 'target-name', barb.name))
+      head.appendChild(h('span', 'target-level num', 'poz. ' + barb.level))
+
+      const statsLine = h('p', 'target-stats muted')
+      const defense = h('span', 'num', formatInt(camp.defensePower))
+      const loot = h('span', 'num')
+      const distEl = h('span', 'num', formatInt(dist) + ' pól')
+      const march = h('span', 'num')
+      statsLine.appendChild(document.createTextNode('Obrona '))
+      statsLine.appendChild(defense)
+      statsLine.appendChild(document.createTextNode(' · Łup '))
+      statsLine.appendChild(loot)
+      statsLine.appendChild(document.createTextNode(' · Odl. '))
+      statsLine.appendChild(distEl)
+      statsLine.appendChild(document.createTextNode(' · Marsz '))
+      statsLine.appendChild(march)
+
+      const bottom = h('div', 'target-bottom')
+      const forecast = h('span', 'target-forecast')
+      const button = h('button', 'btn btn-primary', 'Atakuj')
+      button.type = 'button'
+      // aria-disabled (not `disabled`) keeps the control focusable/hoverable so its
+      // reason tooltip + aria-live message reach the user; the handler stays a
+      // guarded no-op when canAttack rejects (mirrors the recruitment panel).
+      button.setAttribute(
+        'aria-label',
+        'Atakuj ' + barb.name + ' (poziom ' + barb.level + ', odległość ' + dist + ' pól)',
+      )
+      button.addEventListener('click', () => {
+        const cv = activeVillage()
+        const army = readArmy(cv)
+        const verdict = canAttack(cv, barb, army)
+        if (!verdict.ok) {
+          msg.textContent = verdict.reason ?? 'Nie można wysłać wyprawy.'
+          update()
+          return
+        }
+        const outcome = battleOutcome(armyAttackPower(army), barbarianTarget(barb.level).defensePower)
+        // Guard against accidentally throwing the whole army at a camp it will lose to.
+        if (
+          !outcome.attackerWins &&
+          !window.confirm(
+            'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
+          )
+        ) {
+          return
+        }
+        const ok = ctx.onAttack(ctx.activeVillageId.value, barb.id, army)
+        if (ok) {
+          msg.textContent = 'Wysłano wyprawę: ' + barb.name + '.'
+          for (const uid of UNIT_IDS) armyPicks[uid].input.value = '0'
+        } else {
+          msg.textContent = 'Nie udało się wysłać wyprawy.'
+        }
+        update()
+      })
+      bottom.appendChild(forecast)
+      bottom.appendChild(button)
+
+      row.appendChild(head)
+      row.appendChild(statsLine)
+      row.appendChild(bottom)
+      targetList.appendChild(row)
+      targetCards.push({ barb, loot, march, forecast, button })
+    }
+  }
+
+  /**
+   * Refresh the army-dependent fields of every target card from the composed army.
+   * Only called when the army (or barracks unlock) changes — never on a plain tick.
+   */
+  const pokeTargets = (v: Village, army: Record<UnitId, number>, composed: number): void => {
+    const carry = armyCarry(army)
+    const atkPow = armyAttackPower(army)
+    for (const card of targetCards) {
+      const lvl = card.barb.level
+      const total = campTotalLoot(lvl)
+      if (composed > 0) {
+        // Haul = min(army carry, total camp loot) — the exact sum computeLoot lands.
+        const cd = D(carry)
+        const haul = cd.lt(total) ? cd : total
+        card.loot.textContent = formatInt(haul)
+        card.march.textContent = formatTime(marchTime(v, card.barb, army))
+        const oc = battleOutcome(atkPow, barbarianTarget(lvl).defensePower)
+        const pct = Math.round(oc.attackerLossFrac * 100)
+        card.forecast.textContent = oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka'
+        card.forecast.classList.toggle('forecast-win', oc.attackerWins)
+        card.forecast.classList.toggle('forecast-lose', !oc.attackerWins)
+      } else {
+        card.loot.textContent = 'do ' + formatInt(total)
+        card.march.textContent = '—'
+        card.forecast.textContent = '—'
+        card.forecast.classList.remove('forecast-win', 'forecast-lose')
+      }
+
+      const verdict = canAttack(v, card.barb, army)
+      card.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
+      card.button.title = verdict.ok ? '' : (verdict.reason ?? '')
+    }
+  }
 
   // ---- Marches in progress -------------------------------------------------
   el.appendChild(h('h3', 'recruit-subtitle', 'Marsze w toku'))
@@ -302,13 +369,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   // ---- Reactivity ----------------------------------------------------------
   const update = (): void => {
     const v = activeVillage()
+    const world = ctx.store.state.world
     const unlocked = barracksUnlocked(v)
     const home = stationedUnits(v)
     const army = readArmy(v)
     const composed = armySize(army)
     const carry = armyCarry(army)
     const atkPow = armyAttackPower(army)
-    const atkHomePow = armyAttackPower(home)
 
     let homeSum = 0
     for (const id of UNIT_IDS) homeSum += home[id]
@@ -344,59 +411,28 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     sendAllBtn.disabled = !unlocked || homeSum <= 0
     clearAllBtn.disabled = composed <= 0
 
-    // Slide the visible window so it sits around the highest beatable tier (camp
-    // defence grows monotonically, so the scan can break early). Always shows one
-    // tier below the player's reach plus several aspirational tiers above.
-    let best = 0
-    for (let l = 1; l <= MAX_TARGET_LEVEL; l++) {
-      if (barbarianTarget(l).defensePower < atkHomePow) best = l
-      else break
+    // Target list: rebuild only when the active village changes (the distance sort
+    // is fixed per village in M2.2). Force a card poke right after a rebuild.
+    const targetSig = v.id + ':' + world.barbarians.length
+    if (targetSig !== lastTargetSig) {
+      lastTargetSig = targetSig
+      rebuildTargets(v)
+      lastArmySig = '' // force the poke below
     }
-    let start = Math.max(1, best) - 1
-    if (start < 1) start = 1
-    if (start > MAX_TARGET_LEVEL - TARGET_WINDOW + 1) start = MAX_TARGET_LEVEL - TARGET_WINDOW + 1
-    if (start < 1) start = 1
-
-    for (let i = 0; i < TARGET_WINDOW; i++) {
-      const lvl = start + i
-      rowLevels[i] = lvl
-      const target = barbarianTarget(lvl)
-      const tr = targetRows[i]
-      tr.level.textContent = 'poz. ' + lvl
-      tr.defense.textContent = formatInt(target.defensePower)
-
-      const totalLoot = target.loot.wood.add(target.loot.clay).add(target.loot.iron)
-      if (composed > 0) {
-        // Haul = min(army carry, total camp loot) — the exact sum computeLoot lands.
-        const cd = D(carry)
-        const haul = cd.lt(totalLoot) ? cd : totalLoot
-        tr.loot.textContent = formatInt(haul)
-        tr.march.textContent = formatTime(marchTime(v, lvl, army))
-        const oc = battleOutcome(atkPow, target.defensePower)
-        const pct = Math.round(oc.attackerLossFrac * 100)
-        tr.forecast.textContent = oc.attackerWins
-          ? '✓ wygrana · straty ~' + pct + '%'
-          : '✗ porażka'
-        tr.forecast.classList.toggle('forecast-win', oc.attackerWins)
-        tr.forecast.classList.toggle('forecast-lose', !oc.attackerWins)
-      } else {
-        tr.loot.textContent = 'do ' + formatInt(totalLoot)
-        tr.march.textContent = '—'
-        tr.forecast.textContent = '—'
-        tr.forecast.classList.remove('forecast-win', 'forecast-lose')
-      }
-
-      const verdict = canAttack(v, lvl, army)
-      tr.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
-      tr.button.title = verdict.ok ? '' : (verdict.reason ?? '')
-      tr.button.setAttribute('aria-label', 'Atakuj obóz barbarzyńców (poziom ' + lvl + ')')
+    // Army-dependent card fields: poke only when the composed army / unlock changes.
+    const armySig = v.id + ':' + unlocked + ':' + UNIT_IDS.map((id) => army[id]).join(',')
+    if (armySig !== lastArmySig) {
+      lastArmySig = armySig
+      pokeTargets(v, army, composed)
     }
 
-    // Marches in progress — rebuilt only when their signature (level / phase /
+    // Marches in progress — rebuilt only when their signature (target / phase /
     // whole-second ETA / composition) changes, so the steady state is poke-free.
     const marchSig = v.marches
       .map(
         (m) =>
+          m.targetId +
+          ':' +
           m.targetLevel +
           ':' +
           m.phase +
@@ -418,7 +454,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
             'march-item ' + (m.phase === 'returning' ? 'is-returning' : 'is-outbound'),
           )
           const main = h('div', 'march-main')
-          main.appendChild(h('span', 'march-target', barbarianTarget(m.targetLevel).name))
+          // Name the concrete target village; fall back to the tier label for a
+          // legacy/migrated march whose id no longer resolves in the world.
+          const barb = barbarianById(world, m.targetId)
+          const targetName = barb
+            ? barb.name
+            : 'Wioska barbarzyńska (poz. ' + m.targetLevel + ')'
+          main.appendChild(h('span', 'march-target', targetName))
           // Phase is conveyed by an arrow glyph AND a word — never colour alone.
           main.appendChild(
             h('span', 'march-phase', m.phase === 'outbound' ? '→ w drodze' : '← powrót'),

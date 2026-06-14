@@ -8,8 +8,8 @@ import { UNIT_IDS } from '../src/content/units'
  * Sim harness CLI — `tsx sim/index.ts`.
  *
  * Runs several seeds for the budgeted number of ticks and prints a concise
- * report: hard-invariant PASS/FAIL (incl. army-consistency, no-softlock,
- * marches-terminate), per-seed progression (upgrades, production, buildings),
+ * report: hard-invariant PASS/FAIL (incl. army-consistency, world-consistency,
+ * no-softlock, marches-terminate), per-seed progression (upgrades, production, buildings),
  * recruitment/population, the M1.3 combat loop (attacks won/lost, loot hauled,
  * raids repelled/through, units lost, final army) and the M1.1/M1.2/M1.3 balance
  * targets as PASS/FAIL *warnings*.

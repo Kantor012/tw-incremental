@@ -5,6 +5,7 @@ import {
   recomputeDerived,
   type GameState,
   type Village,
+  type BarbarianVillage,
 } from '../src/engine/state'
 import { type UnitId } from '../src/content/units'
 import {
@@ -14,6 +15,7 @@ import {
   stationedUnits,
   marchTime,
 } from '../src/systems/marches'
+import { barbarianById } from '../src/systems/world'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
@@ -23,19 +25,34 @@ function army(spearman = 0, swordsman = 0, axeman = 0): Record<UnitId, number> {
   return { spearman, swordsman, axeman }
 }
 
+/** A barbarian village descriptor at a chosen tier and map position. */
+function barb(id: string, level: number, x: number, y: number): BarbarianVillage {
+  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})` }
+}
+
 /**
  * A state whose capital ('v0', "Stolica") has the barracks unlocked (attacks
  * allowed) and modest resources. Sets the level directly on the village + recomputes
  * (exactly what `build` does, minus the cost) so these tests stay decoupled from the
- * barracks price. Since M2.1 the economy lives per-village, so we mutate
- * `s.villages.v0`; the systems under test take that {@link Village} and the GLOBAL
- * `s.battleLog` explicitly.
+ * barracks price.
+ *
+ * Since M2.2 attacks target a CONCRETE barbarian village on the world map and travel
+ * time comes from the Euclidean source→target distance. We REPLACE the seed-generated
+ * world with a controlled one holding a single level-1 camp ('b0') placed exactly 3
+ * fields east of the capital — distance 3, the legacy `barbarianTarget(1).distance` —
+ * so marchTime reproduces the old 54s timing and every loot/casualty number these
+ * tests pin stays unchanged. The economy lives per-village, so we mutate
+ * `s.villages.v0`; the systems under test take that {@link Village} plus the
+ * {@link World} (for target lookup) and the GLOBAL `s.battleLog` explicitly.
  */
 function armed(seed = 'm'): GameState {
   const s = createInitialState(seed, 0)
   const v = s.villages.v0
   v.resources = { wood: D(50), clay: D(50), iron: D(50) }
   v.buildings.barracks = 1
+  // Controlled world: one level-1 camp at distance 3 from the capital (at v.x,v.y =
+  // WORLD_CENTER), so marchTime(v, b0, units) = 3 * slowest-speed * scale.
+  s.world = { barbarians: [barb('b0', 1, v.x + 3, v.y)] }
   recomputeDerived(s)
   return s
 }
@@ -52,38 +69,49 @@ describe('sendAttack / canAttack', () => {
     const s = armed()
     const v = s.villages.v0
     v.units = army(0, 0, 5)
+    const target = barbarianById(s.world, 'b0')!
 
-    expect(sendAttack(v, s.battleLog, 1, army(0, 0, 5))).toBe(true)
+    expect(sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))).toBe(true)
     expect(v.marches.length).toBe(1)
 
     const m = v.marches[0]
     expect(m.phase).toBe('outbound')
+    expect(m.targetId).toBe('b0')
     expect(m.targetLevel).toBe(1)
+    // Map coordinates are snapshotted at dispatch (drive the return leg + drawn line).
+    expect(m.targetX).toBe(target.x)
+    expect(m.targetY).toBe(target.y)
     expect(m.units).toEqual(army(0, 0, 5))
     // Units remain owned (population stays honest) but are no longer at home.
     expect(v.units.axeman).toBe(5)
     expect(stationedUnits(v).axeman).toBe(0)
     // Travel time = distance(3) * slowest speed(axeman 18) * scale(1) = 54s.
     expect(m.remaining).toBe(54)
-    expect(marchTime(v, 1, army(0, 0, 5))).toBe(54)
+    expect(marchTime(v, target, army(0, 0, 5))).toBe(54)
   })
 
-  it('gates on barracks, home availability, a non-empty army and a valid level', () => {
+  it('gates on barracks, home availability, a non-empty army and a valid target', () => {
     const locked = createInitialState('locked', 0)
     const lv = locked.villages.v0
     lv.units = army(0, 0, 5)
-    expect(canAttack(lv, 1, army(0, 0, 1)).ok).toBe(false) // no barracks
+    const lockedTarget = barb('b0', 1, lv.x + 3, lv.y)
+    expect(canAttack(lv, lockedTarget, army(0, 0, 1)).ok).toBe(false) // no barracks
 
     const s = armed()
     const v = s.villages.v0
     v.units = army(0, 0, 2)
-    expect(canAttack(v, 1, army(0, 0, 5)).ok).toBe(false) // more than at home
-    expect(canAttack(v, 1, army(0, 0, 0)).ok).toBe(false) // empty army
-    expect(canAttack(v, 99, army(0, 0, 1)).ok).toBe(false) // level out of range
-    expect(canAttack(v, 1, army(0, 0, 1)).ok).toBe(true)
+    const target = barbarianById(s.world, 'b0')!
+    expect(canAttack(v, target, army(0, 0, 5)).ok).toBe(false) // more than at home
+    expect(canAttack(v, target, army(0, 0, 0)).ok).toBe(false) // empty army
+    // A camp with an out-of-range tier is rejected as an invalid target.
+    expect(canAttack(v, barb('bx', 99, v.x + 3, v.y), army(0, 0, 1)).ok).toBe(false)
+    expect(canAttack(v, target, army(0, 0, 1)).ok).toBe(true)
 
     // sendAttack mirrors canAttack: a rejected dispatch creates no march.
-    expect(sendAttack(v, s.battleLog, 1, army(0, 0, 5))).toBe(false)
+    expect(sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))).toBe(false)
+    expect(v.marches.length).toBe(0)
+    // An unknown target id is a no-op too (e.g. a stale id after a world regen).
+    expect(sendAttack(v, s.world, s.battleLog, 'nope', army(0, 0, 1))).toBe(false)
     expect(v.marches.length).toBe(0)
   })
 })
@@ -93,8 +121,9 @@ describe('advanceMarches — full attack cycle', () => {
     const s = armed()
     const v = s.villages.v0
     v.units = army(0, 0, 5)
-    sendAttack(v, s.battleLog, 1, army(0, 0, 5))
-    const t = marchTime(v, 1, army(0, 0, 5)) // 54
+    const target = barbarianById(s.world, 'b0')!
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    const t = marchTime(v, target, army(0, 0, 5)) // 54
 
     // Outbound completes → battle resolves; casualties leave village.units at once.
     advanceMarches(v, s.battleLog, t)
@@ -126,8 +155,9 @@ describe('advanceMarches — full attack cycle', () => {
     const s = armed()
     const v = s.villages.v0
     v.units = army(1, 0, 0) // 1 spearman (atk 10) vs lvl-1 wall (def 30) → loss
-    sendAttack(v, s.battleLog, 1, army(1, 0, 0))
-    const t = marchTime(v, 1, army(1, 0, 0)) // spearman speed 18 → 54
+    const target = barbarianById(s.world, 'b0')!
+    sendAttack(v, s.world, s.battleLog, 'b0', army(1, 0, 0))
+    const t = marchTime(v, target, army(1, 0, 0)) // spearman speed 18 → 54
 
     advanceMarches(v, s.battleLog, t)
     expect(v.marches.length).toBe(0) // dropped, nothing returns
@@ -147,8 +177,9 @@ describe('advanceMarches — full attack cycle', () => {
     const v = s.villages.v0
     v.units = army(0, 0, 5)
     v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
-    sendAttack(v, s.battleLog, 1, army(0, 0, 5))
-    const t = marchTime(v, 1, army(0, 0, 5))
+    const target = barbarianById(s.world, 'b0')!
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    const t = marchTime(v, target, army(0, 0, 5))
 
     advanceMarches(v, s.battleLog, t) // battle
     advanceMarches(v, s.battleLog, t) // return + deliver
@@ -163,7 +194,7 @@ describe('determinism — an in-flight march replays identically', () => {
       const s = armed(seed)
       const v = s.villages.v0
       v.units = army(0, 0, 6)
-      sendAttack(v, s.battleLog, 1, army(0, 0, 6))
+      sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 6))
       return s
     }
 

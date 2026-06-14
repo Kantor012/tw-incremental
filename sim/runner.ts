@@ -14,6 +14,7 @@ import { TARGETS } from './targets'
 import {
   runInvariants,
   checkArmyConsistency,
+  checkWorldConsistency,
   checkRoundTrip,
   checkNoSoftlock,
   checkOfflineDeterminism,
@@ -96,7 +97,7 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
   let actions = 0
   const v = state.villages[state.villageOrder[0]]
   while (actions < MAX_ACTIONS_PER_STEP) {
-    const action = chooseAction(v)
+    const action = chooseAction(v, state.world)
     if (action === null) break
     if (action.kind === 'build') {
       if (!build(v, action.id)) break
@@ -106,8 +107,9 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
       recruited[action.unitId] += action.count
       rec += action.count
     } else {
-      // attack: dispatch the home army at a barbarian camp (loot source + unit sink).
-      if (!sendAttack(v, state.battleLog, action.targetLevel, action.units)) break
+      // attack: dispatch the home army at a CONCRETE barbarian village on the world
+      // map (loot source + unit sink); travel time is the Euclidean distance to it.
+      if (!sendAttack(v, state.world, state.battleLog, action.targetId, action.units)) break
       attacked++
     }
     actions++
@@ -175,6 +177,7 @@ function runContinuous(
       const grew = totalResources(state).gt(prevTotal)
       invariants.push(...tag(runInvariants(state), phase))
       invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
       invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
@@ -192,6 +195,7 @@ function runContinuous(
   if (withInvariants) {
     invariants.push(...tag(runInvariants(state), 'final'))
     invariants.push(...tag([checkArmyConsistency(state)], 'final'))
+    invariants.push(...tag([checkWorldConsistency(state)], 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
     // Whole-run progress: any action ever taken, or resources above the start.
     invariants.push(
@@ -234,7 +238,7 @@ function runSplit(seed: string, ticks: number, dt: number): GameState {
 
 /**
  * Run a single seed for `ticks` steps and assemble all invariants:
- *  - periodic + final resource/army-consistency/round-trip/no-softlock samples,
+ *  - periodic + final resource/army-consistency/world-consistency/round-trip/no-softlock samples,
  *  - 'save-load-continuation': continuous run vs split-with-save run,
  *  - 'determinism': two identical continuous runs must serialize equally,
  *  - 'offline-determinism': chunked offline catch-up vs one big step (combat-armed),

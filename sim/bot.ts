@@ -1,5 +1,5 @@
 import { ZERO, type Decimal } from '../src/engine/decimal'
-import { RESOURCE_IDS, type Village } from '../src/engine/state'
+import { RESOURCE_IDS, type Village, type World } from '../src/engine/state'
 import { BUILDING_IDS, type BuildingId } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { nextCostAffordable } from '../src/systems/buildings'
@@ -10,6 +10,7 @@ import {
   freePopulation,
 } from '../src/systems/recruitment'
 import { stationedUnits } from '../src/systems/marches'
+import { targetsByDistance } from '../src/systems/world'
 import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from '../src/systems/combat'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
 
@@ -20,16 +21,17 @@ import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
  *
  * Since M2.1 the bot acts on ONE {@link Village} (the runner drives the first
  * village in {@link import('../src/engine/state').GameState.villageOrder}); the
- * functions are pure over that village + the catalogues — no hidden counters — so
- * the determinism / save-load invariants hold and checkNoSoftlock can probe
- * `chooseAction(village)` to detect "nothing left to do" without perturbing any
- * cadence. Founding/managing extra villages is a later milestone (M2.2+); the bot
- * deliberately stays single-village so the M2.1 run is identical to the old one.
+ * functions are pure over that village + the catalogues (and, since M2.2, the seed-
+ * generated {@link World} for picking a concrete attack target) — no hidden counters
+ * — so the determinism / save-load invariants hold and checkNoSoftlock can probe
+ * `chooseAction(village, world)` to detect "nothing left to do" without perturbing any
+ * cadence. Founding/managing extra villages is a later milestone (M2.3+); the bot
+ * deliberately stays single-village so the run still exercises one economy at a time.
  */
 export type BotAction =
   | { kind: 'build'; id: BuildingId }
   | { kind: 'recruit'; unitId: UnitId; count: number }
-  | { kind: 'attack'; targetLevel: number; units: Record<UnitId, number> }
+  | { kind: 'attack'; targetId: string; targetLevel: number; units: Record<UnitId, number> }
 
 /**
  * Surplus multiplier for the build-vs-recruit tiebreak: when total resources reach
@@ -142,26 +144,36 @@ function homeArmySize(home: Record<UnitId, number>): number {
 }
 
 /**
- * Pick an attack for the army currently AT HOME in `v`, or null when none is
- * worthwhile.
+ * Pick an attack for the army currently AT HOME in `v` against a CONCRETE barbarian
+ * village on the world map (M2.2), or null when none is worthwhile.
  *
- * The loop's loot SOURCE (M1.3): scan the camp ladder from the top down and return
- * the HIGHEST tier the home stack beats with losses under {@link MAX_ATTACK_LOSS}
- * AND with at least one surviving hauler (carry > 0, so loot actually comes home).
+ * The loop's loot SOURCE: first find the HIGHEST camp tier the home stack beats with
+ * losses under {@link MAX_ATTACK_LOSS} AND with at least one surviving hauler (carry >
+ * 0, so loot actually comes home) — defence/loot are still tier-derived, so this is
+ * the same ladder scan as before M2.2. Then resolve that tier to the NEAREST real
+ * village of that level via {@link targetsByDistance} (ascending, so the first match
+ * is closest) — the shortest march, hence the best loot throughput, among the hardest
+ * winnable targets. Because every tier 1..MAX is always populated by generateWorld
+ * (countForLevel >= 1) and the ring radius is ~tier·DISTANCE_PER_LEVEL, the chosen
+ * level — and so the march time — matches the pre-spatial behaviour, preserving balance.
+ *
  * Sends the WHOLE home army — after dispatch the home is empty, so at most one attack
  * is issued per step and the freshly-trained / returning units rebuild the stack for
- * the next strike. Pure function of the village (stationedUnits − catalogues), so it
- * stays deterministic and safe for the no-softlock probe to call.
+ * the next strike. Pure function of the village + world (stationedUnits − catalogues),
+ * so it stays deterministic and safe for the no-softlock probe to call.
  *
  * Returns null when the barracks are locked, the home stack is below
  * {@link STRIKE_MIN_ARMY}, or no tier is winnable within the loss budget.
  */
-function chooseAttack(v: Village): Extract<BotAction, { kind: 'attack' }> | null {
+function chooseAttack(v: Village, world: World): Extract<BotAction, { kind: 'attack' }> | null {
   if (!barracksUnlocked(v)) return null
   const home = stationedUnits(v)
   if (homeArmySize(home) < STRIKE_MIN_ARMY) return null
   const atkPower = armyAttackPower(home)
   if (atkPower <= 0) return null
+
+  // Highest beatable camp tier within the loss budget and with surviving carry.
+  let bestLevel = 0
   for (let lvl = MAX_TARGET_LEVEL; lvl >= 1; lvl--) {
     const target = barbarianTarget(lvl)
     const outcome = battleOutcome(atkPower, target.defensePower)
@@ -169,7 +181,16 @@ function chooseAttack(v: Village): Extract<BotAction, { kind: 'attack' }> | null
     if (outcome.attackerLossFrac > MAX_ATTACK_LOSS) continue
     // Survivors must still be able to carry loot home, else the march nets nothing.
     if (armyCarry(applyLosses(home, outcome.attackerLossFrac)) <= 0) continue
-    return { kind: 'attack', targetLevel: lvl, units: home }
+    bestLevel = lvl
+    break
+  }
+  if (bestLevel === 0) return null
+
+  // Resolve the tier to the nearest concrete village of that level (fastest march).
+  for (const b of targetsByDistance(v, world)) {
+    if (b.level === bestLevel) {
+      return { kind: 'attack', targetId: b.id, targetLevel: b.level, units: home }
+    }
   }
   return null
 }
@@ -201,7 +222,7 @@ function chooseAttack(v: Village): Extract<BotAction, { kind: 'attack' }> | null
  * be trained — the signal checkNoSoftlock pairs with resource growth / content
  * consumption to classify a stall.
  */
-export function chooseAction(v: Village): BotAction | null {
+export function chooseAction(v: Village, world: World): BotAction | null {
   if (!barracksUnlocked(v)) {
     const b = nextCostAffordable(v, 'barracks')
     if (!b.maxed && b.affordable) return { kind: 'build', id: 'barracks' }
@@ -209,7 +230,8 @@ export function chooseAction(v: Village): BotAction | null {
   }
 
   // M1.3: a ready home army strikes for loot before the economy spends below.
-  const attack = chooseAttack(v)
+  // M2.2: the strike targets a concrete world village (chooseAttack reads `world`).
+  const attack = chooseAttack(v, world)
   if (attack !== null) return attack
 
   const building = cheapestBuilding(v)

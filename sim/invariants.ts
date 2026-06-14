@@ -9,9 +9,12 @@ import {
   INITIAL_BUILDINGS,
   type GameState,
   type Village,
+  type World,
+  type BarbarianVillage,
 } from '../src/engine/state'
 import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
+import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { chooseAction } from './bot'
@@ -37,6 +40,19 @@ export interface InvariantResult {
 /** The first (capital) village — the one the bot drives. */
 function firstVillage(state: GameState): Village {
   return state.villages[state.villageOrder[0]]
+}
+
+/**
+ * Deterministically pick a barbarian village of camp tier `level` from `world` — the
+ * FIRST in generation order (ids are tier-ascending, so this is stable and identical
+ * across both branches of a determinism check), falling back to the first village of
+ * any tier if that exact level is absent. generateWorld always spawns >= 1 village per
+ * tier 1..MAX, so the fallback never fires for an in-range level; it only guards a
+ * hand-edited world. Used by the seeded combat tests below to target a CONCRETE camp
+ * (M2.2) instead of an abstract level.
+ */
+function targetOfLevel(world: World, level: number): BarbarianVillage {
+  return world.barbarians.find((b) => b.level === level) ?? world.barbarians[0]
 }
 
 /**
@@ -121,6 +137,15 @@ export function checkArmyConsistency(state: GameState): InvariantResult {
       if (!Number.isInteger(m.targetLevel) || m.targetLevel < 1) {
         issues.push(`${vid}.march.targetLevel=${m.targetLevel}`)
       }
+      // M2.2: a march carries a target id and SNAPSHOT coordinates (for the return
+      // leg + drawn line). They must always be well-formed — a non-finite targetX/Y
+      // would yield a NaN return-leg time and strand the army.
+      if (typeof m.targetId !== 'string' || m.targetId.length === 0) {
+        issues.push(`${vid}.march.targetId=${String(m.targetId)}`)
+      }
+      if (!Number.isFinite(m.targetX) || !Number.isFinite(m.targetY)) {
+        issues.push(`${vid}.march.target=(${m.targetX},${m.targetY})`)
+      }
       if (m.phase !== 'outbound' && m.phase !== 'returning') {
         issues.push(`${vid}.march.phase=${m.phase}`)
       }
@@ -144,6 +169,63 @@ export function checkArmyConsistency(state: GameState): InvariantResult {
 
   return {
     name: 'army-consistency',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * World structural invariants (M2.2). The seed-generated barbarian map must be sane
+ * and serialize-stable, since marches target it by id and read it for travel time:
+ *  - `world.barbarians` exists and is NON-EMPTY (there is always something to attack;
+ *    an empty world would softlock the combat loop),
+ *  - every entry has a non-empty string id, FINITE integer-or-float-but-finite x/y,
+ *    and a camp tier in [1, MAX_TARGET_LEVEL] (so barbarianTarget never clamps it),
+ *  - NO TWO villages share a map cell, AND no barbarian sits on a player village's
+ *    cell — generateWorld reserves the capital and nudges collisions, so a duplicate
+ *    would mean a generation/migration bug (and an ambiguous click target on the map).
+ *
+ * Static for a run (the world never changes after generation), but cheap to assert,
+ * so the runner samples it like the other per-state checks; round-trip then proves it
+ * survives save/load byte-identically.
+ */
+export function checkWorldConsistency(state: GameState): InvariantResult {
+  const world: World | undefined = state.world
+  if (world === undefined || !Array.isArray(world.barbarians)) {
+    return {
+      name: 'world-consistency',
+      ok: false,
+      detail: 'state.world missing or world.barbarians is not an array',
+    }
+  }
+
+  const issues: string[] = []
+  if (world.barbarians.length === 0) issues.push('no barbarian villages (combat loop would softlock)')
+
+  const occupied = new Map<string, string>()
+  // Reserve every player village's cell first, so a barbarian sharing it is flagged.
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    occupied.set(v.x + ',' + v.y, vid)
+  }
+
+  for (const b of world.barbarians as BarbarianVillage[]) {
+    if (typeof b.id !== 'string' || b.id.length === 0) issues.push(`bad id ${String(b.id)}`)
+    if (!Number.isFinite(b.x) || !Number.isFinite(b.y)) {
+      issues.push(`${b.id} non-finite coords (${b.x},${b.y})`)
+    }
+    if (!Number.isInteger(b.level) || b.level < 1 || b.level > MAX_TARGET_LEVEL) {
+      issues.push(`${b.id} level=${b.level}`)
+    }
+    if (typeof b.name !== 'string' || b.name.length === 0) issues.push(`${b.id} empty name`)
+    const key = b.x + ',' + b.y
+    const prev = occupied.get(key)
+    if (prev !== undefined) issues.push(`${b.id} shares cell ${key} with ${prev}`)
+    occupied.set(key, b.id)
+  }
+
+  return {
+    name: 'world-consistency',
     ok: issues.length === 0,
     detail: issues.length ? issues.join('; ') : undefined,
   }
@@ -257,7 +339,7 @@ export function checkNoSoftlock(
   let inFlight = false
   for (const vid of state.villageOrder) {
     const v = state.villages[vid]
-    if (!hasAction && chooseAction(v) !== null) hasAction = true
+    if (!hasAction && chooseAction(v, state.world) !== null) hasAction = true
     if (!inFlight && (v.recruitQueue.length > 0 || v.marches.length > 0)) inFlight = true
   }
 
@@ -306,12 +388,14 @@ function seedRecruitment(state: GameState): void {
   v.popCap = D(1000) // headroom: queued + trained + away units all count
   // Live training queue (recruitment clock).
   recruit(v, 'spearman', 100)
-  // Live march (combat clock): place a home stack, then send part of it.
+  // Live march (combat clock): place a home stack, then send part of it at a CONCRETE
+  // tier-6 camp on the world map (M2.2) — a clean win whose there-and-back resolves
+  // inside the window, so advanceMarches crosses every phase boundary either way.
   v.units.axeman = 60
   const army = {} as Record<UnitId, number>
   for (const id of UNIT_IDS) army[id] = 0
   army.axeman = 40
-  sendAttack(v, state.battleLog, 6, army)
+  sendAttack(v, state.world, state.battleLog, targetOfLevel(state.world, 6).id, army)
 }
 
 /**
@@ -372,12 +456,17 @@ export function checkMarchesTerminate(seed: string): InvariantResult {
   const army = {} as Record<UnitId, number>
   for (const id of UNIT_IDS) army[id] = 0
   army.axeman = 100
-  if (!sendAttack(v, state.battleLog, 10, army)) {
+  // Target a CONCRETE tier-10 camp on the world map (M2.2). Its ring radius is
+  // ~10·DISTANCE_PER_LEVEL (= 30) ± a one-ring jitter, so the Euclidean distance from
+  // the central capital is ~27..33 fields — a clean over-powered win that returns well
+  // inside the horizon below.
+  if (!sendAttack(v, state.world, state.battleLog, targetOfLevel(state.world, 10).id, army)) {
     return { name: 'marches-terminate', ok: false, detail: 'could not dispatch the test march' }
   }
 
   const CHUNK = 30
-  const HORIZON = 6000 // >> round trip (level 10: distance 30 × speed 18 = 540s each way)
+  // >> a full round trip: tier-10 distance ~30 fields × speed 18 ≈ 540s each way.
+  const HORIZON = 6000
   let bad: string | null = null
   for (let t = 0; t < HORIZON && v.marches.length > 0; t += CHUNK) {
     simulate(state, CHUNK)

@@ -94,15 +94,21 @@ mountApp(root, {
     }
     return ok
   },
-  onAttack: (villageId: VillageId, targetLevel: number, units: Record<UnitId, number>) => {
-    const ok = sendAttack(store.state.villages[villageId], store.state.battleLog, targetLevel, units)
+  onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => {
+    const ok = sendAttack(
+      store.state.villages[villageId],
+      store.state.world,
+      store.state.battleLog,
+      targetId,
+      units,
+    )
     if (ok) {
       store.commit()
       saveToLocal(store.state)
     }
     return ok
   },
-  version: '0.5.0',
+  version: '0.6.0',
   offlineSeconds,
 })
 

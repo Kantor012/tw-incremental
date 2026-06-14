@@ -479,3 +479,358 @@ html {
     scroll-behavior: auto;
   }
 }
+
+/* ============================================================================
+ * e) MAPA ŚWIATA (zakładka „Mapa", src/ui/panels/map.ts)
+ * --------------------------------------------------------------------------
+ * Przestrzenna mapa wiosek: SVG z panem (viewBox) i zoomem, węzły wiosek gracza
+ * (złota tarcza) i barbarzyńskich (czerwone, intensywność wg poziomu), linie
+ * marszów aktywnej wioski oraz pływający panel detali zaznaczonego celu.
+ *
+ * Zasady spójne z resztą pliku:
+ *  - Wyłącznie tokeny z tokens.css (kolory, --space-*, --radius-*, cienie,
+ *    --dur-*, warstwy). Zero hardcodowanych kolorów.
+ *  - Geometrię (pozycje, promień węzła, ścieżki marszów) wyznacza JS z danych
+ *    świata — CSS odpowiada wyłącznie za KOLORY, OBRYSY i STANY (hover/zaznaczenie
+ *    /fokus). Intensywność barbarzyńcy wg poziomu ustawia JS przez `fill-opacity`
+ *    (hue zostaje tokenem --bad).
+ *  - Wskaźniki stanu nie polegają wyłącznie na kolorze (WCAG 1.4.1): zaznaczeniu
+ *    /fokusowi towarzyszy zmiana grubości obrysu i poświata; faza marszu niesie
+ *    osobny kolor linii ORAZ kierunek animacji (dodatek do markera/słowa w UI).
+ *  - Ruch (płynące „mrówki" marszu) respektuje prefers-reduced-motion.
+ * ========================================================================== */
+
+/* ---- Obszar mapy (pozycjonuje SVG, kontrolki i panel detali) ----------- */
+.map-wrap {
+  position: relative;
+  width: 100%;
+  /* Mapa wypełnia obszar zakładki; wysokość rośnie z viewportem, ale nie
+   * przekracza rozsądnego maksimum na dużych ekranach. */
+  height: clamp(20rem, 65vh, 44rem);
+  overflow: hidden;
+  background-color: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  /* Przeciąganie mapy nie ma zaznaczać tekstu kontrolek/detali. */
+  user-select: none;
+}
+
+/* ---- Płótno SVG -------------------------------------------------------- */
+.map-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* Subtelna głębia pola mapy; siatkę rysuje JS jako linie SVG na wierzchu. */
+  background-color: var(--bg-2);
+  background-image: radial-gradient(
+    circle at 50% 42%,
+    transparent 0%,
+    color-mix(in srgb, var(--bg) 65%, transparent) 100%
+  );
+  /* Pan/zoom obsługuje JS — wyłączamy domyślne gesty przeglądarki na płótnie. */
+  touch-action: none;
+  cursor: grab;
+}
+
+/* Chwytanie mapy (przeciąganie). Wspieramy zarówno natywne :active (mysz wciśnięta)
+ * jak i jawną klasę, którą JS może dodać na czas pointer-drag. */
+.map-svg:active,
+.map-svg.is-panning {
+  cursor: grabbing;
+}
+
+.map-svg:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ---- Siatka tła + pierścienie zaznaczenia/aktywnej wioski ------------- */
+/* Siatkę rysuje JS jako <rect>+<path> bez własnego stroke — barwę i subtelność
+ * nadają tu tokeny (stała grubość dzięki vector-effect:non-scaling-stroke z JS),
+ * dając mapie jedyny punkt odniesienia dla odległości/orientacji. */
+.map-grid-border {
+  stroke: var(--border);
+  stroke-opacity: 0.6;
+}
+
+.map-grid-lines {
+  stroke: var(--border);
+  stroke-opacity: 0.25;
+}
+
+/* Pierścień AKTYWNEJ wioski gracza i ZAZNACZONEGO celu — wspólne markery, które
+ * JS pozycjonuje co klatkę. Bez wypełnienia; czytelny obrys akcentu to osobny
+ * sygnał poza samym kolorem węzła (WCAG 1.4.1). Pierścień celu jest przerywany,
+ * by odróżnić go od ciągłego pierścienia aktywnej wioski. */
+.map-active-ring {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-opacity: 0.9;
+}
+
+.map-sel-ring {
+  stroke: var(--accent-2);
+  stroke-width: 2;
+  stroke-dasharray: 3 3;
+}
+
+/* ---- Kontrolki nawigacji (zoom +/- , wycentruj) ----------------------- */
+/* Nakładka w prawym górnym rogu mapy; przyciski używają wspólnego .btn. */
+.map-controls {
+  position: absolute;
+  top: var(--space-2);
+  right: var(--space-2);
+  z-index: var(--z-base);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Cel dotykowy 44px nawet dla gołych <button> (bez .btn). */
+.map-controls button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* Przyciski unoszą się nad mapą — cień zapewnia czytelność na tle węzłów. */
+.map-controls .btn {
+  box-shadow: var(--shadow-2);
+}
+
+/* ---- Węzły wiosek (SVG: <g> tarczy gracza albo <circle> barbarzyńcy) --- */
+/* Wspólna baza: kursor, płynne stany. `filter` daje poświatę działającą zarówno
+ * na grupie (tarcza), jak i na figurze (okrąg) — niezależnie od struktury. */
+.map-node {
+  cursor: pointer;
+  transition: filter var(--dur-fast) var(--ease),
+    stroke var(--dur-fast) var(--ease),
+    stroke-width var(--dur-fast) var(--ease);
+}
+
+.map-node:focus {
+  outline: none;
+}
+
+/* Fokus klawiaturą: czytelny pierścień akcentu (węzły mają tabindex/role=button). */
+.map-node:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Wioska gracza — złoty marker. Gdy JS rysuje prostą figurę bez własnego fill,
+ * przejmuje barwę akcentu; gotowa tarcza z własnymi wypełnieniami ignoruje to. */
+.map-node--player {
+  fill: var(--accent);
+}
+
+/* Aktywna wioska gracza wyróżniona poświatą akcentu (dodatek do innego markera
+ * rysowanego przez JS). */
+.map-node--player.is-active {
+  filter: drop-shadow(0 0 3px var(--accent));
+}
+
+/* Wioska barbarzyńska — czerwony znacznik (hue z tokenu; intensywność wg poziomu
+ * ustawia JS przez fill-opacity). Cienki obrys w kolorze tła oddziela sąsiadujące
+ * węzły. vector-effect utrzymuje stałą grubość obrysu przy zoomie viewBox. */
+.map-node--barb {
+  fill: var(--bad);
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Najazd kursorem / hover — jaśniejszy, grubszy obrys (sygnał nie tylko kolorem). */
+.map-node--barb:hover {
+  stroke: var(--accent-2);
+  stroke-width: 2;
+}
+
+/* Zaznaczony cel — wyraźny złoty pierścień (grubość = sygnał poza kolorem) plus
+ * delikatna poświata. Wygrywa źródłowo nad :hover (ta sama specyficzność). */
+.map-node--barb.is-selected {
+  stroke: var(--accent);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 3px var(--accent));
+}
+
+/* ---- Linie marszów (SVG <line>/<path> aktywnej wioski) ----------------- */
+/* Nieinteraktywne (nie zasłaniają kliknięć w węzły). Stała grubość przy zoomie.
+ * Przerywana linia „płynie" subtelną animacją w kierunku zależnym od fazy. */
+.map-march {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-dasharray: 6 6;
+  vector-effect: non-scaling-stroke;
+  pointer-events: none;
+  animation: map-march-flow 900ms linear infinite;
+}
+
+/* Faza wymarszu — akcent, mrówki płyną ku celowi (spójnie z .march-item w base). */
+.map-march.is-outbound {
+  stroke: var(--accent);
+  animation-name: map-march-flow;
+}
+
+/* Faza powrotu — zieleń, mrówki płyną z powrotem ku wiosce. */
+.map-march.is-returning {
+  stroke: var(--good);
+  animation-name: map-march-flow-rev;
+}
+
+/* Marker postępu marszu (czoło armii) — JS pozycjonuje, CSS koloruje wg fazy. */
+.map-march-marker {
+  pointer-events: none;
+  fill: var(--accent);
+  stroke: var(--bg);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.map-march-marker.is-returning {
+  fill: var(--good);
+}
+
+@keyframes map-march-flow {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+
+@keyframes map-march-flow-rev {
+  to {
+    stroke-dashoffset: 12;
+  }
+}
+
+/* ---- Panel detali zaznaczonego celu ----------------------------------- */
+/* Pływająca karta nad mapą (lewy dół): poziom, obrona, lup, odległość, czas
+ * marszu + kompozytor armii (reużywa .army-picker/.army-pick z base.css) i
+ * przycisk „Atakuj". Przy nadmiarze treści przewija się wewnętrznie. */
+.map-detail {
+  position: absolute;
+  left: var(--space-3);
+  bottom: var(--space-3);
+  z-index: var(--z-sticky);
+  width: min(24rem, calc(100% - var(--space-3) * 2));
+  max-height: calc(100% - var(--space-3) * 2);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-2);
+}
+
+.map-detail-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.map-detail-name {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-base);
+  color: var(--text);
+}
+
+.map-detail-level {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* Wprowadzenie nad mapą: skrót sterowania + wskazanie, że „Wyprawy" to pełna,
+ * dostępna alternatywa. (Cel statystyk reużywa .building-stats/.stat z base.css.) */
+.map-note {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  margin-bottom: var(--space-2);
+}
+
+/* Legenda mapy (znaczenie barw/rozmiaru/linii) — czytelna „na pierwszy rzut oka",
+ * w całości z tokenów. Swatche są dekoracyjne (aria-hidden w JS), opis niesie tekst. */
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin-bottom: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
+.map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.map-legend-swatch {
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: var(--radius-pill);
+}
+
+.map-legend-swatch.is-player {
+  background-color: var(--accent);
+}
+
+.map-legend-swatch.is-barb {
+  background-color: var(--bad);
+}
+
+/* „Linia marszu" — krótka przerywana kreska zamiast kropki. */
+.map-legend-swatch.is-march {
+  width: 1rem;
+  height: 0;
+  border-radius: 0;
+  border-top: 2px dashed var(--accent);
+}
+
+/* ---- Responsywność mapy ----------------------------------------------- */
+/* Telefony: niższa mapa, a panel detali jako dolny „arkusz" na pełną szerokość
+ * (czytelniejszy niż wąska pływająca karta na małym ekranie). */
+@media (max-width: 639.98px) {
+  .map-wrap {
+    height: clamp(18rem, 55vh, 32rem);
+  }
+
+  /* Zoom +/- z najtrudniejszego dla kciuka prawego górnego rogu do łatwiej
+   * dosięgalnego dołu-lewej, w poziomym rzędzie. Unosimy je nad arkusz detali
+   * (--z-overlay > --z-sticky), by pozostały klikalne także po jego rozwinięciu;
+   * domyślnie arkusz jest zwinięty (patrz logika map.ts), więc się nie zasłaniają. */
+  .map-controls {
+    top: auto;
+    right: auto;
+    bottom: var(--space-2);
+    left: var(--space-2);
+    flex-direction: row;
+    z-index: var(--z-overlay);
+  }
+
+  .map-detail {
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 60%;
+    border-inline: 0;
+    border-bottom: 0;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+}
+
+/* ---- Ograniczony ruch: zatrzymaj płynące mrówki marszów --------------- */
+/* (Globalny wyłącznik w base.css już to neutralizuje; tu jawnie wg kontraktu.) */
+@media (prefers-reduced-motion: reduce) {
+  .map-march {
+    animation: none;
+  }
+}

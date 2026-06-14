@@ -4,18 +4,29 @@ import {
   type Village,
   type BattleReport,
   type ResourceMap,
+  type BarbarianVillage,
+  type World,
 } from '../engine/state'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from './combat'
 import { barracksUnlocked } from './recruitment'
+import { distance, barbarianById } from './world'
 
 /**
- * March engine — the GENERIC, deterministic mover for PvE attacks (M1.3). Sends an
- * army at a barbarian camp, resolves the battle on arrival, and hauls loot home.
- * Pure functions of a single {@link Village} + the catalogues; the only mutating
- * ones are {@link advanceMarches} (the per-tick clock, called by simulate) and
- * {@link sendAttack} (dispatch). Node-safe (no DOM/clock/RNG).
+ * March engine — the GENERIC, deterministic mover for PvE attacks (M1.3, spatial
+ * since M2.2). Sends an army at a CONCRETE barbarian village on the world map,
+ * resolves the battle on arrival, and hauls loot home. Pure functions of a single
+ * {@link Village} (+ the {@link World} for target lookup and the catalogues); the
+ * only mutating ones are {@link advanceMarches} (the per-tick clock, called by
+ * simulate) and {@link sendAttack} (dispatch). Node-safe (no DOM/clock/RNG).
+ *
+ * Since M2.2 a march targets a specific {@link BarbarianVillage} by id, and travel
+ * time comes from the EUCLIDEAN distance between the source village and the target
+ * (see {@link marchTime} / world.ts). Combat & loot are unchanged: both still read
+ * the camp tier via barbarianTarget(level); the march snapshots the target's level
+ * AND map coordinates at dispatch so a world regenerated/edited later can never
+ * retroactively perturb an army already in flight.
  *
  * Since M2.1 the run is multi-village: every function operates on ONE village's
  * economy (its `resources` / `units` / `marches`), never the whole GameState. The
@@ -99,45 +110,49 @@ export function stationedUnits(v: Village): Record<UnitId, number> {
 }
 
 /**
- * One-way travel time (seconds) for `units` marching to `targetLevel`. The SLOWEST
- * unit governs the pace: since `UnitDef.speed` is minutes-per-field (lower = faster),
- * the slowest unit is the one with the MAX speed value. (The brief's "min speed"
- * wording is inverted relative to that data convention — using min would let a fast
- * unit speed up a slow stack, so we take the slowest, the standard TW rule.) Returns
- * 0 for an empty army. There-and-back is symmetric: the return leg reuses the
- * outbound army's time so survivors never travel home faster than they came.
- *
- * Pure: the first `Village` argument is unused (travel time depends only on the
- * target and the army), kept for call-site symmetry with the other per-village
- * functions and so the UI/sim can pass the active village uniformly.
+ * One-way travel time (seconds) for `units` marching from `v` to a map point
+ * `target` ({x, y}). Distance is the EUCLIDEAN separation between the two villages
+ * (world.ts `distance`), so the same formula serves the outbound leg (target = the
+ * barbarian village) and the return leg (target = the dispatch snapshot
+ * {x: m.targetX, y: m.targetY}). The SLOWEST unit governs the pace: since
+ * `UnitDef.speed` is minutes-per-field (lower = faster), the slowest unit is the one
+ * with the MAX speed value. (The brief's "min speed" wording is inverted relative to
+ * that data convention — using min would let a fast unit speed up a slow stack, so we
+ * take the slowest, the standard TW rule.) Returns 0 for an empty army. There-and-back
+ * is symmetric: the return leg reuses the snapshotted target geometry, so survivors
+ * never travel home faster than they came.
  */
 export function marchTime(
-  _v: Village,
-  targetLevel: number,
+  v: Village,
+  target: { x: number; y: number },
   units: Record<UnitId, number>,
 ): number {
-  const target = barbarianTarget(targetLevel)
   let slowest = 0
   for (const id of UNIT_IDS) {
     if ((units[id] ?? 0) > 0) slowest = Math.max(slowest, UNITS[id].speed)
   }
   if (slowest <= 0) return 0
-  return target.distance * slowest * MARCH_TIME_SCALE
+  return distance(v.x, v.y, target.x, target.y) * slowest * MARCH_TIME_SCALE
 }
 
 /**
- * Whether an attack can be launched from `v` right now, with a PL reason when not.
- * Gates on: the barracks (the military unlock), a valid camp level, integer
- * non-negative per-type counts that do not exceed the units AT HOME, and a non-empty
- * army.
+ * Whether an attack from `v` against the concrete barbarian village `target` can be
+ * launched right now, with a PL reason when not. Gates on: the barracks (the
+ * military unlock), a valid camp tier (the target's `level` must be in
+ * [1, MAX_TARGET_LEVEL]), integer non-negative per-type counts that do not exceed
+ * the units AT HOME, and a non-empty army.
  */
 export function canAttack(
   v: Village,
-  targetLevel: number,
+  target: BarbarianVillage,
   units: Record<UnitId, number>,
 ): { ok: boolean; reason?: string } {
   if (!barracksUnlocked(v)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
-  if (!Number.isInteger(targetLevel) || targetLevel < 1 || targetLevel > MAX_TARGET_LEVEL) {
+  if (
+    !Number.isInteger(target.level) ||
+    target.level < 1 ||
+    target.level > MAX_TARGET_LEVEL
+  ) {
     return { ok: false, reason: 'Niepoprawny cel.' }
   }
   const home = stationedUnits(v)
@@ -153,27 +168,37 @@ export function canAttack(
 }
 
 /**
- * Dispatch an attack from `v`. No-op returning false when {@link canAttack} rejects.
- * Records the march (a snapshot of the dispatched army) WITHOUT debiting
- * `v.units` — those units remain owned (and population-counted) while away;
- * {@link stationedUnits} subtracts them so they can't be sent twice. The global
+ * Dispatch an attack from `v` at the barbarian village `targetId` (looked up in
+ * `world`). No-op returning false when the target is absent (e.g. a stale id) or
+ * {@link canAttack} rejects. Records the march as a snapshot — the dispatched army,
+ * the target's id, its camp tier (`targetLevel`) and its map coordinates
+ * (`targetX`/`targetY`) — WITHOUT debiting `v.units`: those units remain owned (and
+ * population-counted) while away; {@link stationedUnits} subtracts them so they
+ * can't be sent twice. Freezing the level + coordinates here means a world
+ * regenerated/edited later never perturbs an army already in flight. The global
  * battle `log` is taken explicitly (unused on dispatch; resolution happens in
  * {@link advanceMarches}) to keep the combat-entry-point signatures uniform.
  */
 export function sendAttack(
   v: Village,
+  world: World,
   _log: BattleReport[],
-  targetLevel: number,
+  targetId: string,
   units: Record<UnitId, number>,
 ): boolean {
-  if (!canAttack(v, targetLevel, units).ok) return false
+  const target = barbarianById(world, targetId)
+  if (target === undefined) return false
+  if (!canAttack(v, target, units).ok) return false
   const sent = emptyUnits()
   for (const id of UNIT_IDS) sent[id] = units[id] ?? 0
   v.marches.push({
-    targetLevel,
+    targetId: target.id,
+    targetLevel: target.level,
+    targetX: target.x,
+    targetY: target.y,
     units: sent,
     phase: 'outbound',
-    remaining: marchTime(v, targetLevel, sent),
+    remaining: marchTime(v, target, sent),
     loot: emptyLoot(),
   })
   return true
@@ -305,9 +330,10 @@ export function advanceMarches(v: Village, log: BattleReport[], dtSeconds: numbe
         break
       }
 
-      // Symmetric return: reuse the OUTBOUND army's travel time (computed from the
-      // originally dispatched stack) so survivors don't teleport home faster.
-      const returnTime = marchTime(v, m.targetLevel, sent)
+      // Symmetric return: travel time from the SNAPSHOTTED target coordinates back
+      // to `v` for the originally dispatched stack, so survivors don't teleport home
+      // faster than they came (and so a world edited mid-flight can't change it).
+      const returnTime = marchTime(v, { x: m.targetX, y: m.targetY }, sent)
       m.units = survivors
       m.loot = loot
       m.phase = 'returning'

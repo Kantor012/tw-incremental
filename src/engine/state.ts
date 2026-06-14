@@ -4,6 +4,7 @@ import { SAVE_VERSION } from './save'
 import { signal, type Signal } from './store'
 import { BUILDINGS, BUILDING_IDS, type BuildingId } from '../content/buildings'
 import { UNIT_IDS, type UnitId } from '../content/units'
+import { generateWorld, WORLD_CENTER } from '../systems/world'
 
 /**
  * The single source of truth. Everything the simulation needs lives here so it
@@ -58,15 +59,29 @@ export interface RecruitOrder {
  * roster); `loot` is on Decimal (the economy rule).
  */
 export interface March {
-  /** Barbarian camp tier this army is attacking. */
+  /**
+   * Id of the targeted {@link BarbarianVillage} (`'b0'`, `'b1'`, …). `'legacy'` for
+   * marches carried over by the v5→v6 save migration, which predates map coordinates
+   * (their geometry is reconstructed into targetX/targetY from the old distance).
+   */
+  targetId: string
+  /**
+   * SNAPSHOT of the target's camp tier at dispatch — the single input combat resolution
+   * and loot read (via barbarianTarget), frozen so a world regenerated/edited later can
+   * never retroactively change a march already in flight.
+   */
   targetLevel: number
+  /** SNAPSHOT of the target's map x at dispatch — drives the return-leg travel time and the drawn march line. */
+  targetX: number
+  /** SNAPSHOT of the target's map y at dispatch. */
+  targetY: number
   /** The dispatched army, by unit id (a subset of the owned roster). */
   units: Record<UnitId, number>
-  /** `outbound` = travelling to the camp; `returning` = hauling loot home. */
+  /** `outbound` = travelling to the target; `returning` = hauling loot home. */
   phase: 'outbound' | 'returning'
   /** Seconds left until the current phase completes (advanced on the tick grid). */
   remaining: number
-  /** Loot picked up at the camp, delivered on a successful return. On Decimal. */
+  /** Loot picked up at the target, delivered on a successful return. On Decimal. */
   loot: ResourceMap
 }
 
@@ -112,6 +127,11 @@ export interface Village {
   id: VillageId
   /** Human-facing display name (the capital starts as "Stolica"). */
   name: string
+
+  /** Integer map x coordinate (field). The capital sits at {@link WORLD_CENTER}. Not derived. */
+  x: number
+  /** Integer map y coordinate (field). Not derived. */
+  y: number
 
   resources: ResourceMap
   /**
@@ -159,6 +179,36 @@ export interface Village {
   raidTimer: number
 }
 
+/**
+ * One barbarian village on the world map (M2.2). A purely SPATIAL descriptor — its
+ * id, map coordinates, camp tier and display name. The combat-relevant numbers
+ * (defence, loot) are NOT stored: they are derived on demand from `level` via
+ * {@link barbarianTarget} (the single source of those curves), so the world stays a
+ * compact, Decimal-free bag of plain numbers/strings that serializes trivially.
+ * Generated deterministically from the seed by `generateWorld` (systems/world.ts).
+ */
+export interface BarbarianVillage {
+  /** Stable id (`'b0'`, `'b1'`, …) — what a {@link March.targetId} points at. */
+  id: string
+  /** Integer map x coordinate (field), in [0, WORLD_SIZE]. */
+  x: number
+  /** Integer map y coordinate (field), in [0, WORLD_SIZE]. */
+  y: number
+  /** Camp tier (1..MAX_TARGET_LEVEL) — drives defence/loot via barbarianTarget(level). */
+  level: number
+  /** Display name (PL). */
+  name: string
+}
+
+/**
+ * The spatial world: the deterministic, seed-generated set of barbarian villages
+ * the player can march at. Ordered (stable index = id suffix) so iteration/render
+ * is reproducible. Holds only plain JSON (no Decimal), so it serializes verbatim.
+ */
+export interface World {
+  barbarians: BarbarianVillage[]
+}
+
 export interface GameState {
   /** Save schema version — drives migrations. */
   version: number
@@ -179,6 +229,12 @@ export interface GameState {
    * order so multi-village simulation stays deterministic.
    */
   villageOrder: VillageId[]
+  /**
+   * The spatial world (barbarian villages on the map). Deterministically generated
+   * from {@link GameState.seed} at run creation (and reconstructed by the save
+   * migration), so it is reproducible and survives round-trips.
+   */
+  world: World
   /**
    * GLOBAL rolling log of the last ~20 battles (attacks + raids) across ALL
    * villages, newest last. Each report carries the village it came from via
@@ -270,10 +326,12 @@ export const INITIAL_UNITS = Object.fromEntries(
  * with the starting buildings before returning (so production / storageCap /
  * popCap are immediately consistent).
  */
-export function createVillage(id: VillageId, name: string): Village {
+export function createVillage(id: VillageId, name: string, x = 0, y = 0): Village {
   const v: Village = {
     id,
     name,
+    x,
+    y,
     resources: { wood: D(50), clay: D(50), iron: D(50) },
     // Derived fields are filled by recomputeVillageDerived below; seeded to zero so
     // the object has its final shape (and key order) before the recompute overwrites.
@@ -293,7 +351,10 @@ export function createVillage(id: VillageId, name: string): Village {
 }
 
 export function createInitialState(seed: string, now: number): GameState {
-  const capital = createVillage('v0', 'Stolica')
+  // Capital starts at the world centre; the barbarian world is generated from the
+  // same seed on its OWN RNG stream (see generateWorld), so it never perturbs the
+  // run's rngState — both stay reproducible.
+  const capital = createVillage('v0', 'Stolica', WORLD_CENTER.x, WORLD_CENTER.y)
   return {
     version: SAVE_VERSION,
     seed,
@@ -302,6 +363,7 @@ export function createInitialState(seed: string, now: number): GameState {
     lastSeen: now,
     villages: { v0: capital },
     villageOrder: ['v0'],
+    world: generateWorld(seed),
     battleLog: [],
   }
 }
