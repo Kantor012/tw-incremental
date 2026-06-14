@@ -1,0 +1,390 @@
+/* ============================================================================
+ * TW Incremental — Layout dashboardu
+ * --------------------------------------------------------------------------
+ * Styl warstwy układu wprowadzonej w fazie Shell (src/ui/layout.ts): zamiast
+ * jednej długiej pionowej listy paneli mamy DASHBOARD:
+ *   a) STICKY HUD (zawsze widoczny pasek: marka + surowce + magazyn/populacja),
+ *   b) NAWIGACJA ZAKŁADKAMI (dostępny tablist, przewijalny poziomo na mobile),
+ *   c) OBSZAR TREŚCI aktywnej zakładki (szerszy kontener + siatka kart),
+ *   d) STOPKA.
+ *
+ * Zasady:
+ *  - Wyłącznie tokeny z tokens.css (paleta, --space-*, --radius-*, cienie,
+ *    --dur-*, warstwy z-index). Zero hardcodowanych kolorów.
+ *  - Brak zmian logiki — to czysta warstwa prezentacji.
+ *  - Kolejność wczytywania: tokens.css → base.css → TEN plik (kaskaduje na
+ *    końcu, więc nadpisania .container/.app-footer z base.css są celowe).
+ *  - Ruch szanuje prefers-reduced-motion (globalny wyłącznik żyje w base.css;
+ *    wszystkie przejścia tutaj używają --dur-*, więc są nim wyciszane).
+ * ========================================================================== */
+
+/* ---- Powłoka aplikacji ------------------------------------------------- */
+/* Kolumna na całą wysokość okna, by stopka opadała na dół przy krótkiej treści. */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  width: 100%;
+}
+
+/* Dashboard jest szerszy niż domyślny pojedynczy słupek (.container = 720px w
+ * base.css). Wspólne poszerzenie HUD-a, tablisty, treści i stopki do ~1040px,
+ * by zmieściły się 2+ kolumny kart. Padding poziomy dziedziczony z base.css. */
+.app-shell .container {
+  max-width: 1040px;
+}
+
+/* Treść rozpycha się tak, by stopka trzymała się dołu ekranu. */
+.app-shell > .tabpanels {
+  flex: 1 1 auto;
+}
+
+/* WCAG 2.2 SC 2.4.11 (Focus Not Obscured): HUD jest sticky u góry, więc gdy
+ * przeglądarka przewija element do fokusu „na samą górę" (np. Shift+Tab w górę
+ * panelu albo strzałki w tablist po przewinięciu), trafiłby POD HUD. Rezerwujemy
+ * miejsce na wysokość HUD-a na korzeniu przewijania, by fokus lądował poniżej. */
+html {
+  scroll-padding-top: var(--hud-h);
+}
+
+/* ============================================================================
+ * a) STICKY HUD (role=banner)
+ * ========================================================================== */
+.hud {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  /* Nieprzezroczyste, lekko wyniesione tło — treść przewija się POD paskiem. */
+  background-color: var(--panel);
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-2);
+}
+
+/* Wewnętrzny rząd HUD-a: marka | surowce (rosną) | statystyki. Zawija się na
+ * wąskich ekranach na kolejne wiersze. Pionowy padding ciaśniejszy niż domyślny,
+ * by pasek nie zjadał za dużo wysokości. */
+.hud-inner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  padding-top: var(--space-3);
+  padding-bottom: var(--space-3);
+}
+
+/* ---- Marka (tarcza + tytuł + seed) ------------------------------------ */
+.hud-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 auto;
+}
+
+.hud-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+/* SVG tarczy nie ma własnych wymiarów — nadajemy je tutaj (poza .brand-mark
+ * z base.css, które dotyczy starego nagłówka). */
+.hud-brand-mark .shield {
+  width: 2rem;
+  height: 2rem;
+}
+
+.hud-brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: var(--leading-tight);
+}
+
+.hud-title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-lg);
+  color: var(--text);
+}
+
+.hud-seed {
+  font-size: var(--text-xs);
+}
+
+/* ---- Surowce (chip: ikona + wartość + tempo) -------------------------- */
+.hud-resources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+}
+
+.hud-res {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  background-color: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+.hud-res-icon {
+  flex: none;
+}
+
+/* Ikona surowca poza kontekstem .resource-row (gdzie base.css ją wymiaruje). */
+.hud-res .res-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.hud-res-text {
+  display: flex;
+  flex-direction: column;
+  line-height: var(--leading-tight);
+}
+
+.hud-res-value {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.hud-res-rate {
+  font-size: var(--text-xs);
+}
+
+/* ---- Statystyki (magazyn / populacja: etykieta + wartość + pasek) ------ */
+.hud-stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  flex: 0 0 auto;
+}
+
+.hud-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Zapewnia paskowi sensowną szerokość, gdy stoi obok innych elementów. */
+  min-width: 9rem;
+  flex: 1 1 9rem;
+}
+
+.hud-stat-label {
+  font-size: var(--text-xs);
+}
+
+.hud-stat-val {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+/* Pasek HUD-a — niższy niż domyślny .bar, dociągnięty na pełną szerokość grupy. */
+.hud-bar {
+  width: 100%;
+  height: 8px;
+}
+
+/* ============================================================================
+ * b) PASEK ZAKŁADEK (tablist)
+ * ========================================================================== */
+.tabs-bar {
+  background-color: var(--bg);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Tablist: rząd przycisków. Na wąskich ekranach przewija się POZIOMO zamiast
+ * zawijać (taby pozostają w jednej linii, palcem przesuwasz w bok). Padding
+ * poziomy z .container, pionowy zerujemy — wysokość daje cel dotykowy .tab. */
+.tabs.container {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: var(--space-1);
+  padding-top: 0;
+  padding-bottom: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  /* Aktywny tab podkreślamy 2px akcentem; -1px nasuwa go na 1px obrys paska,
+   * by linie zlały się w jedną (bez podwójnej kreski). */
+  margin-bottom: -1px;
+}
+
+.tabs.container::-webkit-scrollbar {
+  height: 6px;
+}
+.tabs.container::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  border-radius: var(--radius-pill);
+}
+
+/* Pojedyncza zakładka. Nie używa .btn — to płaski przycisk z podkreśleniem.
+ * Cel dotykowy 44px. Nie kurczy się przy przewijaniu (flex: none, nowrap). */
+.tab {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
+  background-color: transparent;
+  border: 0;
+  /* Przezroczysty 2px od początku — przełączenie aktywności nie przesuwa treści. */
+  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  /* Gdy strzałki przenoszą fokus i przewijają tab do widoku, ma wylądować
+   * poniżej sticky HUD-a (uzupełnia scroll-padding-top na html). */
+  scroll-margin-top: var(--hud-h);
+  transition: color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.tab:hover {
+  color: var(--text);
+  background-color: var(--panel-2);
+}
+
+/* Aktywny tab: wyróżniony NIE tylko kolorem (WCAG 1.4.1) — dochodzi złote
+ * podkreślenie i mocniejszy tekst. aria-selected niesie stan dla AT. */
+.tab.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: var(--weight-bold);
+}
+
+/* ============================================================================
+ * c) OBSZAR TREŚCI (tabpanels / tabpanel)
+ * ========================================================================== */
+.tabpanels {
+  /* Pozostałe odstępy/szerokość niesie .container; tu tylko zapas u dołu. */
+  padding-bottom: var(--space-5);
+}
+
+/* Panel zakładki. Ukrywanie ([hidden]) obsługuje base.css. Pierścień fokusa
+ * całego panelu prowadzimy do wewnątrz, by nie był przycinany na krawędzi okna. */
+.tabpanel:focus-visible {
+  outline-offset: -2px;
+}
+
+/* ---- Siatka kart (reużywalna, JEDYNE źródło układu siatek) -------------- */
+/* Wspólny układ responsywny dla treści KAŻDEJ zakładki: 1 kolumna na wąskich
+ * ekranach, 2+ tam, gdzie starczy szerokości. JEDEN szablon dla wszystkich
+ * siatek (auto-fill, minmax(15rem,1fr)), więc szerokość karty jest stała przy
+ * przełączaniu zakładek. Panele NIE nadają już własnych stylów inline —
+ * edycja tego bloku (lub tokenów) jest jedynym miejscem sterowania siatkami. */
+.card-grid,
+.building-grid,
+.unit-grid,
+.target-list,
+.report-list,
+.save-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: var(--space-3);
+  align-items: stretch;
+}
+
+/* Jednolita powierzchnia karty dla wszystkich zakładek (var(--panel-2)) —
+ * budynki, jednostki, cele i karty zapisu wyglądają identycznie niezależnie od
+ * sekcji. (Raporty zachowują kolorową lewą krawędź jako wskaźnik wyniku, więc
+ * mają tło ustawione osobno w base.css, ale ten sam token.) */
+.card,
+.building-card,
+.unit-card,
+.target,
+.save-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background-color: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* ============================================================================
+ * d) STOPKA — base.css nadaje margin/centrowanie; dodajemy delikatny obrys
+ *    oddzielający ją od treści.
+ * ========================================================================== */
+.app-footer {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-4);
+}
+
+/* ============================================================================
+ * Responsywność
+ * ========================================================================== */
+/* Telefony (<640px): sticky HUD nie może zjadać wysokości treści przy każdym
+ * przewinięciu. Kompaktujemy go do maks. ~2 wierszy — chowamy seed, ścieśniamy
+ * chipy, usuwamy paski zapełnienia (wartość liczbowa „użyte / limit" nadal niesie
+ * tę informację tekstem) i pozwalamy statystykom dzielić jeden rząd. */
+@media (max-width: 639.98px) {
+  .hud-inner {
+    gap: var(--space-2) var(--space-3);
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
+  }
+
+  .hud-seed {
+    display: none;
+  }
+
+  .hud-res {
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+  }
+
+  /* Statystyki w jednym rzędzie: etykieta i wartość obok siebie, bez paska. */
+  .hud-stat {
+    flex-direction: row;
+    align-items: baseline;
+    gap: var(--space-1);
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .hud-bar {
+    display: none;
+  }
+}
+
+/* Desktop: HUD dostaje trochę luźniejsze wnętrze; reszta (siatka kart, taby)
+ * dostosowuje się sama dzięki auto-fill / flex-wrap, bez sztywnych breakpointów. */
+@media (min-width: 640px) {
+  .hud-inner {
+    gap: var(--space-3) var(--space-6);
+  }
+
+  .hud-title {
+    font-size: var(--text-xl);
+  }
+
+  /* Statystyki nie muszą się już rozpychać — trzymają naturalną szerokość. */
+  .hud-stats {
+    flex: 0 0 auto;
+  }
+}
+
+/* ============================================================================
+ * Ograniczony ruch — globalny wyłącznik animacji/przejść jest w base.css.
+ * Tu jawnie wyłączamy płynne przewijanie tablisty (np. focus-into-view).
+ * ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  .tabs.container {
+    scroll-behavior: auto;
+  }
+}

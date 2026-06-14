@@ -90,4 +90,10 @@
   --z-sticky: 100;
   --z-overlay: 1000;
   --z-toast: 2000;
+
+  /* ---- Układ: wysokość sticky HUD-a ------------------------------------- */
+  /* Rezerwa na przyklejony pasek u góry — używana przez scroll-padding-top, by
+   * fokus przewinięty „do góry" nie chował się POD HUD-em (WCAG 2.2 SC 2.4.11).
+   * Wartość z zapasem pokrywa HUD także po zawinięciu na wąskich ekranach. */
+  --hud-h: 5.5rem;
 }

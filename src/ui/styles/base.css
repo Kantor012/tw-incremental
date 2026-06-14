@@ -859,6 +859,8 @@ a:hover {
 }
 
 /* ---- Panel raportów --------------------------------------------------- */
+/* Tło karty ujednolicone z pozostałymi kartami dashboardu (var(--panel-2));
+ * kolorowa lewa krawędź (3px) pozostaje jako DODATKOWY wskaźnik wyniku. */
 .report-item {
   display: flex;
   flex-direction: column;
@@ -867,7 +869,7 @@ a:hover {
   border: 1px solid var(--border);
   border-left-width: 3px;
   border-radius: var(--radius-md);
-  background-color: var(--bg-2);
+  background-color: var(--panel-2);
   font-size: var(--text-sm);
 }
 

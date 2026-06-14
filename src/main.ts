@@ -1,5 +1,6 @@
 import './ui/styles/tokens.css'
 import './ui/styles/base.css'
+import './ui/styles/layout.css'
 
 import { createInitialState, GameStore, type GameState } from './engine/state'
 import {
@@ -89,7 +90,7 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.4.0',
+  version: '0.4.1',
   offlineSeconds,
 })
 
