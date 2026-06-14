@@ -1,10 +1,12 @@
 import { effect } from '../engine/store'
 import { RESOURCE_IDS, type ResourceId } from '../engine/state'
 import { formatNumber, formatInt, formatRate, formatTime } from '../engine/format'
-import type { GameStore } from '../engine/state'
+import type { GameStore, GameState } from '../engine/state'
 import type { GameBus } from '../engine/eventbus'
+import { D } from '../engine/decimal'
 import { BUILDING_IDS, BUILDINGS, type BuildingId } from '../content/buildings'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
+import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { nextCostAffordable } from '../systems/buildings'
 import {
   barracksUnlocked,
@@ -14,6 +16,14 @@ import {
   freePopulation,
   usedPopulation,
 } from '../systems/recruitment'
+import {
+  armyAttackPower,
+  armyDefensePower,
+  armyCarry,
+  battleOutcome,
+} from '../systems/combat'
+import { stationedUnits, marchTime, canAttack } from '../systems/marches'
+import { raidPower } from '../systems/raids'
 
 /**
  * Root view. Vanilla TS + DOM, no framework. Built once with createElement /
@@ -37,14 +47,25 @@ export interface AppContext {
   onBuild: (id: BuildingId) => boolean
   /** Queue `count` of a unit for training; returns true on success (spent + enqueued). */
   onRecruit: (id: UnitId, count: number) => boolean
+  /**
+   * Dispatch an army at a barbarian camp of `targetLevel`; returns true on a
+   * successful send (the march is queued and the dispatched units leave the home
+   * garrison until they return). Rejected (false) when {@link canAttack} fails.
+   */
+  onAttack: (targetLevel: number, units: Record<UnitId, number>) => boolean
   version: string
   offlineSeconds: number
 }
 
 const SVG_NS = 'http://www.w3.org/2000/svg'
 
-/** Polish display names per resource id. */
-const RESOURCE_NAMES: Record<string, string> = {
+/**
+ * Polish display names per resource id. Keyed by ResourceId (not `string`) so
+ * adding a 4th resource to RESOURCE_IDS is a COMPILE error here until its name is
+ * supplied — never a silent runtime `undefined` label. Mirrors the exhaustive
+ * discipline of {@link unitIcon}.
+ */
+const RESOURCE_NAMES: Record<ResourceId, string> = {
   wood: 'Drewno',
   clay: 'Glina',
   iron: 'Żelazo',
@@ -155,39 +176,54 @@ function shieldIcon(): SVGSVGElement {
   return svgIcon('0 0 48 48', 'Tarcza plemienna', 'shield', [face, shade, band, boss])
 }
 
-/** Procedural resource icon (wood log / clay brick / iron ingot). */
-function resourceIcon(id: string): SVGSVGElement {
-  if (id === 'wood') {
-    const body = svg('rect', { x: '5', y: '8', width: '15', height: '8', rx: '4', fill: '#8a5a2b' })
-    const endFace = svg('ellipse', { cx: '5', cy: '12', rx: '2', ry: '4', fill: '#a96f3a' })
-    const ring = svg('ellipse', {
-      cx: '5',
-      cy: '12',
-      rx: '1',
-      ry: '2',
-      fill: 'none',
-      stroke: '#6b431d',
-      'stroke-width': '0.8',
-    })
-    return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [body, endFace, ring])
+/**
+ * Procedural resource icon (wood log / clay brick / iron ingot).
+ *
+ * EXHAUSTIVE over ResourceId on purpose (mirrors {@link unitIcon}): adding a
+ * resource to RESOURCE_IDS without an icon branch here is a COMPILE error (the
+ * `never` assignment in `default`), not a silent fallback to the iron glyph. This
+ * keeps the data-driven contract — "adding a resource is a data edit" — honest for
+ * the UI: the new resource must be given an explicit icon + name, never mislabelled.
+ */
+function resourceIcon(id: ResourceId): SVGSVGElement {
+  switch (id) {
+    case 'wood': {
+      const body = svg('rect', { x: '5', y: '8', width: '15', height: '8', rx: '4', fill: '#8a5a2b' })
+      const endFace = svg('ellipse', { cx: '5', cy: '12', rx: '2', ry: '4', fill: '#a96f3a' })
+      const ring = svg('ellipse', {
+        cx: '5',
+        cy: '12',
+        rx: '1',
+        ry: '2',
+        fill: 'none',
+        stroke: '#6b431d',
+        'stroke-width': '0.8',
+      })
+      return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [body, endFace, ring])
+    }
+    case 'clay': {
+      const block = svg('rect', { x: '3', y: '7', width: '18', height: '10', rx: '1.5', fill: '#c1663b' })
+      const groove = (d: string): SVGElement =>
+        svg('path', { d, stroke: '#7e3d22', 'stroke-width': '1', fill: 'none' })
+      return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [
+        block,
+        groove('M3 12h18'),
+        groove('M12 7v5'),
+        groove('M8 12v5'),
+        groove('M16 12v5'),
+      ])
+    }
+    case 'iron': {
+      const body = svg('path', { d: 'M5 16 19 16 17 9 7 9Z', fill: '#9aa3ad' })
+      const top = svg('path', { d: 'M7 9 17 9 15.5 7 8.5 7Z', fill: '#c6cdd5' })
+      const shine = svg('path', { d: 'M8 14 16 14', stroke: '#6b7682', 'stroke-width': '1', fill: 'none' })
+      return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [body, top, shine])
+    }
+    default: {
+      const _exhaustive: never = id
+      throw new Error('Brak ikony dla surowca: ' + String(_exhaustive))
+    }
   }
-  if (id === 'clay') {
-    const block = svg('rect', { x: '3', y: '7', width: '18', height: '10', rx: '1.5', fill: '#c1663b' })
-    const groove = (d: string): SVGElement =>
-      svg('path', { d, stroke: '#7e3d22', 'stroke-width': '1', fill: 'none' })
-    return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [
-      block,
-      groove('M3 12h18'),
-      groove('M12 7v5'),
-      groove('M8 12v5'),
-      groove('M16 12v5'),
-    ])
-  }
-  // iron ingot
-  const body = svg('path', { d: 'M5 16 19 16 17 9 7 9Z', fill: '#9aa3ad' })
-  const top = svg('path', { d: 'M7 9 17 9 15.5 7 8.5 7Z', fill: '#c6cdd5' })
-  const shine = svg('path', { d: 'M8 14 16 14', stroke: '#6b7682', 'stroke-width': '1', fill: 'none' })
-  return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [body, top, shine])
 }
 
 /**
@@ -521,6 +557,253 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
   container.appendChild(recPanel)
   let lastQueueSig = ''
 
+  // ---- c3) Expeditions panel (attacks on barbarian camps) -------------------
+  // A fixed window of camp tiers is shown at once; the window slides with the
+  // player's reach (see update()), so the DOM rows are built ONCE and only their
+  // text/state is poked per frame — the same no-rebuild discipline as everywhere.
+  const TARGET_WINDOW = 6
+
+  const expPanel = h('section', 'panel')
+  expPanel.setAttribute('aria-labelledby', 'exp-title')
+  const expTitle = h('h2', 'panel-title', 'Wyprawy')
+  expTitle.id = 'exp-title'
+  expPanel.appendChild(expTitle)
+
+  // Unlock / garrison status line (live).
+  const expStatus = h('p', 'recruit-status muted')
+  expStatus.setAttribute('role', 'status')
+  expStatus.setAttribute('aria-live', 'polite')
+  expPanel.appendChild(expStatus)
+
+  // Army composer: one count input per unit type + send-all / clear helpers.
+  expPanel.appendChild(h('h3', 'recruit-subtitle', 'Skład wyprawy'))
+  const composer = h('div', 'army-picker')
+  const armyPicks = {} as Record<UnitId, { input: HTMLInputElement; avail: HTMLElement }>
+  for (const id of UNIT_IDS) {
+    const def = UNITS[id]
+    const pick = h('div', 'army-pick')
+
+    const labelRow = h('span', 'army-pick-label')
+    const iconWrap = h('span', 'res-icon-wrap')
+    iconWrap.appendChild(unitIcon(id))
+    labelRow.appendChild(iconWrap)
+    labelRow.appendChild(document.createTextNode(' ' + def.name))
+
+    const avail = h('span', 'army-pick-avail num muted')
+
+    const input = h('input', 'recruit-count num')
+    input.type = 'number'
+    input.min = '0'
+    input.step = '1'
+    input.value = '0'
+    input.inputMode = 'numeric'
+    input.setAttribute('aria-label', 'Liczba do wysłania: ' + def.name)
+    // The typed army does not bump the store revision, so refresh on direct input.
+    input.addEventListener('input', () => update())
+
+    pick.appendChild(labelRow)
+    pick.appendChild(avail)
+    pick.appendChild(input)
+    composer.appendChild(pick)
+    armyPicks[id] = { input, avail }
+  }
+  expPanel.appendChild(composer)
+
+  const composerActions = h('div', 'recruit-controls')
+  const sendAllBtn = h('button', 'btn btn-ghost', 'Wyślij wszystkie dostępne')
+  sendAllBtn.type = 'button'
+  sendAllBtn.addEventListener('click', () => {
+    const home = stationedUnits(ctx.store.state)
+    for (const id of UNIT_IDS) armyPicks[id].input.value = String(home[id])
+    update()
+  })
+  const clearAllBtn = h('button', 'btn btn-ghost', 'Wyczyść')
+  clearAllBtn.type = 'button'
+  clearAllBtn.addEventListener('click', () => {
+    for (const id of UNIT_IDS) armyPicks[id].input.value = '0'
+    update()
+  })
+  composerActions.appendChild(sendAllBtn)
+  composerActions.appendChild(clearAllBtn)
+  expPanel.appendChild(composerActions)
+
+  const expSummary = h('p', 'attack-summary muted')
+  expSummary.setAttribute('role', 'status')
+  expSummary.setAttribute('aria-live', 'polite')
+  expPanel.appendChild(expSummary)
+
+  /**
+   * Read the composed army from the inputs, clamped per-type to the units currently
+   * AT HOME (stationedUnits). Clamping here means the request can never exceed the
+   * garrison, so canAttack only ever gates on the barracks unlock / an empty army —
+   * the displayed estimates, the button verdict and the actual dispatch can never
+   * disagree.
+   */
+  const readArmy = (s: GameState): Record<UnitId, number> => {
+    const home = stationedUnits(s)
+    const army = {} as Record<UnitId, number>
+    for (const id of UNIT_IDS) {
+      const parsed = Math.floor(Number(armyPicks[id].input.value))
+      const v = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+      army[id] = Math.min(v, home[id])
+    }
+    return army
+  }
+  const armySize = (army: Record<UnitId, number>): number => {
+    let n = 0
+    for (const id of UNIT_IDS) n += army[id]
+    return n
+  }
+
+  // Feedback for the last attack attempt (success or the canAttack reason).
+  const expMsg = h('p', 'recruit-msg muted')
+  expMsg.setAttribute('role', 'status')
+  expMsg.setAttribute('aria-live', 'polite')
+
+  // Target list — a fixed window of rows whose levels shift with the player's reach.
+  expPanel.appendChild(h('h3', 'recruit-subtitle', 'Cele'))
+  const targetList = h('div', 'target-list')
+  expPanel.appendChild(targetList)
+
+  interface TargetRowRefs {
+    level: HTMLElement
+    defense: HTMLElement
+    loot: HTMLElement
+    march: HTMLElement
+    forecast: HTMLElement
+    button: HTMLButtonElement
+  }
+  const targetRows: TargetRowRefs[] = []
+  // Current level shown in each row (updated per frame); the click handler reads
+  // THIS so a row always attacks the tier it is currently displaying.
+  const rowLevels: number[] = []
+  for (let i = 0; i < TARGET_WINDOW; i++) {
+    rowLevels.push(i + 1)
+    const row = h('div', 'target')
+
+    const head = h('div', 'target-head')
+    head.appendChild(h('span', 'target-name', 'Obóz barbarzyńców'))
+    const level = h('span', 'target-level num')
+    head.appendChild(level)
+
+    const statsLine = h('p', 'target-stats muted')
+    const defense = h('span', 'num')
+    const loot = h('span', 'num')
+    const march = h('span', 'num')
+    statsLine.appendChild(document.createTextNode('Obrona '))
+    statsLine.appendChild(defense)
+    statsLine.appendChild(document.createTextNode(' · Łup '))
+    statsLine.appendChild(loot)
+    statsLine.appendChild(document.createTextNode(' · Marsz '))
+    statsLine.appendChild(march)
+
+    const bottom = h('div', 'target-bottom')
+    const forecast = h('span', 'target-forecast')
+    const button = h('button', 'btn', 'Atakuj')
+    button.type = 'button'
+    // aria-disabled (not `disabled`) keeps the control focusable/hoverable so its
+    // reason tooltip + aria-live message reach the user; the handler stays a guarded
+    // no-op when canAttack rejects (mirrors the recruitment panel).
+    button.addEventListener('click', () => {
+      const s = ctx.store.state
+      const lvl = rowLevels[i]
+      const army = readArmy(s)
+      const verdict = canAttack(s, lvl, army)
+      if (!verdict.ok) {
+        expMsg.textContent = verdict.reason ?? 'Nie można wysłać wyprawy.'
+        update()
+        return
+      }
+      const target = barbarianTarget(lvl)
+      const outcome = battleOutcome(armyAttackPower(army), target.defensePower)
+      // Guard against accidentally throwing the whole army at a camp it will lose to.
+      if (
+        !outcome.attackerWins &&
+        !window.confirm(
+          'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
+        )
+      ) {
+        return
+      }
+      const ok = ctx.onAttack(lvl, army)
+      if (ok) {
+        expMsg.textContent = 'Wysłano wyprawę: ' + target.name + '.'
+        for (const uid of UNIT_IDS) armyPicks[uid].input.value = '0'
+      } else {
+        expMsg.textContent = 'Nie udało się wysłać wyprawy.'
+      }
+      update()
+    })
+    bottom.appendChild(forecast)
+    bottom.appendChild(button)
+
+    row.appendChild(head)
+    row.appendChild(statsLine)
+    row.appendChild(bottom)
+    targetList.appendChild(row)
+    targetRows.push({ level, defense, loot, march, forecast, button })
+  }
+  expPanel.appendChild(expMsg)
+
+  // Marches in progress (rebuilt only when their signature changes).
+  expPanel.appendChild(h('h3', 'recruit-subtitle', 'Marsze w toku'))
+  const marchList = h('ul', 'march-list')
+  expPanel.appendChild(marchList)
+  let lastMarchSig = ''
+
+  container.appendChild(expPanel)
+
+  // ---- c4) Defense panel (incoming raids) -----------------------------------
+  const defPanel = h('section', 'panel')
+  defPanel.setAttribute('aria-labelledby', 'def-title')
+  const defTitle = h('h2', 'panel-title', 'Obrona')
+  defTitle.id = 'def-title'
+  defPanel.appendChild(defTitle)
+
+  const defStats = h('div', 'building-stats')
+  const mkDefStat = (label: string): { wrap: HTMLElement; val: HTMLElement } => {
+    const wrap = h('div', 'stat')
+    wrap.appendChild(h('span', 'stat-label muted', label))
+    const val = h('span', 'num stat-val')
+    wrap.appendChild(val)
+    return { wrap, val }
+  }
+  const raidEtaStat = mkDefStat('Następny najazd')
+  const homeDefStat = mkDefStat('Obrona domowa')
+  const raidPowerStat = mkDefStat('Siła najazdu')
+  defStats.appendChild(raidEtaStat.wrap)
+  defStats.appendChild(homeDefStat.wrap)
+  defStats.appendChild(raidPowerStat.wrap)
+  defPanel.appendChild(defStats)
+
+  // Defence-vs-threat bar. Colour is never the sole cue: a glyph + worded verdict
+  // (below) carries the same information for colour-blind / greyscale users.
+  const defBar = h('div', 'bar defense-bar')
+  defBar.setAttribute('role', 'progressbar')
+  defBar.setAttribute('aria-valuemin', '0')
+  defBar.setAttribute('aria-valuemax', '100')
+  defBar.setAttribute('aria-label', 'Obrona domowa względem siły najazdu')
+  defBar.appendChild(h('i'))
+  defPanel.appendChild(defBar)
+
+  const defVerdict = h('p', 'defense-verdict')
+  defVerdict.setAttribute('role', 'status')
+  defVerdict.setAttribute('aria-live', 'polite')
+  defPanel.appendChild(defVerdict)
+
+  container.appendChild(defPanel)
+
+  // ---- c5) Battle reports panel ---------------------------------------------
+  const repPanel = h('section', 'panel')
+  repPanel.setAttribute('aria-labelledby', 'rep-title')
+  const repTitle = h('h2', 'panel-title', 'Raporty')
+  repTitle.id = 'rep-title'
+  repPanel.appendChild(repTitle)
+  const reportList = h('ul', 'report-list')
+  repPanel.appendChild(reportList)
+  let lastReportSig = ''
+  container.appendChild(repPanel)
+
   // ---- d) Save panel: export / import / reset -------------------------------
   const savePanel = h('section', 'panel')
   savePanel.setAttribute('aria-labelledby', 'save-title')
@@ -711,6 +994,209 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
           const eta = i === 0 ? 'następny za ' + formatTime(o.remaining) : 'w kolejce'
           li.appendChild(h('span', 'queue-eta num muted', eta))
           queueList.appendChild(li)
+        }
+      }
+    }
+
+    // ---- Expeditions ----
+    const expUnlocked = barracksUnlocked(s)
+    const home = stationedUnits(s)
+    const army = readArmy(s)
+    const composed = armySize(army)
+    const carry = armyCarry(army)
+    const atkPow = armyAttackPower(army)
+    const atkHomePow = armyAttackPower(home)
+
+    let homeSum = 0
+    for (const id of UNIT_IDS) homeSum += home[id]
+    let awaySum = 0
+    for (const m of s.marches) for (const id of UNIT_IDS) awaySum += m.units[id]
+
+    expStatus.textContent = expUnlocked
+      ? 'W domu: ' + formatInt(homeSum) + ' jedn. · na marszach: ' + formatInt(awaySum)
+      : 'Zbuduj Koszary (poziom 1), aby wysyłać wyprawy.'
+
+    for (const id of UNIT_IDS) {
+      const pick = armyPicks[id]
+      pick.avail.textContent = 'dostępne: ' + formatInt(home[id])
+      pick.input.max = String(home[id])
+      pick.input.disabled = !expUnlocked || home[id] <= 0
+      // Self-correct an over-cap entry down to the garrison size (rare; only when a
+      // value already exceeds what's at home — never touches an in-range entry, so
+      // typing is undisturbed).
+      const cur = Math.floor(Number(pick.input.value))
+      if (Number.isFinite(cur) && cur > home[id]) pick.input.value = String(home[id])
+    }
+
+    expSummary.textContent =
+      composed > 0
+        ? 'Wyślesz ' +
+          formatInt(composed) +
+          ' jedn. · atak ' +
+          formatInt(atkPow) +
+          ' · udźwig ' +
+          formatInt(carry)
+        : 'Wybierz jednostki do wysłania.'
+    sendAllBtn.disabled = !expUnlocked || homeSum <= 0
+    clearAllBtn.disabled = composed <= 0
+
+    // Slide the visible window so it sits around the highest beatable tier (camp
+    // defence grows monotonically, so the scan can break early). Always shows one
+    // tier below the player's reach plus several aspirational tiers above.
+    let best = 0
+    for (let l = 1; l <= MAX_TARGET_LEVEL; l++) {
+      if (barbarianTarget(l).defensePower < atkHomePow) best = l
+      else break
+    }
+    let start = Math.max(1, best) - 1
+    if (start < 1) start = 1
+    if (start > MAX_TARGET_LEVEL - TARGET_WINDOW + 1) start = MAX_TARGET_LEVEL - TARGET_WINDOW + 1
+    if (start < 1) start = 1
+
+    for (let i = 0; i < TARGET_WINDOW; i++) {
+      const lvl = start + i
+      rowLevels[i] = lvl
+      const target = barbarianTarget(lvl)
+      const tr = targetRows[i]
+      tr.level.textContent = 'poz. ' + lvl
+      tr.defense.textContent = formatInt(target.defensePower)
+
+      const totalLoot = target.loot.wood.add(target.loot.clay).add(target.loot.iron)
+      if (composed > 0) {
+        // Haul = min(army carry, total camp loot) — the exact sum computeLoot lands.
+        const cd = D(carry)
+        const haul = cd.lt(totalLoot) ? cd : totalLoot
+        tr.loot.textContent = formatInt(haul)
+        tr.march.textContent = formatTime(marchTime(s, lvl, army))
+        const oc = battleOutcome(atkPow, target.defensePower)
+        const pct = Math.round(oc.attackerLossFrac * 100)
+        tr.forecast.textContent = oc.attackerWins
+          ? '✓ wygrana · straty ~' + pct + '%'
+          : '✗ porażka'
+        tr.forecast.classList.toggle('forecast-win', oc.attackerWins)
+        tr.forecast.classList.toggle('forecast-lose', !oc.attackerWins)
+      } else {
+        tr.loot.textContent = 'do ' + formatInt(totalLoot)
+        tr.march.textContent = '—'
+        tr.forecast.textContent = '—'
+        tr.forecast.classList.remove('forecast-win', 'forecast-lose')
+      }
+
+      const verdict = canAttack(s, lvl, army)
+      tr.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
+      tr.button.title = verdict.ok ? '' : (verdict.reason ?? '')
+      tr.button.setAttribute('aria-label', 'Atakuj obóz barbarzyńców (poziom ' + lvl + ')')
+    }
+
+    // Marches in progress — rebuilt only when their signature (level / phase /
+    // whole-second ETA / composition) changes, so the steady state is poke-free.
+    const marchSig = s.marches
+      .map(
+        (m) =>
+          m.targetLevel +
+          ':' +
+          m.phase +
+          ':' +
+          Math.ceil(m.remaining) +
+          ':' +
+          UNIT_IDS.map((id) => m.units[id]).join(','),
+      )
+      .join('|')
+    if (marchSig !== lastMarchSig) {
+      lastMarchSig = marchSig
+      marchList.textContent = ''
+      if (s.marches.length === 0) {
+        marchList.appendChild(h('li', 'queue-empty muted', 'Brak marszów w toku.'))
+      } else {
+        for (const m of s.marches) {
+          const li = h(
+            'li',
+            'march-item ' + (m.phase === 'returning' ? 'is-returning' : 'is-outbound'),
+          )
+          const main = h('div', 'march-main')
+          main.appendChild(h('span', 'march-target', barbarianTarget(m.targetLevel).name))
+          // Phase is conveyed by an arrow glyph AND a word — never colour alone.
+          main.appendChild(
+            h('span', 'march-phase', m.phase === 'outbound' ? '→ w drodze' : '← powrót'),
+          )
+          li.appendChild(main)
+
+          const parts: string[] = []
+          for (const id of UNIT_IDS) {
+            if (m.units[id] > 0) parts.push(UNITS[id].name + ' ×' + m.units[id])
+          }
+          const sub = h('div', 'march-sub muted')
+          sub.appendChild(h('span', 'march-units', parts.join(', ') || '—'))
+          sub.appendChild(h('span', 'march-eta num', formatTime(m.remaining)))
+          li.appendChild(sub)
+          marchList.appendChild(li)
+        }
+      }
+    }
+
+    // ---- Defence (incoming raids) ----
+    raidEtaStat.val.textContent = formatTime(s.raidTimer)
+    const homeDef = armyDefensePower(home)
+    const threat = raidPower(s)
+    homeDefStat.val.textContent = formatInt(homeDef)
+    raidPowerStat.val.textContent = formatInt(Math.round(threat))
+
+    let defPct = 0
+    if (threat > 0) {
+      const raw = (homeDef / threat) * 100
+      defPct = Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 100
+    }
+    const defFill = defBar.firstElementChild as HTMLElement | null
+    if (defFill) defFill.style.width = defPct + '%'
+    defBar.setAttribute('aria-valuenow', Math.round(defPct).toString())
+    // A raid (the attacker) wins only when its power strictly exceeds the garrison,
+    // so a tie still repels it — mirror battleOutcome's verdict exactly.
+    const safe = homeDef >= threat
+    defBar.classList.toggle('is-good', safe)
+    defBar.classList.toggle('is-bad', !safe)
+    defVerdict.textContent = safe
+      ? '✓ Osada powinna odeprzeć najazd.'
+      : '✗ Osada zagrożona — wzmocnij obronę domową.'
+    defVerdict.classList.toggle('text-good', safe)
+    defVerdict.classList.toggle('text-bad', !safe)
+
+    // Battle reports — newest first, rebuilt only when the log signature changes.
+    const repSig =
+      s.battleLog.length +
+      '#' +
+      s.battleLog
+        .map((r) =>
+          r.kind === 'attack'
+            ? 'a' + r.targetLevel + (r.won ? '1' : '0') + r.lootSum + r.losses
+            : 'r' + (r.won ? '1' : '0') + r.looted + r.losses,
+        )
+        .join('|')
+    if (repSig !== lastReportSig) {
+      lastReportSig = repSig
+      reportList.textContent = ''
+      if (s.battleLog.length === 0) {
+        reportList.appendChild(h('li', 'queue-empty muted', 'Brak raportów.'))
+      } else {
+        for (let i = s.battleLog.length - 1; i >= 0; i--) {
+          const r = s.battleLog[i]
+          const li = h('li', 'report-item ' + (r.won ? 'report-win' : 'report-lose'))
+          let title: string
+          let detail: string
+          if (r.kind === 'attack') {
+            title =
+              (r.won ? '✓ Zwycięstwo' : '✗ Porażka') +
+              ' · ' +
+              barbarianTarget(r.targetLevel).name
+            detail = 'Łup ' + formatInt(r.lootSum) + ' · Straty ' + formatInt(r.losses)
+          } else {
+            title = r.won ? '✓ Najazd odparty' : '✗ Osada złupiona'
+            detail = r.won
+              ? 'Brak strat'
+              : 'Zrabowano ' + formatInt(r.looted) + ' · Straty ' + formatInt(r.losses)
+          }
+          li.appendChild(h('span', 'report-title', title))
+          li.appendChild(h('span', 'report-detail muted', detail))
+          reportList.appendChild(li)
         }
       }
     }

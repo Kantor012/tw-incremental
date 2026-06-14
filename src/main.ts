@@ -14,6 +14,7 @@ import { GameLoop } from './engine/loop'
 import { EventBus, type GameEvents } from './engine/eventbus'
 import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
+import { sendAttack } from './systems/marches'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -80,7 +81,15 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.3.0',
+  onAttack: (targetLevel: number, units: Record<UnitId, number>) => {
+    const ok = sendAttack(store.state, targetLevel, units)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
+  version: '0.4.0',
   offlineSeconds,
 })
 

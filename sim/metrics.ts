@@ -1,5 +1,10 @@
-import { ZERO, type Decimal } from '../src/engine/decimal'
-import { createInitialState, RESOURCE_IDS, type GameState } from '../src/engine/state'
+import { D, ZERO, type Decimal } from '../src/engine/decimal'
+import {
+  createInitialState,
+  RESOURCE_IDS,
+  type GameState,
+  type BattleReport,
+} from '../src/engine/state'
 import { BUILDING_IDS } from '../src/content/buildings'
 import { UNIT_IDS, type UnitId } from '../src/content/units'
 import { usedPopulation } from '../src/systems/recruitment'
@@ -43,12 +48,38 @@ export interface RunMetrics {
    */
   contentFrontierTick: number | null
   /**
-   * Sampled windows in which progress occurred (resources grew OR a build/recruit
-   * happened). Paired with {@link windowCount} for the no-plateau target.
+   * Sampled windows in which progress occurred (resources grew OR a
+   * build/recruit/attack happened). Paired with {@link windowCount} for no-plateau.
    */
   windowsWithProgress: number
   /** Number of sampled windows (the denominator for the no-plateau ratio). */
   windowCount: number
+
+  // --- M1.3 combat ---
+  /** Attacks the bot dispatched against barbarian camps over the run. */
+  attacksSent: number
+  /** Resolved attacks the player WON (camp cleared). */
+  battlesWon: number
+  /** Resolved attacks the player LOST (army wiped at the wall). */
+  battlesLost: number
+  /** Total loot HAULED home from won attacks, summed across resources (exact string). */
+  totalLoot: string
+  /** Incoming raids REPELLED with no loss (player won the defence). */
+  raidsSurvived: number
+  /** Incoming raids that GOT THROUGH (stole resources / killed garrison). */
+  raidsLost: number
+  /** Total resources STOLEN by successful raids, summed (exact string). */
+  raidStolen: string
+  /** Total own units lost to combat (battle casualties + raid casualties). */
+  unitsLost: number
+  /** Final army head-count (Σ {@link units}) — what survived to the end. */
+  finalArmyTotal: number
+  /**
+   * Whether the (now combat-dissolved) M1.2 content frontier was ever reached. In
+   * M1.3 this MUST be false in a long run — the recruit -> attack/raid -> recruit
+   * loop keeps the loop open without bound (see invariants.contentConsumed).
+   */
+  reachedContentFrontier: boolean
 }
 
 /** Per-run counters the runner threads into {@link collect}. */
@@ -60,6 +91,85 @@ export interface RunStats {
   unitsRecruited: Record<UnitId, number>
   /** First sampled tick at which the content frontier held, or null. */
   contentFrontierTick: number | null
+  /** Cumulative combat tally over the whole run (see {@link CombatStats}). */
+  combat: CombatStats
+}
+
+/**
+ * Running combat tally accumulated by the runner from the rolling battle log. Decimal
+ * sums (loot / stolen) are live {@link Decimal} here and serialised to exact strings
+ * by {@link collect}; everything else is a plain counter.
+ */
+export interface CombatStats {
+  attacksSent: number
+  battlesWon: number
+  battlesLost: number
+  totalLoot: Decimal
+  raidsSurvived: number
+  raidsLost: number
+  raidStolen: Decimal
+  unitsLost: number
+}
+
+/** A fresh zeroed combat tally. */
+export function emptyCombatStats(): CombatStats {
+  return {
+    attacksSent: 0,
+    battlesWon: 0,
+    battlesLost: 0,
+    totalLoot: ZERO,
+    raidsSurvived: 0,
+    raidsLost: 0,
+    raidStolen: ZERO,
+    unitsLost: 0,
+  }
+}
+
+/** Structural equality of two battle logs (plain JSON — no Decimals in a report). */
+function sameLog(a: BattleReport[], b: BattleReport[]): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
+}
+
+/**
+ * The battle reports appended to the rolling log between two snapshots.
+ *
+ * The log is append-then-trim-to-20 (see marches.pushBattleReport), so once it is at
+ * the cap a naive `length` delta undercounts. With dt=1 only a handful of events can
+ * occur per step (raids fire at most every 600s; a march emits one report when its
+ * outbound leg completes), far below the cap, so the number ADDED is small. We
+ * recover it as the smallest `k` for which appending `next`'s last `k` entries to
+ * `prev` and re-trimming reproduces `next` exactly. This is exact whenever the log is
+ * not yet full (`k = next.length - prev.length`); on a full, trimmed log the smallest
+ * `k` is the true count except in the degenerate case of an identical-entry suffix,
+ * where it can undercount by a few — acceptable here since these are reporting metrics
+ * / soft targets, not hard invariants (attacksSent is counted exactly elsewhere).
+ */
+export function newBattleReports(prev: BattleReport[], next: BattleReport[], cap = 20): BattleReport[] {
+  for (let k = 0; k <= next.length; k++) {
+    const added = next.slice(next.length - k)
+    const combined = prev.concat(added)
+    const trimmed = combined.slice(Math.max(0, combined.length - cap))
+    if (sameLog(trimmed, next)) return added
+  }
+  return next.slice() // unreachable in practice; treat all as new
+}
+
+/** Fold one battle report into a running {@link CombatStats} tally. */
+export function applyReport(c: CombatStats, r: BattleReport): void {
+  if (r.kind === 'attack') {
+    if (r.won) c.battlesWon += 1
+    else c.battlesLost += 1
+    c.totalLoot = c.totalLoot.add(D(r.lootSum))
+    c.unitsLost += r.losses
+  } else {
+    // raid: `won` is the PLAYER's view — true = repelled (survived), false = got through.
+    if (r.won) c.raidsSurvived += 1
+    else {
+      c.raidsLost += 1
+      c.raidStolen = c.raidStolen.add(D(r.looted))
+    }
+    c.unitsLost += r.losses
+  }
 }
 
 /** Total production/second across all resources (Decimal, exact). */
@@ -90,8 +200,10 @@ export function collect(
   const units: Record<string, number> = {}
   const unitsRecruited: Record<string, number> = {}
   let unitsRecruitedTotal = 0
+  let finalArmyTotal = 0
   for (const id of UNIT_IDS) {
     units[id] = state.units[id]
+    finalArmyTotal += state.units[id]
     unitsRecruited[id] = stats.unitsRecruited[id]
     unitsRecruitedTotal += stats.unitsRecruited[id]
   }
@@ -117,5 +229,16 @@ export function collect(
     contentFrontierTick: stats.contentFrontierTick,
     windowsWithProgress: stats.windowsWithProgress,
     windowCount: stats.windowCount,
+
+    attacksSent: stats.combat.attacksSent,
+    battlesWon: stats.combat.battlesWon,
+    battlesLost: stats.combat.battlesLost,
+    totalLoot: stats.combat.totalLoot.toString(),
+    raidsSurvived: stats.combat.raidsSurvived,
+    raidsLost: stats.combat.raidsLost,
+    raidStolen: stats.combat.raidStolen.toString(),
+    unitsLost: stats.combat.unitsLost,
+    finalArmyTotal,
+    reachedContentFrontier: stats.contentFrontierTick !== null,
   }
 }

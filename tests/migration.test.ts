@@ -37,10 +37,10 @@ function rawV1() {
 }
 
 describe('migration v1 -> current', () => {
-  it('migrate() chains v1->v2->v3: seeds buildings, popCap, units and the queue', () => {
+  it('migrate() chains v1->v2->v3->v4: seeds buildings, popCap, units, queue and combat', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(3)
+    expect(migrated.version).toBe(4)
     expect(migrated.version).toBe(SAVE_VERSION)
     expect(migrated.buildings).toEqual(INITIAL_BUILDINGS)
     expect(migrated.popCap instanceof Decimal).toBe(true)
@@ -48,6 +48,11 @@ describe('migration v1 -> current', () => {
     // v2->v3 fields added by the chained migration.
     expect(migrated.units).toEqual(INITIAL_UNITS)
     expect(migrated.recruitQueue).toEqual([])
+    // v3->v4 combat fields added by the chained migration.
+    expect(migrated.marches).toEqual([])
+    expect(migrated.battleLog).toEqual([])
+    expect(typeof migrated.raidTimer).toBe('number')
+    expect(migrated.raidTimer).toBeGreaterThan(0)
     // Pre-existing fields are carried through untouched.
     expect(migrated.seed).toBe('legacy')
     expect(migrated.resources.wood.toString()).toBe('100')
@@ -125,6 +130,51 @@ describe('migration v2 -> v3', () => {
   })
 })
 
+/**
+ * A raw v3 save: full economy + recruitment, but from before combat existed — no
+ * `marches`, no `battleLog`, no `raidTimer`. Exactly the fields the v3->v4
+ * migration must backfill.
+ */
+function rawV3() {
+  return {
+    version: 3,
+    seed: 'v3',
+    rngState: 7,
+    createdAt: 1000,
+    lastSeen: 2000,
+    resources: { wood: D(10), clay: D(20), iron: D(30) },
+    production: { wood: D(1), clay: D(0.8), iron: D(0.5) },
+    storageCap: D(4000),
+    popCap: D(22),
+    buildings: { hq: 1, sawmill: 1, clay_pit: 1, iron_mine: 1, warehouse: 1, farm: 1, barracks: 1 },
+    units: { spearman: 2, swordsman: 0, axeman: 1 },
+    recruitQueue: [],
+  }
+}
+
+describe('migration v3 -> v4', () => {
+  it('seeds empty marches, an empty battle log and an armed raid timer', () => {
+    const m = migrate(rawV3())
+
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.marches).toEqual([])
+    expect(m.battleLog).toEqual([])
+    expect(typeof m.raidTimer).toBe('number')
+    expect(m.raidTimer).toBeGreaterThan(0)
+    // Pre-existing recruitment state is carried through untouched.
+    expect(m.units).toEqual({ spearman: 2, swordsman: 0, axeman: 1 })
+    expect(m.buildings.barracks).toBe(1)
+  })
+
+  it('a migrated v3 save passes validateState', () => {
+    const v = validateState(migrate(rawV3()))
+    expect(v.version).toBe(SAVE_VERSION)
+    expect(Array.isArray(v.marches)).toBe(true)
+    expect(Array.isArray(v.battleLog)).toBe(true)
+    expect(v.raidTimer).toBeGreaterThanOrEqual(0)
+  })
+})
+
 describe('save v2 round-trip', () => {
   it('serialize(deserialize(serialize(s))) === serialize(s) for a fresh v2 state', () => {
     const state = createInitialState('rt', 5000)
@@ -163,6 +213,56 @@ describe('save v2 round-trip', () => {
     expect(restored.units).toEqual(state.units)
     expect(restored.recruitQueue).toEqual(state.recruitQueue)
     // Plain-number queue/units carry no Decimal tags, so the bytes match exactly.
+    expect(serialize(restored)).toBe(serialize(state))
+  })
+
+  it('faithfully round-trips a v4 save with active marches (Decimal loot) and a battle log', () => {
+    const state = createInitialState('combat', 11000)
+    state.buildings.barracks = 1
+    recomputeDerived(state)
+    state.units = { spearman: 4, swordsman: 0, axeman: 6 }
+    // A returning march carrying loot (Decimals) + an outbound march with zero loot.
+    state.marches = [
+      {
+        targetLevel: 3,
+        units: { spearman: 0, swordsman: 0, axeman: 5 },
+        phase: 'returning',
+        remaining: 42.5,
+        loot: { wood: D(120), clay: D(80), iron: D(15) },
+      },
+      {
+        targetLevel: 1,
+        units: { spearman: 2, swordsman: 0, axeman: 0 },
+        phase: 'outbound',
+        remaining: 18,
+        loot: { wood: D(0), clay: D(0), iron: D(0) },
+      },
+    ]
+    // Plain-JSON battle log (loot pre-summed to strings, no live Decimals).
+    state.battleLog = [
+      { kind: 'attack', targetLevel: 3, won: true, lootSum: '215', losses: 1 },
+      { kind: 'raid', won: false, looted: '60', losses: 2 },
+    ]
+    state.raidTimer = 333
+
+    // validateState accepts the populated combat state (no throw).
+    expect(validateState(state).version).toBe(SAVE_VERSION)
+
+    const restored = importSave(exportSave(state))
+    expect(restored.marches.length).toBe(2)
+    // Loot Decimals survive the {$d} tag round-trip.
+    expect(restored.marches[0].phase).toBe('returning')
+    expect(restored.marches[0].remaining).toBe(42.5)
+    expect(restored.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 5 })
+    expect(restored.marches[0].loot.wood.toString()).toBe('120')
+    expect(restored.marches[0].loot.clay.toString()).toBe('80')
+    expect(restored.marches[0].loot.iron.toString()).toBe('15')
+    expect(restored.marches[1].phase).toBe('outbound')
+    expect(restored.marches[1].loot.wood.toString()).toBe('0')
+    // Battle log is plain JSON, so deep-equals exactly.
+    expect(restored.battleLog).toEqual(state.battleLog)
+    expect(restored.raidTimer).toBe(333)
+    // Byte-identical round-trip: loot Decimals tagged, log/timers plain.
     expect(serialize(restored)).toBe(serialize(state))
   })
 })

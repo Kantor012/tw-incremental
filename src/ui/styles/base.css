@@ -696,6 +696,197 @@ a:hover {
   font-size: var(--text-sm);
 }
 
+/* ---- Panel wypraw (ataki na obozy) ------------------------------------ */
+/* Kompozytor armii — kolumny „typ jednostki: dostępne + liczba do wysłania". */
+.army-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.army-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 7rem;
+}
+
+.army-pick-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.army-pick-avail {
+  font-size: var(--text-xs);
+}
+
+/* Podsumowanie składanej wyprawy (siła ataku / udźwig). */
+.attack-summary {
+  font-size: var(--text-sm);
+  margin-top: var(--space-1);
+}
+
+/* Lista celów (okno paru poziomów wokół możliwości gracza). */
+.target-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.target {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+}
+
+.target + .target {
+  border-top: 1px solid var(--border);
+}
+
+.target-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.target-name {
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+
+.target-level {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.target-stats {
+  font-size: var(--text-xs);
+}
+
+.target-bottom {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* Prognoza walki. Kolor NIE jest jedynym wskaźnikiem (WCAG 1.4.1): towarzyszy mu
+   znak ✓/✗ oraz słowo („wygrana"/„porażka"). */
+.target-forecast {
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.forecast-win {
+  color: var(--good);
+}
+
+.forecast-lose {
+  color: var(--bad);
+}
+
+/* Marsze w toku — stos kart, sygnatura przebudowuje listę tylko przy zmianie. */
+.march-list,
+.report-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.march-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-2);
+  font-size: var(--text-sm);
+}
+
+/* Faza marszu sygnalizowana też kolorem lewej krawędzi (dodatek do strzałki+słowa). */
+.march-item.is-outbound {
+  border-left-color: var(--accent);
+}
+.march-item.is-returning {
+  border-left-color: var(--good);
+}
+
+.march-main {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.march-target {
+  color: var(--text);
+}
+
+.march-phase {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.march-sub {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+/* ---- Panel obrony ----------------------------------------------------- */
+.defense-bar {
+  margin-bottom: var(--space-2);
+}
+
+.defense-verdict {
+  font-size: var(--text-sm);
+}
+
+/* ---- Panel raportów --------------------------------------------------- */
+.report-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background-color: var(--bg-2);
+  font-size: var(--text-sm);
+}
+
+/* Wynik sygnalizowany znakiem ✓/✗ + słowem w tytule; kolor krawędzi to dodatek. */
+.report-win {
+  border-left-color: var(--good);
+}
+.report-lose {
+  border-left-color: var(--bad);
+}
+
+.report-title {
+  color: var(--text);
+}
+
+.report-detail {
+  font-size: var(--text-xs);
+}
+
 /* ---- Drobne narzędzia ------------------------------------------------- */
 .stack {
   display: flex;

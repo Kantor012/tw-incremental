@@ -55,14 +55,21 @@ export const UNITS: Record<UnitId, UnitDef> = {
   spearman: {
     id: 'spearman',
     name: 'Pikinier',
-    desc: 'Tania piechota obronna. Doskonały w obronie przed kawalerią.',
+    desc: 'Tania piechota obronna. Doskonały w obronie przed kawalerią; dźwiga też pokaźny łup.',
     cost: { wood: 50, clay: 30, iron: 10 },
     pop: 1,
     recruitSeconds: 80,
     attack: 10,
     defInfantry: 15,
     defCavalry: 45,
-    carry: 25,
+    // Carry is the lever that makes PvE attacks pay for themselves: loot is
+    // min(carry, camp loot), and the bot fields the cheapest unit (the Pikinier) as
+    // its raider, so its haul must beat the replacement cost of the ~30% attrition a
+    // win costs against the test-locked unit price (90). Tuned 25 -> 50 so a march
+    // nets resources instead of bleeding them (see CHANGELOG "Balance"). The other
+    // units' carry / the loot base are pinned by unit tests, so the Pikinier carries
+    // the loot economy until cavalry (a proper high-carry raider) arrives in M2+.
+    carry: 50,
     speed: 18,
   },
   swordsman: {

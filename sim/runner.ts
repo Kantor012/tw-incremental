@@ -1,21 +1,37 @@
-import { createInitialState, INITIAL_UNITS, type GameState } from '../src/engine/state'
+import {
+  createInitialState,
+  INITIAL_UNITS,
+  type GameState,
+  type BattleReport,
+} from '../src/engine/state'
 import { simulate } from '../src/engine/tick'
 import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
 import { recruit } from '../src/systems/recruitment'
+import { sendAttack } from '../src/systems/marches'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
   runInvariants,
+  checkArmyConsistency,
   checkRoundTrip,
   checkNoSoftlock,
   checkOfflineDeterminism,
+  checkMarchesTerminate,
   contentConsumed,
   totalResources,
   type InvariantResult,
 } from './invariants'
 import { chooseAction } from './bot'
-import { collect, type RunMetrics, type RunStats } from './metrics'
+import {
+  collect,
+  emptyCombatStats,
+  newBattleReports,
+  applyReport,
+  type CombatStats,
+  type RunMetrics,
+  type RunStats,
+} from './metrics'
 
 /**
  * Headless simulation runner. Drives the same `simulate` step the browser loop
@@ -43,10 +59,11 @@ const OFFLINE_CHECK_SECONDS = 3600
  */
 const MAX_ACTIONS_PER_STEP = 8
 
-/** What one {@link step} did: building upgrades bought + units ordered. */
+/** What one {@link step} did: building upgrades bought, units ordered, attacks sent. */
 interface StepResult {
   built: number
   recruited: number
+  attacked: number
 }
 
 /** Prefix invariant names with the phase that produced them, for the report. */
@@ -69,6 +86,7 @@ function emptyUnitCounts(): Record<UnitId, number> {
 function step(state: GameState, dt: number, recruited: Record<UnitId, number>): StepResult {
   let built = 0
   let rec = 0
+  let attacked = 0
   let actions = 0
   while (actions < MAX_ACTIONS_PER_STEP) {
     const action = chooseAction(state)
@@ -76,15 +94,19 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
     if (action.kind === 'build') {
       if (!build(state, action.id)) break
       built++
-    } else {
+    } else if (action.kind === 'recruit') {
       if (!recruit(state, action.unitId, action.count)) break
       recruited[action.unitId] += action.count
       rec += action.count
+    } else {
+      // attack: dispatch the home army at a barbarian camp (loot source + unit sink).
+      if (!sendAttack(state, action.targetLevel, action.units)) break
+      attacked++
     }
     actions++
   }
   simulate(state, dt)
-  return { built, recruited: rec }
+  return { built, recruited: rec, attacked }
 }
 
 /** What a continuous run yields: the final state, sampled invariants, counters. */
@@ -117,23 +139,35 @@ function runContinuous(
   let upgradesBought = 0
   let totalRecruited = 0
   const unitsRecruited = emptyUnitCounts()
-  // Progress actions (builds + recruits) since the last sample — a window with any
-  // action counts as progress even if the spend left the resource sum lower.
+  // Progress actions (builds + recruits + attacks) since the last sample — a window
+  // with any action counts as progress even if the spend left the resource sum lower.
   let actedInWindow = 0
   let windowsWithProgress = 0
   let windowCount = 0
   let contentFrontierTick: number | null = null
 
+  // Cumulative combat tally, folded from the rolling battle log each step. The log is
+  // trimmed to 20 entries, so we snapshot it before each step and diff afterwards
+  // ({@link newBattleReports}) to never miss a resolved battle / raid over a long run.
+  const combat: CombatStats = emptyCombatStats()
+  let prevLog: BattleReport[] = state.battleLog.slice()
+
   for (let i = 0; i < ticks; i++) {
-    const { built, recruited } = step(state, dt, unitsRecruited)
+    const { built, recruited, attacked } = step(state, dt, unitsRecruited)
     upgradesBought += built
     totalRecruited += recruited
-    actedInWindow += built + recruited
+    actedInWindow += built + recruited + attacked
+    combat.attacksSent += attacked
+
+    // Fold any battle / raid reports the step produced into the running tally.
+    for (const report of newBattleReports(prevLog, state.battleLog)) applyReport(combat, report)
+    prevLog = state.battleLog.slice()
 
     if (withInvariants && (i + 1) % SAMPLE_EVERY === 0) {
       const phase = `t${i + 1}`
       const grew = totalResources(state).gt(prevTotal)
       invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
       invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
@@ -150,6 +184,7 @@ function runContinuous(
 
   if (withInvariants) {
     invariants.push(...tag(runInvariants(state), 'final'))
+    invariants.push(...tag([checkArmyConsistency(state)], 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
     // Whole-run progress: any action ever taken, or resources above the start.
     invariants.push(
@@ -162,7 +197,14 @@ function runContinuous(
   return {
     state,
     invariants,
-    stats: { upgradesBought, windowsWithProgress, windowCount, unitsRecruited, contentFrontierTick },
+    stats: {
+      upgradesBought,
+      windowsWithProgress,
+      windowCount,
+      unitsRecruited,
+      contentFrontierTick,
+      combat,
+    },
   }
 }
 
@@ -185,10 +227,11 @@ function runSplit(seed: string, ticks: number, dt: number): GameState {
 
 /**
  * Run a single seed for `ticks` steps and assemble all invariants:
- *  - periodic + final resource/round-trip/no-softlock samples,
+ *  - periodic + final resource/army-consistency/round-trip/no-softlock samples,
  *  - 'save-load-continuation': continuous run vs split-with-save run,
  *  - 'determinism': two identical continuous runs must serialize equally,
- *  - 'offline-determinism': chunked offline catch-up vs one big step.
+ *  - 'offline-determinism': chunked offline catch-up vs one big step (combat-armed),
+ *  - 'marches-terminate': a dispatched army always resolves within bounded time.
  */
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
@@ -217,8 +260,14 @@ export function runOne(seed: string, ticks: number): RunResult {
     detail: serA === serB ? undefined : 'two identical runs of the same seed diverged',
   })
 
-  // Offline parity: one big catch-up step must equal the chunked offline path.
+  // Offline parity: one big catch-up step must equal the chunked offline path
+  // (now with a live training queue, an in-flight march AND active raids — see
+  // seedRecruitment) so the combat clocks are covered, not just linear production.
   invariants.push(checkOfflineDeterminism(seed, OFFLINE_CHECK_SECONDS))
+
+  // Marches always terminate: a dispatched army resolves and clears within bounded
+  // time, with finite non-negative `remaining` throughout (no stuck/looping march).
+  invariants.push(checkMarchesTerminate(seed))
 
   const metrics = collect(seed, ticks, ticks * dt, primary.state, primary.stats)
   const ok = invariants.every((r) => r.ok)

@@ -1,6 +1,6 @@
 import { Decimal, isFiniteDecimal } from './decimal'
 import type { GameState } from './state'
-import { recomputeDerived, INITIAL_BUILDINGS, INITIAL_UNITS } from './state'
+import { recomputeDerived, INITIAL_BUILDINGS, INITIAL_UNITS, RAID_BASE_INTERVAL } from './state'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
 
@@ -23,7 +23,7 @@ import { UNIT_IDS } from '../content/units'
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 3
+export const SAVE_VERSION = 4
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -112,6 +112,16 @@ export function migrate(raw: any): any {
       units: { ...INITIAL_UNITS },
       recruitQueue: [],
       version: 3,
+    }),
+    // v3 -> v4: combat (marches + raids). Seed the new fields a pre-combat save
+    // lacks: no armies in transit, an empty battle log, and the raid clock armed at
+    // its base interval so the first raid is a full interval away (never instant).
+    3: (s) => ({
+      ...s,
+      marches: [],
+      battleLog: [],
+      raidTimer: RAID_BASE_INTERVAL,
+      version: 4,
     }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
@@ -209,6 +219,70 @@ export function validateState(s: unknown): GameState {
         throw new Error(`save: invalid recruit order ${key}`)
       }
     }
+  }
+
+  // v4: marches must be a list of well-formed in-transit armies. importSave is
+  // reachable from arbitrary pasted input, so loot Decimals are value-checked
+  // (finite, non-negative) exactly like the resource pool — a NaN/negative haul
+  // would corrupt the economy on delivery and then get autosaved.
+  const { marches, battleLog, raidTimer } = s
+  if (!Array.isArray(marches)) throw new Error('save: invalid marches')
+  for (const m of marches) {
+    if (!isObject(m)) throw new Error('save: invalid march')
+    if (typeof m.targetLevel !== 'number' || !Number.isInteger(m.targetLevel) || m.targetLevel < 1) {
+      throw new Error('save: invalid march targetLevel')
+    }
+    if (m.phase !== 'outbound' && m.phase !== 'returning') {
+      throw new Error('save: invalid march phase')
+    }
+    if (typeof m.remaining !== 'number' || !Number.isFinite(m.remaining) || m.remaining < 0) {
+      throw new Error('save: invalid march remaining')
+    }
+    if (!isObject(m.units)) throw new Error('save: invalid march units')
+    for (const id of UNIT_IDS) {
+      const n = m.units[id]
+      if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+        throw new Error(`save: invalid march unit ${id}`)
+      }
+    }
+    if (!isObject(m.loot)) throw new Error('save: invalid march loot')
+    for (const id of REQUIRED_RESOURCES) {
+      const v = m.loot[id]
+      if (!(v instanceof Decimal) || !isFiniteDecimal(v) || v.lt(0)) {
+        throw new Error(`save: invalid march loot ${id}`)
+      }
+    }
+  }
+
+  // v4: battle log — a list of plain-JSON reports (no Decimals). Validate the
+  // discriminant and the shared fields; loot is a pre-summed string, never a number.
+  if (!Array.isArray(battleLog)) throw new Error('save: invalid battleLog')
+  for (const r of battleLog) {
+    if (!isObject(r)) throw new Error('save: invalid battle report')
+    if (r.kind !== 'attack' && r.kind !== 'raid') {
+      throw new Error('save: invalid battle report kind')
+    }
+    if (typeof r.won !== 'boolean') throw new Error('save: invalid battle report won')
+    if (typeof r.losses !== 'number' || !Number.isInteger(r.losses) || r.losses < 0) {
+      throw new Error('save: invalid battle report losses')
+    }
+    if (r.kind === 'attack') {
+      if (
+        typeof r.targetLevel !== 'number' ||
+        !Number.isInteger(r.targetLevel) ||
+        r.targetLevel < 1
+      ) {
+        throw new Error('save: invalid attack report targetLevel')
+      }
+      if (typeof r.lootSum !== 'string') throw new Error('save: invalid attack report lootSum')
+    } else if (typeof r.looted !== 'string') {
+      throw new Error('save: invalid raid report looted')
+    }
+  }
+
+  // v4: raid clock — a finite, non-negative number of seconds until the next raid.
+  if (typeof raidTimer !== 'number' || !Number.isFinite(raidTimer) || raidTimer < 0) {
+    throw new Error('save: invalid raidTimer')
   }
 
   return s as unknown as GameState

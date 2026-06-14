@@ -35,6 +35,56 @@ export interface RecruitOrder {
   perUnitSeconds: number
 }
 
+/**
+ * One army in transit to / from a barbarian camp (M1.3). Defined inline here (not
+ * in marches.ts) so the state shape — the single serialized source of truth — has
+ * no runtime dependency on a system module: marches.ts imports this TYPE back, and
+ * state.ts imports nothing from marches.ts, so there is no initialisation cycle.
+ *
+ * CONVENTION (documented once, used everywhere): `state.units` holds ALL living
+ * owned units — both at home AND currently away on a march. A march's `units` is
+ * the dispatched subset (still counted in `state.units`, so population/upkeep stays
+ * honest and a march can never let you over-recruit). "Units at home" is therefore
+ * a DERIVED quantity: `stationedUnits = state.units − Σ march.units` (see
+ * marches.ts). Casualties are subtracted from `state.units` at the moment they
+ * occur (battle resolution / a lost raid), never on dispatch. `units` counts are
+ * plain integers (like the roster); `loot` is on Decimal (the economy rule).
+ */
+export interface March {
+  /** Barbarian camp tier this army is attacking. */
+  targetLevel: number
+  /** The dispatched army, by unit id (a subset of the owned roster). */
+  units: Record<UnitId, number>
+  /** `outbound` = travelling to the camp; `returning` = hauling loot home. */
+  phase: 'outbound' | 'returning'
+  /** Seconds left until the current phase completes (advanced on the tick grid). */
+  remaining: number
+  /** Loot picked up at the camp, delivered on a successful return. On Decimal. */
+  loot: ResourceMap
+}
+
+/**
+ * One entry in the rolling battle log (last ~20 events). Plain JSON only — loot is
+ * pre-summed to a decimal STRING, never a live Decimal — so the log serializes and
+ * round-trips without any Decimal tagging. `won` is always from the PLAYER's point
+ * of view; `losses` is the total number of own units lost in the event.
+ */
+export type BattleReport =
+  | { kind: 'attack'; targetLevel: number; won: boolean; lootSum: string; losses: number }
+  | { kind: 'raid'; won: boolean; looted: string; losses: number }
+
+/**
+ * Base seconds between incoming barbarian raids. Owned here (not in raids.ts) so
+ * createInitialState and the save migration can seed `raidTimer` without importing
+ * a system module (which would form a cycle); raids.ts imports this constant the
+ * other way for re-arming. Generous (15 min) so a fresh village has breathing room
+ * and the recruitment unit tests — which simulate well under this span — never see
+ * a raid perturb their unit counts. Balance knob (the raid "interwał"): tuned up
+ * from 600s so raids read as a periodic threat rather than a relentless tax that
+ * leaves the standing army no room to accumulate — see CHANGELOG "Balance".
+ */
+export const RAID_BASE_INTERVAL = 900
+
 export interface GameState {
   /** Save schema version — drives migrations. */
   version: number
@@ -77,6 +127,23 @@ export interface GameState {
    * offline alike), so an order popping mid-tick is byte-identical across replays.
    */
   recruitQueue: RecruitOrder[]
+
+  /**
+   * Armies currently in transit (outbound to a camp or returning with loot).
+   * Advanced on the SAME fixed tick grid as recruitment (see tick.ts) so combat
+   * timing is identical online / offline / in the sim. See {@link March} for the
+   * "state.units = all owned" convention.
+   */
+  marches: March[]
+  /** Rolling log of the last ~20 battles (attacks + raids), newest last. */
+  battleLog: BattleReport[]
+  /**
+   * Seconds until the next incoming raid. Counts down only while the village is
+   * "worth raiding" (it has grown past its starting footprint — see raids.ts), so
+   * a brand-new hamlet is left alone. Re-armed to {@link RAID_BASE_INTERVAL} after
+   * each raid resolves.
+   */
+  raidTimer: number
 }
 
 /** Base storage cap before any warehouse levels. Storage scales with warehouse. */
@@ -163,6 +230,9 @@ export function createInitialState(seed: string, now: number): GameState {
     popCap: D(0),
     units: { ...INITIAL_UNITS },
     recruitQueue: [],
+    marches: [],
+    battleLog: [],
+    raidTimer: RAID_BASE_INTERVAL,
   }
   // Make production / storageCap / popCap consistent with the starting buildings.
   // With the initial level-1 economy this reproduces M0's base rates exactly.

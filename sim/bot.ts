@@ -9,6 +9,9 @@ import {
   recruitCost,
   freePopulation,
 } from '../src/systems/recruitment'
+import { stationedUnits } from '../src/systems/marches'
+import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from '../src/systems/combat'
+import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -22,6 +25,7 @@ import {
 export type BotAction =
   | { kind: 'build'; id: BuildingId }
   | { kind: 'recruit'; unitId: UnitId; count: number }
+  | { kind: 'attack'; targetLevel: number; units: Record<UnitId, number> }
 
 /**
  * Surplus multiplier for the build-vs-recruit tiebreak: when total resources reach
@@ -33,6 +37,25 @@ export type BotAction =
  * trains a handful of units, then resumes building (incl. the farm) to grow popCap.
  */
 const BUILD_RESERVE = 2
+
+/**
+ * Highest fraction of the attacking army the bot will accept losing on a raid of a
+ * barbarian camp. The bot picks the HIGHEST camp tier it beats while staying under
+ * this loss — so as the home army grows it graduates to richer, harder camps on its
+ * own (battleOutcome's super-linear loss curve makes a comfortable win nearly free
+ * and a narrow one ruinous, so this single knob both protects the army and steers it
+ * toward the most profitable winnable tier). Kept moderate so attacks net loot rather
+ * than throwing the army away.
+ */
+const MAX_ATTACK_LOSS = 0.35
+
+/**
+ * Smallest home army the bot will commit to an attack. Below this the army is too
+ * thin to be worth a march (and too thin to out-power even tier 1 with acceptable
+ * losses); the bot keeps recruiting instead. Acts as the accumulate-before-strike
+ * floor so the loop alternates "grow the stack" and "send it for loot".
+ */
+const STRIKE_MIN_ARMY = 8
 
 /** Sum of all resources — a coarse proxy used only for the build-vs-recruit gate. */
 function resourceSum(state: GameState): Decimal {
@@ -106,8 +129,57 @@ function cheapestRecruit(state: GameState): Extract<BotAction, { kind: 'recruit'
   return count >= 1 ? { kind: 'recruit', unitId: best, count } : null
 }
 
+/** Head-count of a home roster (units AT HOME, available to march). */
+function homeArmySize(home: Record<UnitId, number>): number {
+  let n = 0
+  for (const id of UNIT_IDS) n += home[id] ?? 0
+  return n
+}
+
+/**
+ * Pick an attack for the army currently AT HOME, or null when none is worthwhile.
+ *
+ * The loop's loot SOURCE (M1.3): scan the camp ladder from the top down and return
+ * the HIGHEST tier the home stack beats with losses under {@link MAX_ATTACK_LOSS}
+ * AND with at least one surviving hauler (carry > 0, so loot actually comes home).
+ * Sends the WHOLE home army — after dispatch the home is empty, so at most one attack
+ * is issued per step and the freshly-trained / returning units rebuild the stack for
+ * the next strike. Pure function of state (stationedUnits − catalogues), so it stays
+ * deterministic and safe for the no-softlock probe to call.
+ *
+ * Returns null when the barracks are locked, the home stack is below
+ * {@link STRIKE_MIN_ARMY}, or no tier is winnable within the loss budget.
+ */
+function chooseAttack(state: GameState): Extract<BotAction, { kind: 'attack' }> | null {
+  if (!barracksUnlocked(state)) return null
+  const home = stationedUnits(state)
+  if (homeArmySize(home) < STRIKE_MIN_ARMY) return null
+  const atkPower = armyAttackPower(home)
+  if (atkPower <= 0) return null
+  for (let lvl = MAX_TARGET_LEVEL; lvl >= 1; lvl--) {
+    const target = barbarianTarget(lvl)
+    const outcome = battleOutcome(atkPower, target.defensePower)
+    if (!outcome.attackerWins) continue
+    if (outcome.attackerLossFrac > MAX_ATTACK_LOSS) continue
+    // Survivors must still be able to carry loot home, else the march nets nothing.
+    if (armyCarry(applyLosses(home, outcome.attackerLossFrac)) <= 0) continue
+    return { kind: 'attack', targetLevel: lvl, units: home }
+  }
+  return null
+}
+
 /**
  * Choose the next action, or null when nothing is affordable / available.
+ *
+ * M1.3 strategy:
+ *  0. Build the BARRACKS first (recruitment + military gate), as in M1.2.
+ *  1. STRIKE: if a home stack of at least {@link STRIKE_MIN_ARMY} can beat a camp
+ *     within the loss budget, send it (the loot source + a unit sink via casualties).
+ *     This is given priority over economy so a ready army never idles — but because
+ *     the army is usually away or below the floor, the economy/recruit logic below
+ *     still runs most steps. The attack frees population via casualties and brings
+ *     loot, which finances the next wave: recruit -> attack -> loot -> recruit.
+ *  2. Otherwise fall back to the M1.2 economy logic.
  *
  * M1.2 strategy:
  *  1. Build the BARRACKS first (the recruitment gate) as soon as it is affordable —
@@ -128,6 +200,10 @@ export function chooseAction(state: GameState): BotAction | null {
     if (!b.maxed && b.affordable) return { kind: 'build', id: 'barracks' }
     // Can't afford the barracks yet — grow the economy via the cheapest build below.
   }
+
+  // M1.3: a ready home army strikes for loot before the economy spends below.
+  const attack = chooseAttack(state)
+  if (attack !== null) return attack
 
   const building = cheapestBuilding(state)
   const recruit = barracksUnlocked(state) ? cheapestRecruit(state) : null

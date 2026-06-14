@@ -51,25 +51,40 @@ export interface BalanceTargets {
    * rather than leaving the farm idle.
    */
   minPopulationUtil: number
+
+  // --- M1.3 combat goals (warnings) ---
+  /** The bot must WIN at least this many attacks on barbarian camps (loot source). */
+  minBattlesWon: number
+  /** Total loot hauled home from attacks must be at least this (the source is real). */
+  minLootHauled: number
+  /**
+   * At least this many incoming raids must be RESOLVED over the run (survived or
+   * not) — proof the raid defence system actually ran and was exercised.
+   */
+  minRaidsResolved: number
+  /**
+   * The combat-dissolved M1.2 content frontier must NOT be reached: the
+   * recruit -> attack/raid -> recruit loop keeps the loop open without bound, so a
+   * long run should never hit "all maxed + population permanently full". When true,
+   * a run that reports a frontier tick FAILS this (warning) target.
+   */
+  requireNoContentFrontier: boolean
 }
 
 export const TARGETS: BalanceTargets = {
-  // M1.2 added the recruitment SINK: once buildings start maxing, surplus resources
-  // are converted into units (bounded by the farm's popCap) instead of idling. This
-  // extends the progress loop past the building ceiling. The genuine end-of-content
-  // state is the CONTENT FRONTIER (every building maxed AND population permanently
-  // full — the sink is pop-bounded, so it caps the loop rather than opening it
-  // forever; the next, larger sink lands with M1.3 combat/expansion).
+  // M1.3 closed the loop with COMBAT: the recruitment sink is no longer pop-bounded
+  // because incoming raids continuously kill home units (freeing population) and
+  // outgoing attacks both take casualties (a unit sink) and haul LOOT (a resource
+  // source). The recruit -> attack/raid -> recruit loop is therefore self-propelling
+  // and the M1.2 content frontier (all buildings maxed + population permanently full)
+  // is DISSOLVED — it can never latch, because population is always being freed.
   //
-  // The Balance phase de-inflated the warehouse (perLevel 25000 -> 3000, cap 751000 ->
-  // 91000): the run is now bounded by CONTENT consumption, not by the slowest resource
-  // filling an oversized cap. The content frontier (all buildings maxed, population
-  // full) lands around tick ~49k for every seed. The budget intentionally runs a short
-  // stretch PAST it so the harness asserts checkNoSoftlock's content-aware exemption
-  // holds — at the frontier the terminal capped stall is a WARNING, not a commit
-  // blocker — without wasting tens of thousands of dead post-frontier windows (which
-  // would drag the no-plateau ratio down). 60k = frontier + ~22% headroom.
-  maxTicks: 60000,
+  // The budget is deliberately large (and well past the ~49k tick where M1.2 would
+  // have frontier'd) so the harness DEMONSTRATES the loop stays open: across 120k
+  // ticks the bot keeps winning battles, hauling loot and surviving raids with no
+  // content frontier ever reported. (Linear production over the fixed grid is exact
+  // on Decimal, so the longer span costs runtime only, not balance fidelity.)
+  maxTicks: 120000,
   tickSeconds: 1,
 
   // M1.1: data-driven buildings online. The greedy bot should sustain a steady
@@ -83,4 +98,16 @@ export const TARGETS: BalanceTargets = {
   minBarracksLevel: 1,
   minUnitsRecruited: 10,
   minPopulationUtil: 0.5,
+
+  // M1.3: combat online. The bot must win real battles, haul loot, weather raids,
+  // and keep the loop open with NO content frontier across the whole long budget.
+  // Floors raised from the placeholder >=1 to real regression guards, sized well
+  // below the measured healthy run (≈1811 wins / ≈554k loot / 133 raids over the
+  // 120k budget) so normal play passes but a curve regression — attacks that stop
+  // winning, or loot that no longer pays for the ~30% attrition a march costs —
+  // trips a warning. See CHANGELOG "Balance" for the before/after.
+  minBattlesWon: 500,
+  minLootHauled: 300000,
+  minRaidsResolved: 40,
+  requireNoContentFrontier: true,
 }

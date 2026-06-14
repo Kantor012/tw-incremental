@@ -8,8 +8,10 @@ import { UNIT_IDS } from '../src/content/units'
  * Sim harness CLI — `tsx sim/index.ts`.
  *
  * Runs several seeds for the budgeted number of ticks and prints a concise
- * report: hard-invariant PASS/FAIL (incl. no-softlock), per-seed progression
- * (upgrades bought, production growth, building levels) and the M1.1 balance
+ * report: hard-invariant PASS/FAIL (incl. army-consistency, no-softlock,
+ * marches-terminate), per-seed progression (upgrades, production, buildings),
+ * recruitment/population, the M1.3 combat loop (attacks won/lost, loot hauled,
+ * raids repelled/through, units lost, final army) and the M1.1/M1.2/M1.3 balance
  * targets as PASS/FAIL *warnings*.
  *
  * Exit code: non-zero iff any HARD invariant failed, so CI / a pre-commit gate
@@ -71,6 +73,28 @@ function evalTargets(r: RunResult): TargetCheck[] {
       name: 'population-util',
       ok: popUtil >= TARGETS.minPopulationUtil,
       detail: `${m.usedPopulation}/${m.popCap} pop used (${(popUtil * 100).toFixed(0)}%, target >= ${(TARGETS.minPopulationUtil * 100).toFixed(0)}%)`,
+    },
+    {
+      name: 'battles-won',
+      ok: m.battlesWon >= TARGETS.minBattlesWon,
+      detail: `won ${m.battlesWon} / lost ${m.battlesLost} attacks (target won >= ${TARGETS.minBattlesWon})`,
+    },
+    {
+      name: 'loot-hauled',
+      ok: D(m.totalLoot).gte(TARGETS.minLootHauled),
+      detail: `hauled ${m.totalLoot} from attacks (target >= ${TARGETS.minLootHauled})`,
+    },
+    {
+      name: 'raids-resolved',
+      ok: m.raidsSurvived + m.raidsLost >= TARGETS.minRaidsResolved,
+      detail: `${m.raidsSurvived} repelled / ${m.raidsLost} got through (target resolved >= ${TARGETS.minRaidsResolved})`,
+    },
+    {
+      name: 'no-content-frontier',
+      ok: !TARGETS.requireNoContentFrontier || !m.reachedContentFrontier,
+      detail: m.reachedContentFrontier
+        ? `frontier reached at tick ~${m.contentFrontierTick} (combat should keep the loop open!)`
+        : 'frontier never reached — combat keeps the loop self-propelling',
     },
   ]
 }
@@ -142,6 +166,20 @@ function main(): void {
   }
   console.log('')
 
+  // --- Combat per seed (M1.3 loop: attacks + raids) ---
+  console.log('--- Combat (end) ---')
+  console.log(
+    'seed     | attacks (won/lost) | loot hauled | raids (repelled/through) | stolen | units lost | final army',
+  )
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${m.attacksSent} (${m.battlesWon}/${m.battlesLost}) | ${m.totalLoot} | ` +
+        `${m.raidsSurvived}/${m.raidsLost} | ${m.raidStolen} | ${m.unitsLost} | ${m.finalArmyTotal}`,
+    )
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {
@@ -156,20 +194,23 @@ function main(): void {
   console.log('')
 
   // --- Content frontier (warning, not a failure) ---
-  // Reaching the frontier is the EXPECTED M1.2 ceiling, not a softlock; it does not
-  // affect the exit code. We surface it so it is visible that the next sink
-  // (combat / expansion / prestige) is what keeps the loop open beyond this point.
+  // M1.3 DISSOLVED the M1.2 frontier: combat is a perpetual unit sink (raid + battle
+  // casualties free population) and loot source, so the recruit -> attack/raid ->
+  // recruit loop never latches into "all maxed + population permanently full". A
+  // frontier here would mean combat failed to keep the loop open — we surface it as a
+  // warning (it does not affect the exit code; the no-content-frontier balance target
+  // tracks it too).
   const frontierSeeds = results.filter((r) => r.metrics.contentFrontierTick !== null)
   console.log('--- Content frontier (warning) ---')
   if (frontierSeeds.length === 0) {
     console.log(
-      'none reached within the budget — the recruitment sink keeps the loop open for all seeds.',
+      'none reached within the budget — the M1.3 combat loop keeps progress self-propelling for all seeds.',
     )
   } else {
     for (const r of frontierSeeds) {
       console.log(
-        `WARN seed=${r.metrics.seed} hit the M1.2 content frontier at tick ~${r.metrics.contentFrontierTick} ` +
-          '(all buildings maxed, population full). Expected ceiling; next sink: M1.3 combat/expansion.',
+        `WARN seed=${r.metrics.seed} hit the content frontier at tick ~${r.metrics.contentFrontierTick} ` +
+          '(all buildings maxed, population full) — combat should have kept the loop open; check raid/loot balance.',
       )
     }
   }
