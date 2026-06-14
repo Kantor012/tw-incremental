@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Vite / build cache
+.vite/
+node_modules/.vite/
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
+
+# Python cache (from bundled skill scripts)
+__pycache__/
+*.pyc
+
+# Claude Code local machine settings
+.claude/settings.local.json
+
+# Env
+.env
+.env.*
+!.env.example
