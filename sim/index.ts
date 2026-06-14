@@ -2,6 +2,7 @@ import { runMany, type RunResult } from './runner'
 import { TARGETS } from './targets'
 import { D } from '../src/engine/decimal'
 import { BUILDING_IDS } from '../src/content/buildings'
+import { UNIT_IDS } from '../src/content/units'
 
 /**
  * Sim harness CLI — `tsx sim/index.ts`.
@@ -36,6 +37,10 @@ function evalTargets(r: RunResult): TargetCheck[] {
   const growthX = start.gt(0) ? end.div(start).toNumber() : Infinity
   const ratio = m.windowCount > 0 ? m.windowsWithProgress / m.windowCount : 1
 
+  const popCap = D(m.popCap)
+  const popUtil = popCap.gt(0) ? D(m.usedPopulation).div(popCap).toNumber() : 0
+  const barracks = m.buildings.barracks ?? 0
+
   return [
     {
       name: 'min-upgrades',
@@ -51,6 +56,21 @@ function evalTargets(r: RunResult): TargetCheck[] {
       name: 'no-plateau',
       ok: ratio >= TARGETS.plateauWindowFraction,
       detail: `${m.windowsWithProgress}/${m.windowCount} windows progressed (${(ratio * 100).toFixed(0)}%, target >= ${(TARGETS.plateauWindowFraction * 100).toFixed(0)}%)`,
+    },
+    {
+      name: 'barracks-built',
+      ok: barracks >= TARGETS.minBarracksLevel,
+      detail: `barracks lvl ${barracks} (target >= ${TARGETS.minBarracksLevel})`,
+    },
+    {
+      name: 'units-recruited',
+      ok: m.unitsRecruitedTotal >= TARGETS.minUnitsRecruited,
+      detail: `ordered ${m.unitsRecruitedTotal} units (target >= ${TARGETS.minUnitsRecruited})`,
+    },
+    {
+      name: 'population-util',
+      ok: popUtil >= TARGETS.minPopulationUtil,
+      detail: `${m.usedPopulation}/${m.popCap} pop used (${(popUtil * 100).toFixed(0)}%, target >= ${(TARGETS.minPopulationUtil * 100).toFixed(0)}%)`,
     },
   ]
 }
@@ -104,6 +124,24 @@ function main(): void {
   }
   console.log('')
 
+  // --- Recruitment & population per seed (M1.2 sink) ---
+  console.log('--- Recruitment & population (end) ---')
+  console.log('seed     | ordered (by type / total) | trained units | population | content-frontier')
+  for (const r of results) {
+    const m = r.metrics
+    const ordered = UNIT_IDS.map((id) => `${id}=${m.unitsRecruited[id]}`).join(' ')
+    const trained = UNIT_IDS.map((id) => `${id}=${m.units[id]}`).join(' ')
+    const frontier =
+      m.contentFrontierTick === null
+        ? 'not reached (sink keeps loop open within budget)'
+        : `tick ~${m.contentFrontierTick}`
+    console.log(
+      `${m.seed.padEnd(8)} | ${ordered} (tot ${m.unitsRecruitedTotal}) | ${trained} | ` +
+        `${m.usedPopulation}/${m.popCap} | ${frontier}`,
+    )
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {
@@ -113,6 +151,26 @@ function main(): void {
     for (const c of checks) {
       const mark = c.ok ? 'ok  ' : 'WARN'
       console.log(`      ${mark} ${c.name} — ${c.detail}`)
+    }
+  }
+  console.log('')
+
+  // --- Content frontier (warning, not a failure) ---
+  // Reaching the frontier is the EXPECTED M1.2 ceiling, not a softlock; it does not
+  // affect the exit code. We surface it so it is visible that the next sink
+  // (combat / expansion / prestige) is what keeps the loop open beyond this point.
+  const frontierSeeds = results.filter((r) => r.metrics.contentFrontierTick !== null)
+  console.log('--- Content frontier (warning) ---')
+  if (frontierSeeds.length === 0) {
+    console.log(
+      'none reached within the budget — the recruitment sink keeps the loop open for all seeds.',
+    )
+  } else {
+    for (const r of frontierSeeds) {
+      console.log(
+        `WARN seed=${r.metrics.seed} hit the M1.2 content frontier at tick ~${r.metrics.contentFrontierTick} ` +
+          '(all buildings maxed, population full). Expected ceiling; next sink: M1.3 combat/expansion.',
+      )
     }
   }
   console.log('')

@@ -4,7 +4,16 @@ import { formatNumber, formatInt, formatRate, formatTime } from '../engine/forma
 import type { GameStore } from '../engine/state'
 import type { GameBus } from '../engine/eventbus'
 import { BUILDING_IDS, BUILDINGS, type BuildingId } from '../content/buildings'
+import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { nextCostAffordable } from '../systems/buildings'
+import {
+  barracksUnlocked,
+  canRecruit,
+  recruitCost,
+  recruitSpeedMult,
+  freePopulation,
+  usedPopulation,
+} from '../systems/recruitment'
 
 /**
  * Root view. Vanilla TS + DOM, no framework. Built once with createElement /
@@ -26,6 +35,8 @@ export interface AppContext {
   onReset: () => void
   /** Upgrade one building level; returns true on success (spent + level++). */
   onBuild: (id: BuildingId) => boolean
+  /** Queue `count` of a unit for training; returns true on success (spent + enqueued). */
+  onRecruit: (id: UnitId, count: number) => boolean
   version: string
   offlineSeconds: number
 }
@@ -67,6 +78,22 @@ interface StatRefs {
   storage: HTMLElement
   pop: HTMLElement
   prod: Record<ResourceId, HTMLElement>
+}
+
+/** Cached handles for one unit row (owned / cost chips / training time / controls). */
+interface UnitRowRefs {
+  owned: HTMLElement
+  time: HTMLElement
+  input: HTMLInputElement
+  button: HTMLButtonElement
+  /** Quantity steppers (+1/+10) — disabled together with the row when locked. */
+  steppers: HTMLButtonElement[]
+  /**
+   * Per-resource cost chip handles (mirrors the buildings panel). `val` holds the
+   * TOTAL cost for the typed count, recomputed every frame in update() so the
+   * displayed cost / shortfall always agrees with the button's canRecruit verdict.
+   */
+  costItems: Record<ResourceId, { item: HTMLElement; val: HTMLElement; mark: HTMLElement }>
 }
 
 /** Create an HTML element with optional class and text content. */
@@ -161,6 +188,41 @@ function resourceIcon(id: string): SVGSVGElement {
   const top = svg('path', { d: 'M7 9 17 9 15.5 7 8.5 7Z', fill: '#c6cdd5' })
   const shine = svg('path', { d: 'M8 14 16 14', stroke: '#6b7682', 'stroke-width': '1', fill: 'none' })
   return svgIcon('0 0 24 24', RESOURCE_NAMES[id], 'res-icon', [body, top, shine])
+}
+
+/**
+ * Procedural unit icon (spear / sword / axe), drawn entirely in SVG.
+ *
+ * EXHAUSTIVE over UnitId on purpose: adding a unit to units.ts without an icon
+ * branch here is a COMPILE error (the `never` assignment in `default`), not a
+ * silent fallback to the axe glyph. This keeps the units.ts contract — "adding a
+ * unit is a data edit, never an engine edit" — honest for the UI layer too: the
+ * new unit must be given an explicit icon decision rather than mislabelled.
+ */
+function unitIcon(id: UnitId): SVGSVGElement {
+  switch (id) {
+    case 'spearman': {
+      const shaft = svg('rect', { x: '11', y: '4', width: '2', height: '17', fill: '#8a5a2b' })
+      const head = svg('path', { d: 'M12 1 15 7 9 7Z', fill: '#c6cdd5' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [shaft, head])
+    }
+    case 'swordsman': {
+      const blade = svg('path', { d: 'M11 2 13 2 13 16 12 18 11 16Z', fill: '#c6cdd5' })
+      const guard = svg('rect', { x: '8', y: '15', width: '8', height: '2', rx: '0.5', fill: '#d9a441' })
+      const hilt = svg('rect', { x: '11', y: '17', width: '2', height: '5', rx: '0.8', fill: '#8a5a2b' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [blade, guard, hilt])
+    }
+    case 'axeman': {
+      const handle = svg('rect', { x: '11', y: '3', width: '2', height: '18', fill: '#8a5a2b' })
+      const head = svg('path', { d: 'M13 4 20 6 20 11 13 12Z', fill: '#9aa3ad' })
+      const edge = svg('path', { d: 'M20 6 20 11', stroke: '#c6cdd5', 'stroke-width': '1', fill: 'none' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [handle, head, edge])
+    }
+    default: {
+      const _exhaustive: never = id
+      throw new Error('Brak ikony dla jednostki: ' + String(_exhaustive))
+    }
+  }
 }
 
 /**
@@ -303,6 +365,162 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
   }
   container.appendChild(buildPanel)
 
+  // ---- c2) Recruitment panel ------------------------------------------------
+  const recPanel = h('section', 'panel')
+  recPanel.setAttribute('aria-labelledby', 'recruit-title')
+  const recTitle = h('h2', 'panel-title', 'Rekrutacja')
+  recTitle.id = 'recruit-title'
+  recPanel.appendChild(recTitle)
+
+  // Unlock / free-population status line (live).
+  const recStatus = h('p', 'recruit-status muted')
+  recStatus.setAttribute('role', 'status')
+  recStatus.setAttribute('aria-live', 'polite')
+  recPanel.appendChild(recStatus)
+
+  // Population usage bar (usedPopulation / popCap) — visual companion to the
+  // status text. Updated reactively; never the sole carrier of information.
+  const popBar = h('div', 'bar recruit-pop')
+  popBar.setAttribute('role', 'progressbar')
+  popBar.setAttribute('aria-valuemin', '0')
+  popBar.setAttribute('aria-valuemax', '100')
+  popBar.setAttribute('aria-label', 'Wykorzystanie populacji')
+  popBar.appendChild(h('i'))
+  recPanel.appendChild(popBar)
+
+  // Feedback for the last recruit attempt (success or the canRecruit reason).
+  const recMsg = h('p', 'recruit-msg muted')
+  recMsg.setAttribute('role', 'status')
+  recMsg.setAttribute('aria-live', 'polite')
+
+  const uRefs: Record<string, UnitRowRefs> = {}
+
+  for (const id of UNIT_IDS) {
+    const def = UNITS[id]
+    const row = h('div', 'unit-row')
+
+    const head = h('div', 'building-head')
+    const nameWrap = h('span', 'building-name')
+    const iconWrap = h('span', 'res-icon-wrap')
+    iconWrap.appendChild(unitIcon(id))
+    nameWrap.appendChild(iconWrap)
+    nameWrap.appendChild(document.createTextNode(' ' + def.name))
+    head.appendChild(nameWrap)
+    const owned = h('span', 'building-level num')
+    head.appendChild(owned)
+
+    const desc = h('p', 'building-desc muted', def.desc)
+
+    // Combat stats (stored now, used by the M1.3 battle system) — shown for flavour.
+    const statLine = h(
+      'p',
+      'unit-stats muted',
+      `Atak ${def.attack} · Obr. piech. ${def.defInfantry} · Obr. kaw. ${def.defCavalry} · ` +
+        `Udźwig ${def.carry} · Pop. ${def.pop}`,
+    )
+
+    // Cost chips. The displayed value is the TOTAL cost for the currently typed
+    // count (recomputed in update()), so it agrees with the button's canRecruit
+    // check — never showing "affordable" while the button is disabled. The initial
+    // text is the count=1 cost; update() overwrites it on the first frame. Shortfall
+    // is cued without relying on colour alone (WCAG 1.4.1): the .is-short class adds
+    // a ⚠ glyph + bold, a hover title, and a visually-hidden text marker for
+    // assistive tech — exactly like the buildings panel.
+    const cost = recruitCost(id, 1)
+    const costWrap = h('div', 'building-cost')
+    const costItems = {} as Record<
+      ResourceId,
+      { item: HTMLElement; val: HTMLElement; mark: HTMLElement }
+    >
+    for (const r of RESOURCE_IDS) {
+      const item = h('span', 'cost-item')
+      item.appendChild(h('span', 'cost-label', RESOURCE_NAMES[r]))
+      const val = h('span', 'num cost-val', formatInt(cost[r]))
+      item.appendChild(val)
+      const mark = h('span', 'visually-hidden')
+      item.appendChild(mark)
+      costWrap.appendChild(item)
+      costItems[r] = { item, val, mark }
+    }
+
+    const timeLine = h('p', 'unit-time muted')
+
+    // Controls: quantity input + (+1/+10) steppers + recruit button.
+    const controls = h('div', 'recruit-controls')
+    const input = h('input', 'recruit-count num')
+    input.type = 'number'
+    input.min = '1'
+    input.step = '1'
+    input.value = '1'
+    input.inputMode = 'numeric'
+    input.setAttribute('aria-label', 'Liczba do wyszkolenia: ' + def.name)
+
+    /** Read the typed quantity, coerced to a positive integer (default 1). */
+    const readCount = (): number => {
+      const parsed = Math.floor(Number(input.value))
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 1
+    }
+
+    const steppers: HTMLButtonElement[] = []
+    const mkStep = (delta: number): HTMLButtonElement => {
+      const b = h('button', 'btn btn-step', '+' + delta)
+      b.type = 'button'
+      b.setAttribute('aria-label', '+' + delta + ' do liczby: ' + def.name)
+      b.addEventListener('click', () => {
+        input.value = String(readCount() + delta)
+        update()
+      })
+      steppers.push(b)
+      return b
+    }
+
+    const button = h('button', 'btn', 'Rekrutuj')
+    button.type = 'button'
+    button.setAttribute('aria-label', 'Rekrutuj: ' + def.name)
+    // aria-disabled (not the `disabled` property) keeps the control focusable and
+    // hoverable so its reason tooltip / aria-live message actually reaches the
+    // user; the click handler stays a guarded no-op when recruitment is rejected.
+    button.addEventListener('click', () => {
+      const cur = ctx.store.state
+      const count = readCount()
+      const verdict = canRecruit(cur, id, count)
+      if (verdict.ok) {
+        ctx.onRecruit(id, count)
+        recMsg.textContent = 'Rozpoczęto szkolenie: ' + def.name + ' ×' + count + '.'
+      } else {
+        recMsg.textContent = verdict.reason ?? 'Nie można rekrutować.'
+      }
+      update()
+    })
+
+    // The button's state tracks the *typed* count, which does not bump the store
+    // revision — so refresh affordability on direct input too.
+    input.addEventListener('input', () => update())
+
+    controls.appendChild(input)
+    controls.appendChild(mkStep(1))
+    controls.appendChild(mkStep(10))
+    controls.appendChild(button)
+
+    row.appendChild(head)
+    row.appendChild(desc)
+    row.appendChild(statLine)
+    row.appendChild(costWrap)
+    row.appendChild(timeLine)
+    row.appendChild(controls)
+    recPanel.appendChild(row)
+
+    uRefs[id] = { owned, time: timeLine, input, button, steppers, costItems }
+  }
+
+  // Training queue list (rebuilt only when its content signature changes).
+  recPanel.appendChild(h('h3', 'recruit-subtitle', 'Kolejka szkolenia'))
+  const queueList = h('ul', 'recruit-queue')
+  recPanel.appendChild(queueList)
+  recPanel.appendChild(recMsg)
+  container.appendChild(recPanel)
+  let lastQueueSig = ''
+
   // ---- d) Save panel: export / import / reset -------------------------------
   const savePanel = h('section', 'panel')
   savePanel.setAttribute('aria-labelledby', 'save-title')
@@ -419,6 +637,80 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
           ci.item.classList.toggle('is-short', short)
           ci.item.title = short ? RESOURCE_NAMES[r] + ': brak surowca' : ''
           ci.mark.textContent = short ? ' (brak)' : ''
+        }
+      }
+    }
+
+    // ---- Recruitment ----
+    const unlocked = barracksUnlocked(s)
+    const usedPop = usedPopulation(s)
+    recStatus.textContent = unlocked
+      ? 'Populacja: ' +
+        formatInt(usedPop) +
+        ' / ' +
+        formatInt(s.popCap) +
+        ' • wolne: ' +
+        formatInt(freePopulation(s))
+      : 'Zbuduj Koszary (poziom 1), aby rozpocząć rekrutację.'
+
+    // Population bar (usedPopulation / popCap), clamped to 0..100.
+    let popPct = 0
+    if (s.popCap.gt(0)) {
+      const raw = usedPop.div(s.popCap).mul(100).toNumber()
+      popPct = Number.isFinite(raw) ? Math.max(0, Math.min(100, raw)) : 100
+    }
+    const popFill = popBar.firstElementChild as HTMLElement | null
+    if (popFill) popFill.style.width = popPct + '%'
+    popBar.setAttribute('aria-valuenow', Math.round(popPct).toString())
+
+    const speedMult = recruitSpeedMult(s)
+    for (const id of UNIT_IDS) {
+      const ur = uRefs[id]
+      ur.owned.textContent = 'masz: ' + formatInt(s.units[id])
+      ur.time.textContent = 'Czas: ' + formatTime(UNITS[id].recruitSeconds * speedMult) + '/szt.'
+
+      // Cost + shortfall track the *typed* count (same count the button checks), so
+      // the visible cost/affordability cue can never contradict the button state.
+      const parsed = Math.floor(Number(ur.input.value))
+      const count = Number.isFinite(parsed) && parsed > 0 ? parsed : 1
+      const total = recruitCost(id, count)
+      for (const r of RESOURCE_IDS) {
+        const ci = ur.costItems[r]
+        ci.val.textContent = formatInt(total[r])
+        const short = s.resources[r].lt(total[r])
+        ci.item.classList.toggle('is-short', short)
+        ci.item.title = short ? RESOURCE_NAMES[r] + ': brak surowca' : ''
+        ci.mark.textContent = short ? ' (brak)' : ''
+      }
+
+      // Button reflects canRecruit for the SAME typed count; the reason becomes the
+      // tooltip + aria cue. Steppers/input are hard-locked only when no barracks.
+      const verdict = canRecruit(s, id, count)
+      ur.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
+      ur.button.title = verdict.ok ? '' : (verdict.reason ?? '')
+      ur.input.disabled = !unlocked
+      for (const b of ur.steppers) b.disabled = !unlocked
+    }
+
+    // Queue: rebuild the list only when its signature changes (small + bounded),
+    // so the per-frame path stays allocation-free in the steady state. The head
+    // order shows the live countdown to the NEXT unit; the rest are just listed.
+    const sig = s.recruitQueue
+      .map((o) => o.unitId + ':' + o.count + ':' + Math.ceil(o.remaining))
+      .join('|')
+    if (sig !== lastQueueSig) {
+      lastQueueSig = sig
+      queueList.textContent = ''
+      if (s.recruitQueue.length === 0) {
+        queueList.appendChild(h('li', 'queue-empty muted', 'Kolejka pusta.'))
+      } else {
+        for (let i = 0; i < s.recruitQueue.length; i++) {
+          const o = s.recruitQueue[i]
+          const li = h('li', i === 0 ? 'queue-item is-active' : 'queue-item')
+          li.appendChild(h('span', 'queue-name', UNITS[o.unitId].name + ' ×' + o.count))
+          const eta = i === 0 ? 'następny za ' + formatTime(o.remaining) : 'w kolejce'
+          li.appendChild(h('span', 'queue-eta num muted', eta))
+          queueList.appendChild(li)
         }
       }
     }

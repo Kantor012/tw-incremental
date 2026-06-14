@@ -1,13 +1,16 @@
-import { createInitialState, type GameState } from '../src/engine/state'
+import { createInitialState, INITIAL_UNITS, type GameState } from '../src/engine/state'
 import { simulate } from '../src/engine/tick'
 import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
+import { recruit } from '../src/systems/recruitment'
+import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
   runInvariants,
   checkRoundTrip,
   checkNoSoftlock,
   checkOfflineDeterminism,
+  contentConsumed,
   totalResources,
   type InvariantResult,
 } from './invariants'
@@ -32,34 +35,56 @@ const SAMPLE_EVERY = 1000
 const OFFLINE_CHECK_SECONDS = 3600
 
 /**
- * Upper bound on purchases the bot makes in a single step. The greedy loop
- * already stops as soon as nothing is affordable; this cap just bounds the work
- * per step when a windfall (e.g. after a long idle stretch) would otherwise let
- * the bot buy a long run of cheap levels at once.
+ * Upper bound on actions (build OR recruit) the bot takes in a single step. The
+ * greedy loop already stops as soon as nothing is affordable / available; this cap
+ * just bounds the work per step when a windfall (e.g. after a long idle stretch)
+ * would otherwise let the bot take a long run of actions at once. A recruit action
+ * trains a whole batch, so one action can still mint many units.
  */
 const MAX_ACTIONS_PER_STEP = 8
+
+/** What one {@link step} did: building upgrades bought + units ordered. */
+interface StepResult {
+  built: number
+  recruited: number
+}
 
 /** Prefix invariant names with the phase that produced them, for the report. */
 function tag(results: InvariantResult[], phase: string): InvariantResult[] {
   return results.map((r) => ({ ...r, name: `${phase}:${r.name}` }))
 }
 
+/** A fresh zeroed per-unit counter (reuses INITIAL_UNITS, all 0). */
+function emptyUnitCounts(): Record<UnitId, number> {
+  return { ...INITIAL_UNITS }
+}
+
 /**
- * One simulation step: the bot spends greedily (cheapest affordable building,
- * repeatedly, up to {@link MAX_ACTIONS_PER_STEP}) BEFORE time advances — matching
- * a player who acts at the top of a tick — then `simulate` accrues production.
- * Returns how many upgrades were bought, so the caller can track progress.
+ * One simulation step: the bot acts greedily (build or recruit, repeatedly, up to
+ * {@link MAX_ACTIONS_PER_STEP}) BEFORE time advances — matching a player who acts
+ * at the top of a tick — then `simulate` accrues production and advances training.
+ * Ordered units are accumulated per type into `recruited`; the count of builds and
+ * the count of ordered units are returned so callers can track progress.
  */
-function step(state: GameState, dt: number): number {
-  let bought = 0
-  while (bought < MAX_ACTIONS_PER_STEP) {
+function step(state: GameState, dt: number, recruited: Record<UnitId, number>): StepResult {
+  let built = 0
+  let rec = 0
+  let actions = 0
+  while (actions < MAX_ACTIONS_PER_STEP) {
     const action = chooseAction(state)
     if (action === null) break
-    if (!build(state, action.id)) break
-    bought++
+    if (action.kind === 'build') {
+      if (!build(state, action.id)) break
+      built++
+    } else {
+      if (!recruit(state, action.unitId, action.count)) break
+      recruited[action.unitId] += action.count
+      rec += action.count
+    }
+    actions++
   }
   simulate(state, dt)
-  return bought
+  return { built, recruited: rec }
 }
 
 /** What a continuous run yields: the final state, sampled invariants, counters. */
@@ -90,40 +115,55 @@ function runContinuous(
   let prevTotal = initialTotal
 
   let upgradesBought = 0
-  // Upgrades bought since the last sample — a window with purchases counts as
-  // progress even if the spend left the resource sum lower than the prior sample.
-  let boughtInWindow = 0
+  let totalRecruited = 0
+  const unitsRecruited = emptyUnitCounts()
+  // Progress actions (builds + recruits) since the last sample — a window with any
+  // action counts as progress even if the spend left the resource sum lower.
+  let actedInWindow = 0
   let windowsWithProgress = 0
   let windowCount = 0
+  let contentFrontierTick: number | null = null
 
   for (let i = 0; i < ticks; i++) {
-    const bought = step(state, dt)
-    upgradesBought += bought
-    boughtInWindow += bought
+    const { built, recruited } = step(state, dt, unitsRecruited)
+    upgradesBought += built
+    totalRecruited += recruited
+    actedInWindow += built + recruited
 
     if (withInvariants && (i + 1) % SAMPLE_EVERY === 0) {
       const phase = `t${i + 1}`
       const grew = totalResources(state).gt(prevTotal)
       invariants.push(...tag(runInvariants(state), phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
-      invariants.push(...tag([checkNoSoftlock(state, prevTotal, boughtInWindow > 0)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
       windowCount += 1
-      if (grew || boughtInWindow > 0) windowsWithProgress += 1
+      if (grew || actedInWindow > 0) windowsWithProgress += 1
+
+      // Record the first sampled tick at which the M1.2 content frontier holds.
+      if (contentFrontierTick === null && contentConsumed(state)) contentFrontierTick = i + 1
 
       prevTotal = totalResources(state)
-      boughtInWindow = 0
+      actedInWindow = 0
     }
   }
 
   if (withInvariants) {
     invariants.push(...tag(runInvariants(state), 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
-    // Whole-run progress: any upgrade bought ever, or resources above the start.
-    invariants.push(...tag([checkNoSoftlock(state, initialTotal, upgradesBought > 0)], 'final'))
+    // Whole-run progress: any action ever taken, or resources above the start.
+    invariants.push(
+      ...tag([checkNoSoftlock(state, initialTotal, upgradesBought + totalRecruited > 0)], 'final'),
+    )
+    // Catch a frontier reached after the last sample boundary (e.g. at the very end).
+    if (contentFrontierTick === null && contentConsumed(state)) contentFrontierTick = ticks
   }
 
-  return { state, invariants, stats: { upgradesBought, windowsWithProgress, windowCount } }
+  return {
+    state,
+    invariants,
+    stats: { upgradesBought, windowsWithProgress, windowCount, unitsRecruited, contentFrontierTick },
+  }
 }
 
 /**
@@ -133,10 +173,13 @@ function runContinuous(
  */
 function runSplit(seed: string, ticks: number, dt: number): GameState {
   const half = Math.floor(ticks / 2)
+  // Recruitment counters are irrelevant here (this run only proves save/load
+  // continuation), so a single scratch accumulator is reused and discarded.
+  const scratch = emptyUnitCounts()
   let state = createInitialState(seed, 0)
-  for (let i = 0; i < half; i++) step(state, dt)
+  for (let i = 0; i < half; i++) step(state, dt, scratch)
   state = importSave(exportSave(state))
-  for (let i = half; i < ticks; i++) step(state, dt)
+  for (let i = half; i < ticks; i++) step(state, dt, scratch)
   return state
 }
 

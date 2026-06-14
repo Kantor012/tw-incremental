@@ -13,6 +13,8 @@ import { applyOffline } from './engine/offline'
 import { GameLoop } from './engine/loop'
 import { EventBus, type GameEvents } from './engine/eventbus'
 import { build } from './systems/buildings'
+import { recruit } from './systems/recruitment'
+import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
 /**
@@ -70,7 +72,15 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.2.0',
+  onRecruit: (id: UnitId, count: number) => {
+    const ok = recruit(store.state, id, count)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
+  version: '0.3.0',
   offlineSeconds,
 })
 

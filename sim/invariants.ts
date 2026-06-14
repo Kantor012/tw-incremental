@@ -1,8 +1,11 @@
-import { ZERO, isFiniteDecimal, type Decimal } from '../src/engine/decimal'
+import { D, ZERO, isFiniteDecimal, type Decimal } from '../src/engine/decimal'
 import { serialize, deserialize } from '../src/engine/save'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
-import { createInitialState, RESOURCE_IDS, type GameState } from '../src/engine/state'
+import { createInitialState, recomputeDerived, RESOURCE_IDS, type GameState } from '../src/engine/state'
+import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
+import { UNITS, UNIT_IDS } from '../src/content/units'
+import { freePopulation, recruit } from '../src/systems/recruitment'
 import { chooseAction } from './bot'
 
 /**
@@ -59,54 +62,124 @@ export function totalResources(state: GameState): Decimal {
   return total
 }
 
+/** Every building at its data-defined maxLevel — the M1.2 building ceiling. */
+export function allBuildingsMaxed(state: GameState): boolean {
+  return BUILDING_IDS.every((id) => state.buildings[id] >= BUILDINGS[id].maxLevel)
+}
+
+/**
+ * The M1.2 "content frontier": the milestone's entire content ceiling is consumed.
+ * Two structural conditions, both permanent once reached (no new content exists to
+ * lift them this milestone):
+ *
+ *  1. every building is at maxLevel — no upgrade remains, AND
+ *  2. there is no population room to train even the smallest unit — and since the
+ *     farm is maxed (condition 1), popCap can never grow again, so recruitment is
+ *     permanently closed too.
+ *
+ * At that point a resource stall is the EXPECTED end-of-content state, not a bug:
+ * the next sink (combat / expansion / prestige) arrives in a later milestone.
+ * {@link checkNoSoftlock} treats this as a non-fatal "content-frontier" rather than
+ * a hard softlock, exactly per the honest-softlock philosophy (CLAUDE.md): we do
+ * NOT mask the boundary by inflating caps / per-level values — we report it.
+ */
+export function contentConsumed(state: GameState): boolean {
+  if (!allBuildingsMaxed(state)) return false
+  const minPop = Math.min(...UNIT_IDS.map((id) => UNITS[id].pop))
+  return freePopulation(state).lt(minPop)
+}
+
 /**
  * No-softlock: at every sample there must be *some* real progress. Three signals
  * are accepted, and a stall is flagged only when ALL are absent:
  *
  *  1. `grew`   — total resources rose since the previous sample (idle accrual), OR
- *  2. `bought` — at least one upgrade was purchased during the window, OR
- *  3. `hasAction` — an affordable, non-maxed building is available right now.
+ *  2. `acted`  — at least one progress action (build OR recruit) happened in the
+ *               window, OR
+ *  3. `hasAction` — some action (an affordable non-maxed building, or a trainable
+ *               unit) is available right now via {@link chooseAction}.
  *
- * Signal 2 is essential once a *spending* bot exists: a greedy buyer converts
- * resources into building levels, so the instantaneous resource sum can DROP
- * across a window even though the run is clearly progressing. Counting purchases
- * as progress prevents that legitimate spend from reading as a softlock.
+ * Signal 2 is essential once a *spending* bot exists: a buyer converts resources
+ * into building levels and units, so the instantaneous resource sum can DROP
+ * across a window even though the run is clearly progressing. Counting the spend as
+ * progress prevents it from reading as a softlock.
  *
- * A bare "production > 0" proxy is intentionally NOT used: production stays
- * positive even when every resource is pinned at the cap with nothing affordable
- * — the genuine softlock this check must catch. That case trips here as
- * grew=false, bought=false, hasAction=false. Required by SKILL.md / CLAUDE.md.
+ * Honest-softlock philosophy (CLAUDE.md): when all three signals are absent the run
+ * has stalled — but a stall is a HARD failure ONLY if it happens BEFORE the
+ * milestone's content is consumed. Once {@link contentConsumed} holds (every
+ * building maxed AND population permanently full), the stall is the EXPECTED M1.2
+ * content frontier: `ok` stays true (no commit blocker) and the detail flags it as
+ * the content ceiling. The frontier tick is surfaced as a warning by the runner /
+ * report — never masked by inflating caps. A stall before the frontier remains a
+ * genuine softlock and fails the run.
+ *
+ * A bare "production > 0" proxy is intentionally NOT used: production stays positive
+ * even when every resource is pinned at the cap with nothing to spend it on — the
+ * genuine softlock this check must catch.
  */
 export function checkNoSoftlock(
   state: GameState,
   prevTotal: Decimal,
-  boughtInWindow: boolean,
+  actedInWindow: boolean,
 ): InvariantResult {
   const grew = totalResources(state).gt(prevTotal)
   const hasAction = chooseAction(state) !== null
-  const ok = grew || boughtInWindow || hasAction
+  if (grew || actedInWindow || hasAction) {
+    return { name: 'no-softlock', ok: true }
+  }
+  // Stalled. The expected M1.2 content frontier is NOT a hard failure; a stall
+  // before the frontier is a genuine softlock and a commit blocker.
+  const frontier = contentConsumed(state)
   return {
     name: 'no-softlock',
-    ok,
-    detail: ok
-      ? undefined
-      : 'softlock: resources stalled (capped?), no upgrade bought this window, and nothing affordable',
+    ok: frontier,
+    detail: frontier
+      ? 'content-frontier: all buildings maxed and population permanently full — expected M1.2 ceiling; next sink lands with combat/expansion'
+      : 'softlock: resources stalled (capped?), no action taken this window, and nothing buildable/trainable — BEFORE content consumed',
   }
+}
+
+/**
+ * Put a fresh state into an identical, NON-EMPTY recruitment state so the
+ * step-size-sensitive training clock is actually exercised by
+ * {@link checkOfflineDeterminism}. Without this both branches keep an empty queue,
+ * so only the trivially split-invariant linear production path is compared and the
+ * guarantee passes VACUOUSLY for recruitment — a genuine offline/online recruitment
+ * divergence would go uncaught. The batch is larger than the check window can finish
+ * (perUnit ~76s × 100 = 7600s > 3600s), so an order is still in flight at the end:
+ * its `remaining` and the minted-unit count both probe exactly the split the check
+ * claims to guard. Resources / popCap are set directly (mirroring the unit tests'
+ * `armed` helper) to decouple from building prices.
+ */
+function seedRecruitment(state: GameState): void {
+  state.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  state.buildings.barracks = 1
+  recomputeDerived(state)
+  state.popCap = D(1000) // headroom: queued units count toward used population
+  recruit(state, 'spearman', 100)
 }
 
 /**
  * Offline catch-up must equal live stepping for the same elapsed time, so the
  * idle game's core (offline progress) never diverges from online play. We credit
  * a fixed span two ways — one big simulate() step vs the chunked offline path —
- * and require the serialized states to be byte-identical. This guards against a
- * big-step-vs-many-small-steps split once production becomes nonlinear (M1+).
+ * and require the serialized states to be byte-identical.
+ *
+ * Both branches start from the SAME non-empty recruitment queue ({@link
+ * seedRecruitment}) so the step-size-sensitive subsystem — the only one a
+ * big-step-vs-many-small-steps split can break — is genuinely compared, not just
+ * the split-invariant linear production. simulate() advancing recruitment on the
+ * fixed TICK_RATE grid (see tick.ts) is what makes the big step reproduce the
+ * chunked path here even with an order in flight.
  */
 export function checkOfflineDeterminism(seed: string, seconds: number): InvariantResult {
   const big = createInitialState(seed, 0)
+  seedRecruitment(big)
   simulate(big, seconds)
   big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
 
   const chunked = createInitialState(seed, 0)
+  seedRecruitment(chunked)
   applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
 
   const a = serialize(big)
@@ -115,7 +188,9 @@ export function checkOfflineDeterminism(seed: string, seconds: number): Invarian
   return {
     name: 'offline-determinism',
     ok,
-    detail: ok ? undefined : 'chunked offline catch-up diverged from a single-step simulate',
+    detail: ok
+      ? undefined
+      : 'chunked offline catch-up diverged from a single-step simulate (recruitment timeline)',
   }
 }
 

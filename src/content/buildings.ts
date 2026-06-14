@@ -22,6 +22,7 @@ export type BuildingId =
   | 'iron_mine'
   | 'warehouse'
   | 'farm'
+  | 'barracks'
 
 /** Stable iteration order for derived-stat recompute and UI listing. */
 export const BUILDING_IDS: readonly BuildingId[] = [
@@ -31,6 +32,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'iron_mine',
   'warehouse',
   'farm',
+  'barracks',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -48,12 +50,15 @@ export interface ResourceCost {
  *  - population:    +perLevel to the population cap (unit upkeep budget, M2+)
  *  - cost_reduction:fraction (0..1) subtracted per level from the global build
  *                   cost multiplier; consumed by buildingCost, NOT by recompute.
+ *  - recruit_speed: fraction (0..1) cut per level from unit training time; consumed
+ *                   by the recruitment system (recruitSpeedMult), NOT by recompute.
  */
 export type BuildingEffect =
   | { kind: 'production'; resource: ResourceId; perLevel: number }
   | { kind: 'storage'; perLevel: number }
   | { kind: 'population'; perLevel: number }
   | { kind: 'cost_reduction'; perLevel: number }
+  | { kind: 'recruit_speed'; perLevel: number }
 
 export interface BuildingDef {
   id: BuildingId
@@ -61,7 +66,7 @@ export interface BuildingDef {
   name: string
   /** Short description (PL). */
   desc: string
-  category: 'core' | 'economy' | 'storage'
+  category: 'core' | 'economy' | 'storage' | 'military'
   /** Finite upgrade ceiling (CLAUDE.md: never infinite depth). */
   maxLevel: number
   /** Cost of the *first* level (level 0 -> 1), per resource. */
@@ -137,15 +142,21 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     desc: 'Magazynuje surowce. Każdy poziom zwiększa pojemność magazynu.',
     category: 'storage',
     maxLevel: 30,
-    // perLevel is deliberately large for M1: there is no spend-sink bot yet, so
-    // the headless harness would otherwise pin every resource at the cap within
-    // its 20000-tick budget — which the no-softlock invariant correctly reads as
-    // a stall. Level 1 alone must keep the cap above what passive production can
-    // accrue in that budget. M2 lowers this once building/prestige spending and a
-    // buying bot exist. (Storage scales from the building, not a huge base const.)
+    // perLevel is sized to the late-game economy now that M1.2 added the recruitment
+    // SINK: the cap (base 1000 + 30*3000 = 91000 at max) sits ~1.5x above the single
+    // most expensive purchase the bot ever makes — warehouse L29->30, wood ~60.5k at
+    // the cost_reduction floor (0.5) — so resources can always accumulate enough to
+    // afford any building (no pre-frontier softlock) WITHOUT being inflated to hide
+    // the content frontier. cap@L29 (1000+29*3000 = 88000) is the binding case since
+    // warehouse, the fastest-growing cost (factor 1.3), is the last building maxed.
+    // M1.1 deliberately oversized this (perLevel 25000 -> cap 751000) to dodge a
+    // no-softlock failure it could not yet classify; the content-aware no-softlock
+    // check now lets us run the honest cap and report the capped frontier as a
+    // WARNING instead. Storage stays LINEAR (the engine's storage effect) and the
+    // cap scales from the building, not a huge base constant.
     costFactor: 1.3,
     baseCost: { wood: 60, clay: 50, iron: 40 },
-    effect: { kind: 'storage', perLevel: 25000 },
+    effect: { kind: 'storage', perLevel: 3000 },
     initialLevel: 1,
   },
   farm: {
@@ -158,5 +169,19 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.25,
     effect: { kind: 'population', perLevel: 12 },
     initialLevel: 1,
+  },
+  barracks: {
+    id: 'barracks',
+    name: 'Koszary',
+    desc: 'Szkoli jednostki. Poziom 1 odblokowuje rekrutację; każdy kolejny skraca czas szkolenia.',
+    category: 'military',
+    maxLevel: 25,
+    baseCost: { wood: 200, clay: 170, iron: 90 },
+    costFactor: 1.28,
+    // -5% training time per level (multiplicative), floored in recruitSpeedMult.
+    effect: { kind: 'recruit_speed', perLevel: 0.05 },
+    // Starts at 0: building it to level 1 is the first real expansion goal — the
+    // gate that unlocks unit recruitment (a brand-new resource sink in M1.2).
+    initialLevel: 0,
   },
 }

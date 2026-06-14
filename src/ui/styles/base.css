@@ -554,6 +554,120 @@ a:hover {
   content: '\26A0\FE0E ';
 }
 
+/* ---- Panel rekrutacji ------------------------------------------------- */
+.recruit-status {
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-2);
+}
+
+/* Pasek wykorzystania populacji (usedPopulation / popCap). */
+.recruit-pop {
+  margin-bottom: var(--space-3);
+}
+
+.recruit-msg {
+  font-size: var(--text-sm);
+  margin-top: var(--space-2);
+}
+
+/* Wiersz jednostki — układ pionowy (nazwa, opis, staty, koszt, czas, akcje).
+   Świadomie NIE jest gridem .building: ma więcej linii, więc stosujemy prosty
+   stos. Wewnętrzne klasy (.building-head/.building-cost/.cost-item) są
+   współdzielone — ich deklaracje grid-area są bezpiecznie ignorowane poza gridem. */
+.unit-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+}
+
+.unit-row + .unit-row {
+  border-top: 1px solid var(--border);
+}
+
+.unit-icon {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+.unit-stats,
+.unit-time {
+  font-size: var(--text-xs);
+}
+
+/* Kontrolki ilości + przyciski rekrutacji. */
+.recruit-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.recruit-count {
+  width: 5rem;
+  min-height: 44px;
+  padding: var(--space-2);
+  text-align: right;
+  background-color: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+
+/* Przyciski kroku (+1/+10) — kompaktowe, lecz zachowują cel dotykowy 44px
+   (dziedziczą min-height/min-width z .btn). */
+.btn-step {
+  padding-inline: var(--space-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Lista kolejki szkolenia. */
+.recruit-subtitle {
+  margin-top: var(--space-4);
+  margin-bottom: var(--space-2);
+  font-size: var(--text-base);
+}
+
+.recruit-queue {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.queue-empty {
+  font-size: var(--text-sm);
+}
+
+.queue-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background-color: var(--bg-2);
+  font-size: var(--text-sm);
+}
+
+/* Bieżące zlecenie (głowa kolejki) wyróżnione złotym obrysem (nie tylko kolor:
+   towarzyszy mu etykieta „następny za …"). */
+.queue-item.is-active {
+  border-color: var(--accent);
+}
+
+.queue-name {
+  color: var(--text);
+}
+
+.queue-eta {
+  font-size: var(--text-xs);
+}
+
 /* ---- Panel zapisu (export / import / reset) --------------------------- */
 .save-area {
   display: block;

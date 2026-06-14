@@ -123,12 +123,12 @@ describe('recomputeDerived', () => {
 
   it('raises storageCap when the warehouse grows', () => {
     const state = createInitialState('store', 0)
-    const before = state.storageCap // 1000 base + 25000 (lvl 1)
+    const before = state.storageCap // 1000 base + 3000 (lvl 1)
     state.buildings.warehouse += 1
     recomputeDerived(state)
 
     expect(state.storageCap.gt(before)).toBe(true)
-    expect(state.storageCap.toString()).toBe('51000') // 1000 + 2 * 25000
+    expect(state.storageCap.toString()).toBe('7000') // 1000 + 2 * 3000
   })
 
   it('raises popCap when the farm grows', () => {

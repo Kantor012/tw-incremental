@@ -3,6 +3,7 @@ import { D, Decimal } from '../src/engine/decimal'
 import {
   createInitialState,
   INITIAL_BUILDINGS,
+  INITIAL_UNITS,
   recomputeDerived,
 } from '../src/engine/state'
 import {
@@ -15,6 +16,7 @@ import {
   SAVE_VERSION,
 } from '../src/engine/save'
 import { BUILDING_IDS } from '../src/content/buildings'
+import { UNIT_IDS } from '../src/content/units'
 
 /**
  * A raw v1 save: the pre-buildings shape. It has flat production / storageCap but
@@ -34,15 +36,18 @@ function rawV1() {
   }
 }
 
-describe('migration v1 -> v2', () => {
-  it('migrate() stamps version 2 and seeds buildings + popCap', () => {
+describe('migration v1 -> current', () => {
+  it('migrate() chains v1->v2->v3: seeds buildings, popCap, units and the queue', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(2)
+    expect(migrated.version).toBe(3)
     expect(migrated.version).toBe(SAVE_VERSION)
     expect(migrated.buildings).toEqual(INITIAL_BUILDINGS)
     expect(migrated.popCap instanceof Decimal).toBe(true)
     expect(migrated.popCap.toString()).toBe('0')
+    // v2->v3 fields added by the chained migration.
+    expect(migrated.units).toEqual(INITIAL_UNITS)
+    expect(migrated.recruitQueue).toEqual([])
     // Pre-existing fields are carried through untouched.
     expect(migrated.seed).toBe('legacy')
     expect(migrated.resources.wood.toString()).toBe('100')
@@ -69,7 +74,7 @@ describe('migration v1 -> v2', () => {
     expect(state.production.wood.toString()).toBe('1')
     expect(state.production.clay.toString()).toBe('0.8')
     expect(state.production.iron.toString()).toBe('0.5')
-    expect(state.storageCap.toString()).toBe('26000') // 1000 + 25000 (warehouse lvl 1)
+    expect(state.storageCap.toString()).toBe('4000') // 1000 + 3000 (warehouse lvl 1)
     expect(state.popCap.toString()).toBe('22') // 10 + 12 (farm lvl 1)
 
     // Independently recomputing the imported state changes nothing — it was already
@@ -77,6 +82,46 @@ describe('migration v1 -> v2', () => {
     const cap = state.storageCap.toString()
     recomputeDerived(state)
     expect(state.storageCap.toString()).toBe(cap)
+  })
+})
+
+/**
+ * A raw v2 save: the pre-units shape. Full buildings economy and popCap, but no
+ * `units`, no `recruitQueue`, and — being from before the barracks existed — no
+ * `barracks` key in `buildings`. Exactly what the v2->v3 migration must backfill.
+ */
+function rawV2() {
+  return {
+    version: 2,
+    seed: 'v2',
+    rngState: 999,
+    createdAt: 1000,
+    lastSeen: 2000,
+    resources: { wood: D(10), clay: D(20), iron: D(30) },
+    production: { wood: D(1), clay: D(0.8), iron: D(0.5) },
+    storageCap: D(26000),
+    popCap: D(22),
+    buildings: { hq: 1, sawmill: 1, clay_pit: 1, iron_mine: 1, warehouse: 1, farm: 1 },
+  }
+}
+
+describe('migration v2 -> v3', () => {
+  it('seeds empty units, an empty queue and the new barracks building', () => {
+    const m = migrate(rawV2())
+
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.units).toEqual(INITIAL_UNITS)
+    expect(m.recruitQueue).toEqual([])
+    // Pre-existing levels preserved; the new building seeded at its initial level.
+    expect(m.buildings.sawmill).toBe(1)
+    expect(m.buildings.barracks).toBe(0)
+  })
+
+  it('a migrated v2 save passes validateState', () => {
+    const v = validateState(migrate(rawV2()))
+    expect(v.version).toBe(SAVE_VERSION)
+    for (const id of UNIT_IDS) expect(v.units[id]).toBe(0)
+    expect(Array.isArray(v.recruitQueue)).toBe(true)
   })
 })
 
@@ -96,6 +141,28 @@ describe('save v2 round-trip', () => {
     const restored = importSave(exportSave(state))
     expect(restored.buildings.sawmill).toBe(7)
     expect(restored.buildings.warehouse).toBe(3)
+    expect(serialize(restored)).toBe(serialize(state))
+  })
+
+  it('faithfully round-trips a v3 save with owned units and a non-empty queue', () => {
+    const state = createInitialState('army', 9000)
+    state.buildings.barracks = 2
+    recomputeDerived(state)
+    // Trained roster + an in-flight training order (snapshotted per-unit time).
+    state.units.spearman = 3
+    state.units.axeman = 1
+    state.recruitQueue = [
+      { unitId: 'spearman', count: 2, remaining: 40, perUnitSeconds: 76 },
+      { unitId: 'swordsman', count: 1, remaining: 110, perUnitSeconds: 110 },
+    ]
+
+    // validateState accepts the populated units + queue (no throw).
+    expect(validateState(state).version).toBe(SAVE_VERSION)
+
+    const restored = importSave(exportSave(state))
+    expect(restored.units).toEqual(state.units)
+    expect(restored.recruitQueue).toEqual(state.recruitQueue)
+    // Plain-number queue/units carry no Decimal tags, so the bytes match exactly.
     expect(serialize(restored)).toBe(serialize(state))
   })
 })

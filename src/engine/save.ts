@@ -1,7 +1,8 @@
 import { Decimal, isFiniteDecimal } from './decimal'
 import type { GameState } from './state'
-import { recomputeDerived, INITIAL_BUILDINGS } from './state'
+import { recomputeDerived, INITIAL_BUILDINGS, INITIAL_UNITS } from './state'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
+import { UNIT_IDS } from '../content/units'
 
 /**
  * Save/load engine. Owns the on-disk schema version and all (de)serialization.
@@ -22,7 +23,7 @@ import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 2
+export const SAVE_VERSION = 3
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -100,6 +101,18 @@ export function migrate(raw: any): any {
       popCap: new Decimal(0),
       version: 2,
     }),
+    // v2 -> v3: units + recruitment. Seed empty unit counts and an empty training
+    // queue, and merge in any buildings added since v2 (e.g. the barracks) keyed
+    // at their initial level WITHOUT clobbering the player's existing levels —
+    // `...s.buildings` wins over the seed so progress is preserved. importSave then
+    // re-derives the cached stats from the merged levels.
+    2: (s) => ({
+      ...s,
+      buildings: { ...INITIAL_BUILDINGS, ...(s.buildings ?? {}) },
+      units: { ...INITIAL_UNITS },
+      recruitQueue: [],
+      version: 3,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -170,6 +183,34 @@ export function validateState(s: unknown): GameState {
       throw new Error(`save: invalid building ${id}`)
     }
   }
+
+  // v3: units are plain non-negative integer counts; the training queue is a list
+  // of finite, non-negative number fields with a known unit id. importSave is
+  // reachable from arbitrary pasted input, so this is the only semantic gate.
+  const { units, recruitQueue } = s
+  if (!isObject(units)) throw new Error('save: missing units')
+  for (const id of UNIT_IDS) {
+    const n = units[id]
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+      throw new Error(`save: invalid unit ${id}`)
+    }
+  }
+
+  if (!Array.isArray(recruitQueue)) throw new Error('save: invalid recruitQueue')
+  const validIds = UNIT_IDS as readonly string[]
+  for (const order of recruitQueue) {
+    if (!isObject(order)) throw new Error('save: invalid recruit order')
+    if (typeof order.unitId !== 'string' || !validIds.includes(order.unitId)) {
+      throw new Error('save: invalid recruit order unitId')
+    }
+    for (const key of ['count', 'remaining', 'perUnitSeconds'] as const) {
+      const v = order[key]
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+        throw new Error(`save: invalid recruit order ${key}`)
+      }
+    }
+  }
+
   return s as unknown as GameState
 }
 

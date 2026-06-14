@@ -3,6 +3,7 @@ import { RNG } from './rng'
 import { SAVE_VERSION } from './save'
 import { signal, type Signal } from './store'
 import { BUILDINGS, BUILDING_IDS, type BuildingId } from '../content/buildings'
+import { UNIT_IDS, type UnitId } from '../content/units'
 
 /**
  * The single source of truth. Everything the simulation needs lives here so it
@@ -17,6 +18,22 @@ export type ResourceId = 'wood' | 'clay' | 'iron'
 export const RESOURCE_IDS: readonly ResourceId[] = ['wood', 'clay', 'iron']
 
 export type ResourceMap = Record<ResourceId, Decimal>
+
+/**
+ * One queued training order. `count` units of `unitId` remain; `remaining` is the
+ * seconds left until the NEXT unit pops; `perUnitSeconds` is a SNAPSHOT of the
+ * per-unit training time taken when the order was placed — so later barracks
+ * upgrades never retroactively speed up (or, via float drift, perturb) an order in
+ * flight, which keeps offline/online replay deterministic. Plain numbers (counts /
+ * seconds), not Decimal: unit counts are bounded by popCap, and the "economy on
+ * Decimal" rule covers resource amounts/production, not training timers.
+ */
+export interface RecruitOrder {
+  unitId: UnitId
+  count: number
+  remaining: number
+  perUnitSeconds: number
+}
 
 export interface GameState {
   /** Save schema version — drives migrations. */
@@ -47,6 +64,19 @@ export interface GameState {
   storageCap: Decimal
   /** Population cap, DERIVED from buildings (farm). Cached; unit upkeep budget. */
   popCap: Decimal
+
+  /**
+   * Trained, idle units by id. Plain integer counts (bounded by popCap), not
+   * Decimal — see {@link RecruitOrder}. The authoritative roster: a unit becomes a
+   * count here only once its training order completes.
+   */
+  units: Record<UnitId, number>
+  /**
+   * FIFO training queue. The head order trains first; {@link RecruitOrder.count}
+   * and `remaining` are advanced by the recruitment system every tick (online and
+   * offline alike), so an order popping mid-tick is byte-identical across replays.
+   */
+  recruitQueue: RecruitOrder[]
 }
 
 /** Base storage cap before any warehouse levels. Storage scales with warehouse. */
@@ -88,6 +118,8 @@ export function recomputeDerived(state: GameState): void {
         break
       case 'cost_reduction':
         break // consumed by buildingCost, not a tick-derived stat
+      case 'recruit_speed':
+        break // consumed by recruitSpeedMult (recruitment), not a tick-derived stat
     }
   }
 
@@ -106,6 +138,15 @@ export const INITIAL_BUILDINGS = Object.fromEntries(
   BUILDING_IDS.map((id) => [id, BUILDINGS[id].initialLevel ?? 0]),
 ) as Record<BuildingId, number>
 
+/**
+ * Unit roster a fresh run starts with: every unit at 0. DERIVED from UNIT_IDS so
+ * adding a unit is a single edit to src/content/units.ts (no engine change here),
+ * and the save migration reuses this map to seed the field on old saves.
+ */
+export const INITIAL_UNITS = Object.fromEntries(
+  UNIT_IDS.map((id) => [id, 0]),
+) as Record<UnitId, number>
+
 export function createInitialState(seed: string, now: number): GameState {
   const state: GameState = {
     version: SAVE_VERSION,
@@ -120,6 +161,8 @@ export function createInitialState(seed: string, now: number): GameState {
     production: { wood: D(0), clay: D(0), iron: D(0) },
     storageCap: D(0),
     popCap: D(0),
+    units: { ...INITIAL_UNITS },
+    recruitQueue: [],
   }
   // Make production / storageCap / popCap consistent with the starting buildings.
   // With the initial level-1 economy this reproduces M0's base rates exactly.
