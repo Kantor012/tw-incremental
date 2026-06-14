@@ -1,5 +1,7 @@
-import { Decimal } from './decimal'
+import { Decimal, isFiniteDecimal } from './decimal'
 import type { GameState } from './state'
+import { recomputeDerived, INITIAL_BUILDINGS } from './state'
+import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 
 /**
  * Save/load engine. Owns the on-disk schema version and all (de)serialization.
@@ -9,14 +11,18 @@ import type { GameState } from './state'
  *   every Decimal as `{ $d: "<string>" }` on the way out and rebuild it on the
  *   way in, so round-trips are loss-free and idempotent.
  * - This module is the value-level owner of `SAVE_VERSION`. `state.ts` imports
- *   that constant from here. To avoid a runtime import cycle we only ever import
- *   the *type* `GameState` from `state.ts`, never a value.
+ *   that constant from here, and this module imports `recomputeDerived` /
+ *   `INITIAL_BUILDINGS` back from `state.ts`. That two-way value import is a
+ *   *benign* initialisation cycle: neither side uses the other's value at module
+ *   top level — only inside function bodies (importSave/migrate here,
+ *   createInitialState there) — so both modules are fully evaluated before any of
+ *   those functions can run.
  * - Everything here must run headless (Node + browser): localStorage access is
  *   always feature-detected and wrapped in try/catch.
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 1
+export const SAVE_VERSION = 2
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -84,6 +90,16 @@ export function migrate(raw: any): any {
   const migrations: Record<number, (s: any) => any> = {
     // v0 is the pre-versioning save; it shares the v1 shape, so just stamp it.
     0: (s) => ({ ...s, version: 1 }),
+    // v1 -> v2: buildings system. v1 had flat production/storageCap; v2 derives
+    // them from building levels. Seed the new fields (levels + popCap) so the
+    // shape validates; importSave then calls recomputeDerived to make
+    // production/storageCap/popCap consistent with the seeded levels.
+    1: (s) => ({
+      ...s,
+      buildings: { ...INITIAL_BUILDINGS },
+      popCap: new Decimal(0),
+      version: 2,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -116,14 +132,43 @@ export function validateState(s: unknown): GameState {
   if (typeof s.lastSeen !== 'number' || !Number.isFinite(s.lastSeen)) {
     throw new Error('save: invalid lastSeen')
   }
-  if (!(s.storageCap instanceof Decimal)) throw new Error('save: invalid storageCap')
+  // Decimal fields must be value-sane, not just instanceof: NaN / Infinity /
+  // negative all parse but would corrupt the live game and then get autosaved
+  // (CLAUDE.md hard rule #3). importSave is reachable from arbitrary pasted input,
+  // so this is the only semantic gate. Storage cap must be strictly positive
+  // (resources clamp to it); popCap may be 0 (migrate seeds 0 pre-recompute).
+  if (!(s.storageCap instanceof Decimal) || !isFiniteDecimal(s.storageCap) || s.storageCap.lte(0)) {
+    throw new Error('save: invalid storageCap')
+  }
+  if (!(s.popCap instanceof Decimal) || !isFiniteDecimal(s.popCap) || s.popCap.lt(0)) {
+    throw new Error('save: invalid popCap')
+  }
 
-  const { resources, production } = s
+  const { resources, production, buildings } = s
   if (!isObject(resources)) throw new Error('save: missing resources')
   if (!isObject(production)) throw new Error('save: missing production')
   for (const id of REQUIRED_RESOURCES) {
-    if (!(resources[id] instanceof Decimal)) throw new Error(`save: invalid resource ${id}`)
-    if (!(production[id] instanceof Decimal)) throw new Error(`save: invalid production ${id}`)
+    const res = resources[id]
+    if (!(res instanceof Decimal) || !isFiniteDecimal(res) || res.lt(0)) {
+      throw new Error(`save: invalid resource ${id}`)
+    }
+    const prod = production[id]
+    if (!(prod instanceof Decimal) || !isFiniteDecimal(prod) || prod.lt(0)) {
+      throw new Error(`save: invalid production ${id}`)
+    }
+  }
+
+  if (!isObject(buildings)) throw new Error('save: missing buildings')
+  for (const id of BUILDING_IDS) {
+    const level = buildings[id]
+    if (
+      typeof level !== 'number' ||
+      !Number.isInteger(level) ||
+      level < 0 ||
+      level > BUILDINGS[id].maxLevel
+    ) {
+      throw new Error(`save: invalid building ${id}`)
+    }
   }
   return s as unknown as GameState
 }
@@ -150,7 +195,12 @@ export function importSave(b64: string): GameState {
   }
   const json = new TextDecoder().decode(bytes)
   const raw = JSON.parse(json, reviver)
-  return validateState(migrate(raw))
+  const state = validateState(migrate(raw))
+  // Re-derive production / storageCap / popCap from the (possibly just-migrated)
+  // building levels so the cached fields are always consistent with the source of
+  // truth — both for v1->v2 upgrades and for any hand-edited/forward-compat save.
+  recomputeDerived(state)
+  return state
 }
 
 /** Persist the save to localStorage. Returns false when unavailable/failing. */

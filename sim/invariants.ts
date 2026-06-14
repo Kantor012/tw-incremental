@@ -60,20 +60,37 @@ export function totalResources(state: GameState): Decimal {
 }
 
 /**
- * No-softlock: at every sample there must be *some* available progress — either
- * total resources grew since the previous sample, or the bot has an action to
- * take. A bare "production > 0" proxy is intentionally NOT used: production can
- * be positive while every resource is pinned at the cap (a real softlock), which
- * this delta-based check correctly flags. Required by SKILL.md / CLAUDE.md gates.
+ * No-softlock: at every sample there must be *some* real progress. Three signals
+ * are accepted, and a stall is flagged only when ALL are absent:
+ *
+ *  1. `grew`   — total resources rose since the previous sample (idle accrual), OR
+ *  2. `bought` — at least one upgrade was purchased during the window, OR
+ *  3. `hasAction` — an affordable, non-maxed building is available right now.
+ *
+ * Signal 2 is essential once a *spending* bot exists: a greedy buyer converts
+ * resources into building levels, so the instantaneous resource sum can DROP
+ * across a window even though the run is clearly progressing. Counting purchases
+ * as progress prevents that legitimate spend from reading as a softlock.
+ *
+ * A bare "production > 0" proxy is intentionally NOT used: production stays
+ * positive even when every resource is pinned at the cap with nothing affordable
+ * — the genuine softlock this check must catch. That case trips here as
+ * grew=false, bought=false, hasAction=false. Required by SKILL.md / CLAUDE.md.
  */
-export function checkNoSoftlock(state: GameState, prevTotal: Decimal): InvariantResult {
+export function checkNoSoftlock(
+  state: GameState,
+  prevTotal: Decimal,
+  boughtInWindow: boolean,
+): InvariantResult {
   const grew = totalResources(state).gt(prevTotal)
   const hasAction = chooseAction(state) !== null
-  const ok = grew || hasAction
+  const ok = grew || boughtInWindow || hasAction
   return {
     name: 'no-softlock',
     ok,
-    detail: ok ? undefined : 'no available progress action: resources stalled and bot has no action',
+    detail: ok
+      ? undefined
+      : 'softlock: resources stalled (capped?), no upgrade bought this window, and nothing affordable',
   }
 }
 

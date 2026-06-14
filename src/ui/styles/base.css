@@ -18,6 +18,12 @@
   margin: 0;
 }
 
+/* `hidden` must win even over class selectors that set a display value (the UA
+ * rule [hidden]{display:none} has lower specificity than our component classes). */
+[hidden] {
+  display: none !important;
+}
+
 html {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
@@ -431,6 +437,121 @@ a:hover {
 }
 .text-bad {
   color: var(--bad);
+}
+
+/* ---- Panel budynków --------------------------------------------------- */
+/* Podsumowanie statystyk pochodnych (magazyn / populacja / produkcja). */
+.building-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  padding-bottom: var(--space-3);
+  margin-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.stat-label {
+  font-size: var(--text-xs);
+}
+
+.stat-val {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+/* Wiersz budynku: nagłówek + opis na całą szerokość, koszt obok przycisku. */
+.building {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas:
+    "head head"
+    "desc desc"
+    "cost action";
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) 0;
+}
+
+.building + .building {
+  border-top: 1px solid var(--border);
+}
+
+.building-head {
+  grid-area: head;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.building-name {
+  font-weight: var(--weight-medium);
+  color: var(--text);
+}
+
+.building-level {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.building-desc {
+  grid-area: desc;
+  font-size: var(--text-xs);
+}
+
+.building-cost {
+  grid-area: cost;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+}
+
+.building-maxed {
+  grid-area: cost;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--accent);
+}
+
+.building .btn {
+  grid-area: action;
+  align-self: center;
+}
+
+.cost-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+.cost-item .cost-val {
+  color: var(--text);
+}
+
+/* Surowiec, którego brakuje na następny poziom. Kolor NIE jest jedynym
+   wskaźnikiem (WCAG 1.4.1): dochodzi pogrubienie i znak ostrzegawczy ⚠, więc
+   sygnał przetrwa skalę szarości / daltonizm. */
+.cost-item.is-short,
+.cost-item.is-short .cost-val {
+  color: var(--bad);
+}
+
+.cost-item.is-short {
+  font-weight: var(--weight-bold);
+}
+
+.cost-item.is-short .cost-val::before {
+  content: '\26A0\FE0E ';
 }
 
 /* ---- Panel zapisu (export / import / reset) --------------------------- */

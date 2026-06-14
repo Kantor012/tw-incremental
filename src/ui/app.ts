@@ -1,8 +1,10 @@
 import { effect } from '../engine/store'
-import { RESOURCE_IDS } from '../engine/state'
-import { formatNumber, formatRate, formatTime } from '../engine/format'
+import { RESOURCE_IDS, type ResourceId } from '../engine/state'
+import { formatNumber, formatInt, formatRate, formatTime } from '../engine/format'
 import type { GameStore } from '../engine/state'
 import type { GameBus } from '../engine/eventbus'
+import { BUILDING_IDS, BUILDINGS, type BuildingId } from '../content/buildings'
+import { nextCostAffordable } from '../systems/buildings'
 
 /**
  * Root view. Vanilla TS + DOM, no framework. Built once with createElement /
@@ -22,6 +24,8 @@ export interface AppContext {
   onExport: () => string
   onImport: (s: string) => boolean
   onReset: () => void
+  /** Upgrade one building level; returns true on success (spent + level++). */
+  onBuild: (id: BuildingId) => boolean
   version: string
   offlineSeconds: number
 }
@@ -40,6 +44,29 @@ interface ResourceRefs {
   value: HTMLElement
   rate: HTMLElement
   bar: HTMLElement
+}
+
+/** Cached handles for one building row (level / cost / affordability / button). */
+interface BuildingRefs {
+  level: HTMLElement
+  /** Wrapper holding the per-resource cost chips (hidden when maxed). */
+  cost: HTMLElement
+  /** "Maks." marker shown in place of the cost when at maxLevel. */
+  maxed: HTMLElement
+  /**
+   * Per-resource cost chip: `item` toggles the "short" state, `val` holds the
+   * number, `mark` is a visually-hidden text cue read by assistive tech (the
+   * shortfall must not be conveyed by colour alone — WCAG 1.4.1).
+   */
+  costItems: Record<ResourceId, { item: HTMLElement; val: HTMLElement; mark: HTMLElement }>
+  button: HTMLButtonElement
+}
+
+/** Cached handles for the derived-stats summary (storage / population / production). */
+interface StatRefs {
+  storage: HTMLElement
+  pop: HTMLElement
+  prod: Record<ResourceId, HTMLElement>
 }
 
 /** Create an HTML element with optional class and text content. */
@@ -195,7 +222,88 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
   }
   container.appendChild(resPanel)
 
-  // ---- c) Save panel: export / import / reset -------------------------------
+  // ---- c) Buildings panel ---------------------------------------------------
+  const buildPanel = h('section', 'panel')
+  buildPanel.setAttribute('aria-labelledby', 'build-title')
+  const buildTitle = h('h2', 'panel-title', 'Budynki')
+  buildTitle.id = 'build-title'
+  buildPanel.appendChild(buildTitle)
+
+  // Derived-stats summary (storage cap, population cap, production per resource).
+  const stats = h('div', 'building-stats')
+  const mkStat = (label: string): { wrap: HTMLElement; val: HTMLElement } => {
+    const wrap = h('div', 'stat')
+    wrap.appendChild(h('span', 'stat-label muted', label))
+    const val = h('span', 'num stat-val')
+    wrap.appendChild(val)
+    return { wrap, val }
+  }
+  const storageStat = mkStat('Magazyn')
+  const popStat = mkStat('Populacja')
+  stats.appendChild(storageStat.wrap)
+  stats.appendChild(popStat.wrap)
+  const prodStats: Record<ResourceId, HTMLElement> = {} as Record<ResourceId, HTMLElement>
+  for (const id of RESOURCE_IDS) {
+    const st = mkStat(RESOURCE_NAMES[id] + '/s')
+    prodStats[id] = st.val
+    stats.appendChild(st.wrap)
+  }
+  const statRefs: StatRefs = { storage: storageStat.val, pop: popStat.val, prod: prodStats }
+  buildPanel.appendChild(stats)
+
+  const bRefs: Record<string, BuildingRefs> = {}
+
+  for (const id of BUILDING_IDS) {
+    const def = BUILDINGS[id]
+    const row = h('div', 'building')
+
+    const head = h('div', 'building-head')
+    head.appendChild(h('span', 'building-name', def.name))
+    const levelEl = h('span', 'building-level num')
+    head.appendChild(levelEl)
+
+    const desc = h('p', 'building-desc muted', def.desc)
+
+    const costWrap = h('div', 'building-cost')
+    const costItems: Record<
+      ResourceId,
+      { item: HTMLElement; val: HTMLElement; mark: HTMLElement }
+    > = {} as Record<ResourceId, { item: HTMLElement; val: HTMLElement; mark: HTMLElement }>
+    for (const r of RESOURCE_IDS) {
+      const item = h('span', 'cost-item')
+      item.appendChild(h('span', 'cost-label', RESOURCE_NAMES[r]))
+      const val = h('span', 'num cost-val')
+      item.appendChild(val)
+      // Visually-hidden, AT-only shortfall cue (text, not colour).
+      const mark = h('span', 'visually-hidden')
+      item.appendChild(mark)
+      costWrap.appendChild(item)
+      costItems[r] = { item, val, mark }
+    }
+
+    const maxedLabel = h('span', 'building-maxed', 'Maks.')
+    maxedLabel.hidden = true
+
+    const button = h('button', 'btn', 'Rozbuduj')
+    button.type = 'button'
+    button.setAttribute('aria-label', 'Rozbuduj: ' + def.name)
+    button.addEventListener('click', () => {
+      ctx.onBuild(id)
+      update()
+    })
+
+    row.appendChild(head)
+    row.appendChild(desc)
+    row.appendChild(costWrap)
+    row.appendChild(maxedLabel)
+    row.appendChild(button)
+    buildPanel.appendChild(row)
+
+    bRefs[id] = { level: levelEl, cost: costWrap, maxed: maxedLabel, costItems, button }
+  }
+  container.appendChild(buildPanel)
+
+  // ---- d) Save panel: export / import / reset -------------------------------
   const savePanel = h('section', 'panel')
   savePanel.setAttribute('aria-labelledby', 'save-title')
   const saveTitle = h('h2', 'panel-title', 'Zapis')
@@ -256,7 +364,7 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
   savePanel.appendChild(resetRow)
   container.appendChild(savePanel)
 
-  // ---- d) Footer ------------------------------------------------------------
+  // ---- e) Footer ------------------------------------------------------------
   const footerText =
     'wersja ' +
     ctx.version +
@@ -281,6 +389,38 @@ export function mountApp(root: HTMLElement, ctx: AppContext): void {
       const barFill = ref.bar.firstElementChild as HTMLElement | null
       if (barFill) barFill.style.width = pct + '%'
       ref.bar.setAttribute('aria-valuenow', Math.round(pct).toString())
+    }
+
+    // Derived-stats summary (all read from the cached derived fields).
+    statRefs.storage.textContent = formatNumber(s.storageCap)
+    statRefs.pop.textContent = formatInt(s.popCap)
+    for (const r of RESOURCE_IDS) {
+      statRefs.prod[r].textContent = formatRate(s.production[r])
+    }
+
+    // Building rows: level, next-level cost (red where short), affordability.
+    for (const id of BUILDING_IDS) {
+      const ref = bRefs[id]
+      const def = BUILDINGS[id]
+      const level = s.buildings[id]
+      ref.level.textContent = 'poz. ' + level + ' / ' + def.maxLevel
+      const { cost, affordable, maxed } = nextCostAffordable(s, id)
+      ref.maxed.hidden = !maxed
+      ref.cost.hidden = maxed
+      ref.button.disabled = maxed || !affordable
+      if (!maxed) {
+        for (const r of RESOURCE_IDS) {
+          const ci = ref.costItems[r]
+          ci.val.textContent = formatInt(cost[r])
+          // Shortfall is cued three non-colour ways (WCAG 1.4.1): a CSS glyph +
+          // bold (.is-short), a hover title, and a visually-hidden text marker for
+          // screen readers — never colour alone.
+          const short = s.resources[r].lt(cost[r])
+          ci.item.classList.toggle('is-short', short)
+          ci.item.title = short ? RESOURCE_NAMES[r] + ': brak surowca' : ''
+          ci.mark.textContent = short ? ' (brak)' : ''
+        }
+      }
     }
   }
 

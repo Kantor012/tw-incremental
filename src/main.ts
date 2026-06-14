@@ -12,6 +12,7 @@ import {
 import { applyOffline } from './engine/offline'
 import { GameLoop } from './engine/loop'
 import { EventBus, type GameEvents } from './engine/eventbus'
+import { build } from './systems/buildings'
 import { mountApp } from './ui/app'
 
 /**
@@ -61,7 +62,15 @@ mountApp(root, {
     clearLocal()
     location.reload()
   },
-  version: '0.1.0',
+  onBuild: (id) => {
+    const ok = build(store.state, id)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
+  version: '0.2.0',
   offlineSeconds,
 })
 
