@@ -1,0 +1,493 @@
+/* ============================================================================
+ * TW Incremental — Base + komponenty bazowe
+ * --------------------------------------------------------------------------
+ * Reset, ustawienia dokumentu i lekki zestaw klas komponentów oparty wyłącznie
+ * o tokeny z tokens.css. Mobile-first; breakpoint ~640px podbija gęstość.
+ *
+ * Kolejność wczytywania: tokens.css MUSI poprzedzać ten plik.
+ * ========================================================================== */
+
+/* ---- Reset ------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  min-height: 100dvh;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  line-height: var(--leading-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Nagłówki — krój displayowy (serif), ciasna interlinia */
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  line-height: var(--leading-tight);
+  color: var(--text);
+}
+
+h1 {
+  font-size: var(--text-2xl);
+}
+h2 {
+  font-size: var(--text-xl);
+}
+h3 {
+  font-size: var(--text-lg);
+}
+h4 {
+  font-size: var(--text-base);
+}
+
+p {
+  text-wrap: pretty;
+}
+
+/* Media nie przekraczają kontenera */
+img,
+svg,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+svg {
+  height: auto;
+}
+
+/* Formularze dziedziczą typografię */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--accent-2);
+  text-decoration: underline;
+}
+
+/* Zaznaczenie tekstu w klimacie złota */
+::selection {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+/* ---- Liczby ----------------------------------------------------------- */
+/* Wszystkie wartości liczbowe (ekonomia na Decimal) renderujemy monospaced
+ * z tabularnymi cyframi, by kolumny i liczniki nie „skakały". */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- Dostępność ------------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Usuwa domyślny outline tylko gdy mamy wsparcie :focus-visible */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Szanuj preferencję ograniczonego ruchu */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================================================
+ * Komponenty
+ * ========================================================================== */
+
+/* ---- Układ ------------------------------------------------------------ */
+.container {
+  width: 100%;
+  max-width: 720px;
+  margin-inline: auto;
+  padding: var(--space-4);
+}
+
+/* ---- Nagłówek aplikacji / marka --------------------------------------- */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.brand-mark .shield {
+  width: 2.5rem;
+  height: 2.5rem;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.brand-title {
+  margin: 0;
+}
+
+.subtitle {
+  font-size: var(--text-sm);
+}
+
+/* ---- Stopka ----------------------------------------------------------- */
+.app-footer {
+  margin-top: var(--space-4);
+  text-align: center;
+  font-size: var(--text-sm);
+}
+
+@media (min-width: 640px) {
+  .container {
+    padding: var(--space-5);
+  }
+}
+
+/* ---- Panel ------------------------------------------------------------ */
+.panel {
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  padding: var(--space-4);
+}
+
+.panel + .panel {
+  margin-top: var(--space-4);
+}
+
+/* Tytuł panelu (gdy nagłówek jest zwykłym h2 wewnątrz panelu) */
+.panel-title {
+  font-size: var(--text-lg);
+  margin-bottom: var(--space-3);
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin: calc(var(--space-4) * -1) calc(var(--space-4) * -1) var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  background-color: var(--panel-2);
+  border-bottom: 1px solid var(--border);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.panel-header h1,
+.panel-header h2,
+.panel-header h3 {
+  font-size: var(--text-lg);
+  margin: 0;
+}
+
+/* ---- Przycisk --------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  min-width: 44px;
+  padding: var(--space-2) var(--space-4);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-tight);
+  color: var(--text);
+  background-color: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  user-select: none;
+  text-align: center;
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.btn:hover {
+  background-color: var(--border);
+  border-color: var(--accent);
+}
+
+.btn:active {
+  transform: translateY(1px);
+  background-color: var(--panel);
+}
+
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+  background-color: var(--panel-2);
+  border-color: var(--border);
+}
+
+/* Wariant główny — złoty sztandar */
+.btn-primary {
+  color: var(--bg);
+  background-color: var(--accent);
+  border-color: var(--accent);
+  font-weight: var(--weight-bold);
+}
+.btn-primary:hover {
+  background-color: var(--accent-2);
+  border-color: var(--accent-2);
+}
+.btn-primary:active {
+  background-color: var(--accent);
+}
+.btn-primary:disabled,
+.btn-primary[aria-disabled="true"] {
+  background-color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* Wariant „ghost" — sam obrys */
+.btn-ghost {
+  background-color: transparent;
+}
+.btn-ghost:hover {
+  background-color: var(--panel-2);
+}
+
+/* Wariant niebezpieczny — akcja destrukcyjna (reset). --bad (#e0644c) na
+ * --panel-2 (#332619) ~5.0:1; tekst --bg na pełnym --bad przy hoverze ~5.4:1. */
+.btn-danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.btn-danger:hover {
+  color: var(--bg);
+  background-color: var(--bad);
+  border-color: var(--bad);
+}
+.btn-danger:active {
+  background-color: var(--bad);
+}
+
+/* ---- Pasek postępu (HP, kolejka, magazyn) ----------------------------- */
+.bar {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  background-color: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background-color: var(--accent);
+  border-radius: inherit;
+  transition: width var(--dur-base) var(--ease);
+}
+
+/* Warianty wypełnienia paska wg surowca / statusu */
+.bar.is-wood > i {
+  background-color: var(--wood);
+}
+.bar.is-clay > i {
+  background-color: var(--clay);
+}
+.bar.is-iron > i {
+  background-color: var(--iron);
+}
+.bar.is-good > i {
+  background-color: var(--good);
+}
+.bar.is-bad > i {
+  background-color: var(--bad);
+}
+
+/* ---- Wiersz surowca --------------------------------------------------- */
+/* Ikona | nazwa (rośnie) | wartość. Wartości tabularne wyrównane do prawej. */
+.resource-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.resource-row + .resource-row {
+  border-top: 1px solid var(--border);
+}
+
+.res-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.resource-row .res-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  font-size: var(--text-lg);
+  line-height: 1;
+}
+
+.resource-row .res-label {
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.resource-row .res-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text);
+}
+
+.resource-row .res-rate {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+/* Kolorystyka tekstu wg surowca (gdy potrzebna) */
+.text-wood {
+  color: var(--wood);
+}
+.text-clay {
+  color: var(--clay);
+}
+.text-iron {
+  color: var(--iron);
+}
+.text-muted {
+  color: var(--muted);
+}
+.text-good {
+  color: var(--good);
+}
+.text-bad {
+  color: var(--bad);
+}
+
+/* ---- Panel zapisu (export / import / reset) --------------------------- */
+.save-area {
+  display: block;
+  width: 100%;
+  resize: vertical;
+  padding: var(--space-2);
+  background-color: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.save-area + .save-area {
+  margin-top: var(--space-2);
+}
+
+.save-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin: var(--space-2) 0;
+}
+
+.save-msg {
+  font-size: var(--text-sm);
+}
+
+/* ---- Drobne narzędzia ------------------------------------------------- */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Przygaszony tekst drugorzędny (podpisy, stopka, komunikaty). */
+.muted {
+  color: var(--muted);
+}
+
+@media (min-width: 640px) {
+  body {
+    font-size: var(--text-base);
+  }
+  .panel {
+    padding: var(--space-5);
+  }
+  .panel-header {
+    margin: calc(var(--space-5) * -1) calc(var(--space-5) * -1) var(--space-5);
+    padding: var(--space-4) var(--space-5);
+  }
+}

@@ -1,0 +1,93 @@
+/* ============================================================================
+ * TW Incremental — Design tokens
+ * --------------------------------------------------------------------------
+ * Jedno źródło prawdy dla całej warstwy wizualnej. Klimat: średniowieczny /
+ * plemienny obóz Tribal Wars — ciemne, ciepłe tła (przygaszone drewno i
+ * sadza), surowce w ich naturalnych barwach (drewno / glina / żelazo),
+ * złoto-mosiądz jako akcent (sztandary, okucia, monety).
+ *
+ * Zasady:
+ *  - Tylko fonty systemowe (brak @font-face, zero zewnętrznych assetów).
+ *  - Kontrast tekst/tło >= 4.5:1 (--text ~14.8:1, --muted ~7.8:1 na --bg).
+ *  - Ten plik MUSI być wczytany PRZED base.css (base korzysta z tych zmiennych).
+ * ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Paleta: tła i powierzchnie (ciepła sadza / wypalone drewno) ------- */
+  --bg: #1a1410;        /* tło aplikacji — zgodne z <meta theme-color>      */
+  --bg-2: #221a13;      /* delikatne strefowanie tła / sekcje                */
+  --panel: #2a2017;     /* karta / panel                                     */
+  --panel-2: #332619;   /* zagnieżdżony panel, nagłówek panelu, hover tła    */
+  --border: #4a3a28;    /* obrys paneli i kontrolek (ciepły brąz)           */
+
+  /* ---- Paleta: tekst ----------------------------------------------------- */
+  --text: #f0e6d6;      /* tekst główny — ciepła kość słoniowa (~14.8:1)     */
+  --muted: #b8a890;     /* tekst drugorzędny / podpisy (~7.8:1)              */
+
+  /* ---- Paleta: akcenty (złoto / mosiądz — sztandary, monety) ------------- */
+  --accent: #d9a441;    /* złoto — główny akcent, focus, aktywne stany       */
+  --accent-2: #ead08a;  /* jaśniejszy mosiądz — hover akcentu, błyski        */
+
+  /* ---- Paleta: surowce (barwy naturalne) -------------------------------- */
+  --wood: #c98a4b;      /* drewno — ciepły tan / dębina                      */
+  --clay: #cf7150;      /* glina — terakota                                  */
+  --iron: #9fb3c2;      /* żelazo — chłodna stal                             */
+
+  /* ---- Paleta: status --------------------------------------------------- */
+  --good: #7ec06a;      /* sukces / zysk / dostępne                          */
+  --bad: #e0644c;       /* błąd / strata / zablokowane                       */
+
+  /* ---- Typografia: rodziny (wyłącznie fonty systemowe) ------------------ */
+  --font-display: Georgia, "Iowan Old Style", Palatino, "Palatino Linotype",
+    "Book Antiqua", serif;
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono",
+    monospace;
+
+  /* ---- Typografia: skala rozmiarów (modular, ~1.2) ---------------------- */
+  --text-xs: 0.75rem;   /* 12px */
+  --text-sm: 0.875rem;  /* 14px */
+  --text-base: 1rem;    /* 16px */
+  --text-lg: 1.25rem;   /* 20px */
+  --text-xl: 1.5rem;    /* 24px */
+  --text-2xl: 2rem;     /* 32px */
+
+  /* ---- Typografia: grubości i interlinia -------------------------------- */
+  --weight-normal: 400;
+  --weight-medium: 600;
+  --weight-bold: 700;
+  --leading-tight: 1.2;
+  --leading-base: 1.5;
+
+  /* ---- Skala odstępów (rem, krok ~4px → 32px) -------------------------- */
+  --space-1: 0.25rem;   /* 4px  */
+  --space-2: 0.5rem;    /* 8px  */
+  --space-3: 0.75rem;   /* 12px */
+  --space-4: 1rem;      /* 16px */
+  --space-5: 1.5rem;    /* 24px */
+  --space-6: 2rem;      /* 32px */
+
+  /* ---- Promienie -------------------------------------------------------- */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* ---- Cienie (głębia + ciepły wewnętrzny połysk) ---------------------- */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.5);
+
+  /* ---- Czasy animacji --------------------------------------------------- */
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+  --ease: cubic-bezier(0.2, 0.6, 0.3, 1);
+
+  /* ---- Warstwy (z-index) ------------------------------------------------ */
+  --z-base: 1;
+  --z-sticky: 100;
+  --z-overlay: 1000;
+  --z-toast: 2000;
+}
