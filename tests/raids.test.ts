@@ -5,16 +5,26 @@ import {
   recomputeDerived,
   INITIAL_BUILDINGS,
   RAID_BASE_INTERVAL,
+  NO_TECH_MODS,
   type GameState,
 } from '../src/engine/state'
 import { advanceRaids, raidPower } from '../src/systems/raids'
-import { armyDefensePower } from '../src/systems/combat'
+import { armyDefensePower, luckFactor } from '../src/systems/combat'
 import { villageDefenseMult } from '../src/systems/buildings'
 import { BUILDING_IDS } from '../src/content/buildings'
 import { type UnitId } from '../src/content/units'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
+import { RNG } from '../src/engine/rng'
+
+/** First RNG seed (>=1) whose first luck draw satisfies `pred` — for deterministic luck cases. */
+function findSeed(pred: (luck: number) => boolean): number {
+  for (let s = 1; s < 200000; s++) {
+    if (pred(luckFactor(new RNG(s)))) return s
+  }
+  throw new Error('no seed produced the requested luck')
+}
 
 /** A full (all UnitId present) roster snapshot. */
 function army(
@@ -228,5 +238,97 @@ describe('wall (Mur) — raid mitigation (M5.2)', () => {
     expect(r.won).toBe(false)
     expect(v.units.spearman).toBe(0)
     expect(v.resources.wood.toString()).toBe('80')
+  })
+})
+
+// --- combat LUCK on a resolved raid (M5.5) ----------------------------------------
+
+describe('advanceRaids — combat luck (M5.5)', () => {
+  // A garrison sized so the raid is a knife-edge: 3 spearmen → home defence 45, while the
+  // raid power lands at 46 (RAID_BASE 10 + 3*initial-building-sum + 0.4*45). The raider's
+  // power is the side luck scales, so the verdict turns on luck * raidPower vs the wall:
+  // unlucky raiders (×<threshold) break on the garrison and are repelled; lucky ones
+  // (×>threshold) punch through. We derive the threshold from the live functions, so the
+  // case stays correct if RAID_* tuning changes.
+  function knifeEdge(seedName = 'r'): GameState {
+    const s = village(seedName)
+    s.villages.v0.units = army(3) // 3 spearmen
+    return s
+  }
+
+  it('a lucky raider breaks through a wall that repels the same raider on bad luck', () => {
+    const probe = knifeEdge()
+    const v = probe.villages.v0
+    const threshold = armyDefensePower(v.units) / raidPower(v) // luck above this → breakthrough
+    // The threshold must sit strictly inside the luck band, or "luck decides it" is vacuous.
+    expect(threshold).toBeGreaterThan(0.75)
+    expect(threshold).toBeLessThan(1.25)
+
+    const pechSeed = findSeed((l) => l < threshold)
+    const luckySeed = findSeed((l) => l > threshold)
+
+    // PECH raider: raidPower * luck(<threshold) <= defence → repelled (player view: won).
+    const repel = knifeEdge('repel')
+    const rv = repel.villages.v0
+    advanceRaids(rv, repel.battleLog, RAID_BASE_INTERVAL, NO_TECH_MODS, undefined, new RNG(pechSeed))
+    const repelReport = repel.battleLog[0]
+    if (repelReport.kind !== 'raid') throw new Error('expected a raid report')
+    expect(repelReport.won).toBe(true) // repelled
+    expect(repelReport.losses).toBe(0)
+    expect(rv.units.spearman).toBe(3) // garrison intact
+    expect(repelReport.luck).toBe(luckFactor(new RNG(pechSeed)))
+
+    // LUCKY raider: raidPower * luck(>threshold) > defence → breaks through (player lost).
+    const broke = knifeEdge('broke')
+    const bv = broke.villages.v0
+    advanceRaids(bv, broke.battleLog, RAID_BASE_INTERVAL, NO_TECH_MODS, undefined, new RNG(luckySeed))
+    const brokeReport = broke.battleLog[0]
+    if (brokeReport.kind !== 'raid') throw new Error('expected a raid report')
+    expect(brokeReport.won).toBe(false) // raid succeeded
+    expect(brokeReport.losses).toBeGreaterThan(0)
+    expect(brokeReport.luck).toBe(luckFactor(new RNG(luckySeed)))
+  })
+
+  it('records a finite luck multiplier inside the band on the raid report', () => {
+    const s = knifeEdge('band')
+    const v = s.villages.v0
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL, NO_TECH_MODS, undefined, new RNG(4242))
+    const r = s.battleLog[0]
+    if (r.kind !== 'raid') throw new Error('expected a raid report')
+    expect(typeof r.luck).toBe('number')
+    expect(r.luck!).toBeGreaterThanOrEqual(0.75)
+    expect(r.luck!).toBeLessThan(1.25)
+  })
+
+  it('draws EXACTLY ONCE per resolved raid (RNG advances a single step)', () => {
+    const s = knifeEdge('once')
+    const v = s.villages.v0
+    const rng = new RNG(2718)
+    const clone = new RNG(2718)
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL, NO_TECH_MODS, undefined, rng)
+    clone.next()
+    expect(s.battleLog.length).toBe(1) // exactly one raid resolved
+    expect(rng.getState()).toBe(clone.getState())
+  })
+
+  it('does NOT draw luck while the village is not yet worth raiding (frozen timer)', () => {
+    const fresh = createInitialState('luck-frozen', 0)
+    const v = fresh.villages.v0 // a bare hamlet → raids inactive
+    const rng = new RNG(123)
+    advanceRaids(v, fresh.battleLog, 100_000, NO_TECH_MODS, undefined, rng)
+    expect(fresh.battleLog.length).toBe(0)
+    expect(rng.getState()).toBe(123 >>> 0) // no raid resolved → no luck drawn
+  })
+
+  it('without an RNG, a raid resolves luck-free and omits `luck` (pre-M5.5 byte-for-byte)', () => {
+    const s = village()
+    const v = s.villages.v0
+    v.units = army(1, 0, 0) // weak garrison → the raid succeeds, as before the luck era
+    advanceRaids(v, s.battleLog, RAID_BASE_INTERVAL) // no rng arg
+    const r = s.battleLog[0]
+    if (r.kind !== 'raid') throw new Error('expected a raid report')
+    expect(r.won).toBe(false)
+    expect('luck' in r).toBe(false)
+    expect(r.luck).toBeUndefined()
   })
 })

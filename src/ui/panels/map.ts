@@ -17,7 +17,6 @@ import { unitUnlocked } from '../../systems/recruitment'
 import {
   armyAttackPower,
   armyCarry,
-  battleOutcome,
   ramDefenseFactor,
   catapultLevelDamage,
   CATA_PER_LEVEL,
@@ -27,6 +26,12 @@ import type { UiCtx, Panel } from '../types'
 import { h, svg, SVG_NS, unitIcon, shieldIcon } from '../dom'
 // Aliased: the detail card already has a local element named `conquestHint`.
 import { conquestHint as conquestHintText } from '../conquestCopy'
+import {
+  attackForecast,
+  attackConfirmMessage,
+  applyForecastClass,
+  LUCK_NOTE,
+} from '../combatForecast'
 
 /**
  * World map panel (M2.2) — the spatial twin of the "Wyprawy" (campaign) tab and
@@ -647,6 +652,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
   forecast.setAttribute('aria-live', 'polite')
   body.appendChild(forecast)
 
+  // Static luck primer (M5.5): explains in TEXT (never colour alone) that each fight rolls
+  // ±25% attack power, so the forecast above reads „pewna / prawdopodobna / ryzykowna".
+  // Lives in the body so it shows alongside the forecast whenever a target is selected.
+  body.appendChild(h('p', 'map-detail-hint muted', LUCK_NOTE))
+
   // Siege effects of the composed army (M5.3), conveyed in WORDS (never colour/glyph
   // alone) so rams' defence cut and catapults' razing reach AT/colour-blind users. The
   // catapult clause is computed against THIS camp's real level headroom (clamp >= 1), so a
@@ -834,13 +844,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
       // pre-send check can never disagree with the real outcome (or with the „Wyprawy" tab).
       const mods = effectiveMods(ctx.store.state)
       const effDef = barbarianTarget(barb.level).defensePower * ramDefenseFactor(army)
-      const outcome = battleOutcome(armyAttackPower(army, mods), effDef)
-      if (
-        !outcome.attackerWins &&
-        !window.confirm(
-          'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
-        )
-      ) {
+      const fc = attackForecast(armyAttackPower(army, mods), effDef)
+      // Combat luck (M5.5): warn on anything that is NOT a CERTAIN win — a probable win can
+      // still be flipped to a wipe by a bad ±25% roll, so the player accepts that risk
+      // explicitly. The message wording adapts to the tier (probable / risky / loss).
+      if (!fc.certainWin && !window.confirm(attackConfirmMessage(fc))) {
         return
       }
     }
@@ -1301,13 +1309,14 @@ export function createMapPanel(ctx: UiCtx): Panel {
       setForecast('Wyślij zwiad, aby poznać prognozę bitwy.')
       forecast.classList.remove('forecast-win', 'forecast-lose')
     } else if (composed > 0) {
-      // EFFECTIVE defence = base × ramFactor (engine mirror): a ram column can flip this
-      // verdict to a win and cut the loss estimate, so the player sees rams pay off.
-      const oc = battleOutcome(armyAttackPower(army, mods), target.defensePower * ramFactor)
-      const pct = Math.round(oc.attackerLossFrac * 100)
-      setForecast(oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka')
-      forecast.classList.toggle('forecast-win', oc.attackerWins)
-      forecast.classList.toggle('forecast-lose', !oc.attackerWins)
+      // EFFECTIVE defence = base × ramFactor (engine mirror): a ram column can flip the
+      // verdict and cut the loss estimate, so the player sees rams pay off. Three-state
+      // forecast (M5.5) accounts for the ±25% combat luck the tick rolls: PEWNA wygrana
+      // (wins even at worst luck) / PRAWDOPODOBNA (wins on average) / RYZYKOWNA / PEWNA
+      // porażka — carried in WORDS, with colour only as a supplementary tint.
+      const fc = attackForecast(armyAttackPower(army, mods), target.defensePower * ramFactor)
+      setForecast(fc.text)
+      applyForecastClass(forecast, fc.cls)
     } else {
       setForecast('Wybierz jednostki, aby zobaczyć prognozę.')
       forecast.classList.remove('forecast-win', 'forecast-lose')

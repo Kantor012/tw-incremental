@@ -906,3 +906,73 @@ describe('save — v12 siege units round-trip (M5.3)', () => {
     expect(() => validateState(marchMissing)).toThrow()
   })
 })
+
+// =====================================================================
+// v14 — combat luck on battle reports (M5.5).
+// =====================================================================
+
+/**
+ * A fresh state whose battle log mixes M5.5 reports (an attack + a raid each carrying a
+ * `luck` roll) with a PRE-M5.5 report (no `luck` — the field is optional, so an old log
+ * stays valid). Built per test so corruption mutations never leak.
+ */
+function luckLogState(): GameState {
+  const s = createInitialState('save-luck', 9)
+  const vid = s.villageOrder[0]
+  s.battleLog = [
+    // pre-M5.5 attack: NO luck field (an old report must round-trip and validate as-is).
+    { kind: 'attack', villageId: vid, targetLevel: 2, won: true, lootSum: '120', losses: 1 },
+    // M5.5 attack carrying its luck roll.
+    { kind: 'attack', villageId: vid, targetLevel: 3, won: false, lootSum: '0', losses: 4, luck: 0.83 },
+    // M5.5 raid carrying its luck roll.
+    { kind: 'raid', villageId: vid, won: true, looted: '0', losses: 0, luck: 1.21 },
+  ]
+  return s
+}
+
+describe('save — v14 battle-report luck round-trip (M5.5)', () => {
+  it('serialize/deserialize preserves each report luck (and the absent one stays absent)', () => {
+    const state = luckLogState()
+    const json = serialize(state)
+    const back = deserialize(json)
+
+    expect(back.version).toBe(SAVE_VERSION)
+    expect(back.battleLog).toHaveLength(3)
+    const [old, atk, raid] = back.battleLog
+    if (old.kind !== 'attack' || atk.kind !== 'attack' || raid.kind !== 'raid') {
+      throw new Error('unexpected report kinds')
+    }
+    // The old report never gained a luck field.
+    expect('luck' in old).toBe(false)
+    expect(old.luck).toBeUndefined()
+    // The M5.5 rolls survive verbatim (plain JSON numbers).
+    expect(atk.luck).toBe(0.83)
+    expect(raid.luck).toBe(1.21)
+    // serialize is idempotent across the round-trip.
+    expect(serialize(back)).toBe(json)
+  })
+
+  it('exportSave/importSave round-trips the luck rolls byte-identically', () => {
+    const state = luckLogState()
+    const restored = importSave(exportSave(state))
+    expect(serialize(restored)).toBe(serialize(state))
+    const atk = restored.battleLog[1]
+    const raid = restored.battleLog[2]
+    if (atk.kind !== 'attack' || raid.kind !== 'raid') throw new Error('unexpected report kinds')
+    expect(atk.luck).toBe(0.83)
+    expect(raid.luck).toBe(1.21)
+  })
+
+  it('validateState accepts a present-but-finite luck and an absent one', () => {
+    const ok = luckLogState()
+    expect(validateState(ok)).toBe(ok)
+  })
+
+  it('validateState rejects a non-finite / zero / negative / non-number luck', () => {
+    for (const bad of [NaN, Infinity, -Infinity, 0, -0.5, '1.1' as unknown as number]) {
+      const s = luckLogState()
+      ;(s.battleLog[1] as { luck?: unknown }).luck = bad
+      expect(() => validateState(s)).toThrow()
+    }
+  })
+})

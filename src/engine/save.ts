@@ -45,7 +45,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 13
+export const SAVE_VERSION = 14
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -455,6 +455,16 @@ export function migrate(raw: any): any {
       achievements: isObject(s.achievements) ? s.achievements : {},
       version: 13,
     }),
+    // v13 -> v14: combat luck (M5.5). A v13 save predates the per-engagement luck roll
+    // recorded on attack / raid battle reports, but that field — `BattleReport.luck`, a
+    // finite multiplier in [1-COMBAT_LUCK, 1+COMBAT_LUCK] — is strictly OPTIONAL: an old
+    // report that never recorded it stays valid ("luck unknown for this old engagement"),
+    // and the `rngState` that drives the roll already lives on the state (serialized since
+    // v1, simply unused by the combat path before now). So there is NOTHING to transform
+    // or backfill: this is a pure version step, kept only for migration discipline (every
+    // schema bump gets an entry — CLAUDE.md hard rule #3). validateState now additionally
+    // vets any PRESENT `luck` on an attack / raid report (finite number > 0).
+    13: (s) => ({ ...s, version: 14 }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -636,7 +646,8 @@ function validateVillage(v: unknown, id: string): void {
  * and the M5.3 siege units (`ram` / `catapult`, appended to UNIT_IDS) validate like any
  * other roster entry (the lists simply grew — siege is a per-unit role tag plus pure
  * combat/march logic, so it adds no new persisted field of its own), the GLOBAL battle log is validated (each report's `villageId`, plus the
- * M2.4 `conquer` variant alongside the existing `attack` / `raid`), and finally the
+ * M2.4 `conquer` variant alongside the existing `attack` / `raid`, and the OPTIONAL M5.5
+ * `luck` roll on an attack / raid report — a finite power multiplier > 0 when present), and finally the
  * M3.1 `tech` map is checked (an object whose every present key is a known node id at
  * an integer level within that node's [0, maxLevel] band; unknown keys are rejected),
  * and finally the M4.1 `prestige` record is checked (the PP counters `points` /
@@ -754,6 +765,16 @@ export function validateState(s: unknown): GameState {
     if (typeof r.won !== 'boolean') throw new Error('save: invalid battle report won')
     if (typeof r.losses !== 'number' || !Number.isInteger(r.losses) || r.losses < 0) {
       throw new Error('save: invalid battle report losses')
+    }
+    // Combat luck (M5.5) — the per-engagement attacker-power roll, shared by both the
+    // attack and raid variants. OPTIONAL: a pre-M5.5 report never recorded it (absent =
+    // "luck unknown for this old engagement"), which is why the v13->v14 migration needs
+    // no transform. When PRESENT it must be a finite number strictly > 0 (it is a power
+    // MULTIPLIER — luckFactor returns a value in [1-COMBAT_LUCK, 1+COMBAT_LUCK], never
+    // <= 0); a NaN/Infinity/zero/negative would mis-describe the engagement, so reject it
+    // loudly rather than autosave a corrupt log.
+    if (r.luck !== undefined && (typeof r.luck !== 'number' || !Number.isFinite(r.luck) || r.luck <= 0)) {
+      throw new Error('save: invalid battle report luck')
     }
     if (r.kind === 'attack') {
       if (

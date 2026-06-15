@@ -32,8 +32,14 @@ import {
   battleOutcome,
   ramDefenseFactor,
   catapultLevelDamage,
+  luckFactor,
+  COMBAT_LUCK,
+  WORST_LUCK,
+  BEST_LUCK,
 } from '../src/systems/combat'
+import { autoAttackOnce } from '../src/systems/automation'
 import { advanceRaids } from '../src/systems/raids'
+import { RNG } from '../src/engine/rng'
 import { villageDefenseMult } from '../src/systems/buildings'
 import { WORLD_SIZE } from '../src/systems/world'
 import { LOYALTY_MAX } from '../src/systems/conquest'
@@ -1926,5 +1932,374 @@ export function checkM54Determinism(seed: string, seconds: number): InvariantRes
       : !equal
         ? 'lifetime stats / achievements diverged between a single-step simulate and chunked offline catch-up'
         : 'M5.4 scenario failed to drive every stat path (vacuous determinism check)',
+  }
+}
+
+// --- M5.5 combat luck (variance + auto-attack safety + determinism) coverage ---------------
+//
+// Combat LUCK (M5.5) multiplies the ATTACKER's power by one symmetric +/-COMBAT_LUCK roll on
+// every RESOLVED engagement (player attack in advanceMarches, incoming raid in advanceRaids),
+// drawn EXACTLY ONCE per resolution from the persisted, seeded `rngState` advanced on the fixed
+// tick grid (see tick.ts subStep) — so it adds real variance yet stays fully deterministic.
+// These four deterministic proof-of-mechanic checks cover the M5.5 brief:
+//   (a) luck-distribution / luck-varies — luck IS the contracted +/-25% band (mean ~1.0) and
+//       it genuinely changes outcomes (the same attack wins or loses depending on the roll);
+//   (b) auto-attack-luck-safe — auto-attack NEVER loses its army to bad luck (it plans against
+//       WORST_LUCK), while a luck-losable army is correctly refused;
+//   (c) luck-determinism — the luck-driven combat replays byte-identically online vs
+//       chunked-offline with rngState advancing in lock-step (run per seed → across-seed too).
+// The MAIN bot run is untouched: luck is symmetric (mean 1.0) and the bot keeps a worst-luck-safe
+// loss margin, so the 17 balance goals stay measured exactly (verified by the balance warnings).
+
+/** How many luckFactor draws the distribution check samples (a stable, deterministic spread). */
+const LUCK_SAMPLES = 4000
+
+/**
+ * luckFactor's DISTRIBUTION is the contracted symmetric +/-{@link COMBAT_LUCK} band (M5.5): every
+ * draw lands in [{@link WORST_LUCK}, {@link BEST_LUCK}], the sample mean is ~1.0 (so over many
+ * fights luck nets out and the 17 balance goals hold), and BOTH halves (below and above 1.0) are
+ * actually produced. Also re-asserts the +/-25% knob. Pure: draws from one seeded RNG, per seed.
+ */
+export function checkLuckDistribution(seed: string): InvariantResult {
+  const rng = RNG.fromString(seed + ':luckdist')
+  let min = Infinity
+  let max = -Infinity
+  let sum = 0
+  let below = 0
+  let above = 0
+  let outOfBand = 0
+  for (let i = 0; i < LUCK_SAMPLES; i++) {
+    const f = luckFactor(rng)
+    if (!Number.isFinite(f) || f < WORST_LUCK || f > BEST_LUCK) outOfBand += 1
+    if (f < min) min = f
+    if (f > max) max = f
+    if (f < 1) below += 1
+    if (f > 1) above += 1
+    sum += f
+  }
+  const mean = sum / LUCK_SAMPLES
+  const issues: string[] = []
+  if (outOfBand > 0) issues.push(`${outOfBand} draw(s) outside [${WORST_LUCK}, ${BEST_LUCK}]`)
+  if (!(below > 0 && above > 0)) issues.push(`one-sided spread (below ${below}, above ${above})`)
+  if (Math.abs(mean - 1) > 0.02) issues.push(`mean ${mean.toFixed(4)} not ~1.0 (luck must net out)`)
+  if (Math.abs(COMBAT_LUCK - 0.25) > 1e-9) issues.push(`COMBAT_LUCK ${COMBAT_LUCK} != 0.25 (+/-25%)`)
+  return {
+    name: 'luck-distribution',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `${LUCK_SAMPLES} draws in [${min.toFixed(3)}, ${max.toFixed(3)}], mean ${mean.toFixed(4)} (+/-${(COMBAT_LUCK * 100).toFixed(0)}%)`
+        : issues.join('; '),
+  }
+}
+
+/** Horizon (game-seconds) a luck-coverage attack is simulated for — past any tier round trip. */
+const LUCK_HORIZON = 6000
+
+/**
+ * Resolve ONE attack carrying `army` at a tier-`level` camp on a fresh seeded capital with the
+ * persisted luck stream pinned to `rngState`, raids frozen out so the attack is the ONLY luck
+ * draw (so the recorded `luck` is exactly the first draw of RNG(rngState)). Returns the engine's
+ * verdict (`won`) and the luck it rolled off the report, or null if the dispatch failed. Pure /
+ * deterministic for a given (seed, rngState).
+ */
+function resolveLuckAttack(
+  seed: string,
+  rngState: number,
+  level: number,
+  army: Record<UnitId, number>,
+): { won: boolean; luck: number } | null {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.barracks = 1
+  recomputeDerived(state)
+  v.resources = { wood: D(1e7), clay: D(1e7), iron: D(1e7) }
+  v.popCap = D(1e5)
+  v.raidTimer = 1e9 // freeze raids → the attack is the ONLY luck draw this run
+  for (const id of UNIT_IDS) v.units[id] = army[id] ?? 0
+  state.rngState = rngState >>> 0
+  const target = targetOfLevel(state.world, level)
+  const logBefore = state.battleLog.length
+  if (!sendAttack(v, state.world, state.battleLog, target.id, army)) return null
+  simulate(state, LUCK_HORIZON)
+  for (let i = state.battleLog.length - 1; i >= logBefore; i--) {
+    const r = state.battleLog[i]
+    if (r.kind === 'attack') return { won: r.won, luck: r.luck ?? 1 }
+  }
+  return null
+}
+
+/** Camp tier the variance check assaults — mid-tier so a power≈wall army straddles the luck band. */
+const LUCK_VARY_LEVEL = 8
+/** rngStates the variance check sweeps — enough to all-but-certainly hit both halves of the band. */
+const LUCK_VARY_SWEEP = 48
+
+/**
+ * Combat luck genuinely CHANGES outcomes (M5.5): the SAME dispatched attack — a MARGINAL army
+ * whose power ≈ the camp's wall, so a +/-25% roll straddles the win line — WINS on a lucky roll
+ * and LOSES on an unlucky one. Sweeps {@link LUCK_VARY_SWEEP} rngStates through the real engine
+ * ({@link resolveLuckAttack}) and asserts: at least one win AND one loss occurred (outcome
+ * varies), every recorded luck is in band, the rolls actually varied, and — the monotone sanity
+ * — the LUCKIEST roll won while the UNLUCKIEST lost. Value-driven (the army is sized from the
+ * live wall), so a balance retune still passes. Pure / deterministic.
+ */
+export function checkLuckVaries(seed: string): InvariantResult {
+  const level = LUCK_VARY_LEVEL
+  const def = barbarianTarget(level).defensePower
+  // armyAttackPower(core axemen) ≈ def → the luck multiplier decides the fight.
+  const core = Math.max(1, Math.round(def / UNITS.axeman.attack))
+  const army = zeroArmy()
+  army.axeman = core
+
+  let wins = 0
+  let losses = 0
+  let outOfBand = 0
+  let dispatched = 0
+  const lucks: number[] = []
+  let best: { won: boolean; luck: number } | null = null
+  let worst: { won: boolean; luck: number } | null = null
+  for (let k = 0; k < LUCK_VARY_SWEEP; k++) {
+    const rngState = RNG.fromString(`${seed}:luckvary:${k}`).getState()
+    const res = resolveLuckAttack(seed, rngState, level, army)
+    if (res === null) continue
+    dispatched += 1
+    lucks.push(res.luck)
+    if (res.won) wins += 1
+    else losses += 1
+    if (!Number.isFinite(res.luck) || res.luck < WORST_LUCK || res.luck > BEST_LUCK) outOfBand += 1
+    if (best === null || res.luck > best.luck) best = res
+    if (worst === null || res.luck < worst.luck) worst = res
+  }
+  const distinct = new Set(lucks.map((l) => l.toFixed(6))).size
+
+  const issues: string[] = []
+  if (dispatched === 0) issues.push('no attack dispatched (scenario invalid)')
+  if (!(wins > 0 && losses > 0)) issues.push(`outcome did not vary (wins ${wins}, losses ${losses})`)
+  if (outOfBand > 0) issues.push(`${outOfBand} luck roll(s) out of band`)
+  if (distinct < 2) issues.push(`luck did not vary (${distinct} distinct value(s))`)
+  if (best !== null && !best.won) issues.push(`luckiest roll (${best.luck.toFixed(3)}) still lost`)
+  if (worst !== null && worst.won) issues.push(`unluckiest roll (${worst.luck.toFixed(3)}) still won`)
+
+  return {
+    name: 'luck-varies',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `same ${core}-axeman attack on tier-${level} (wall ${Math.round(def)}): ${wins} win / ${losses} loss over ${dispatched} rolls in [${worst!.luck.toFixed(3)}, ${best!.luck.toFixed(3)}]`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Build a CONTROLLED auto-attack scenario on a fresh seeded capital: `axemen` idle at home, raids
+ * frozen (so the ONLY thing that can change `v.units` is the auto-attack's own casualties), and
+ * the generated world REPLACED by a SINGLE camp of tier `level` three fields east of the capital
+ * — unambiguously the nearest (and only) target, so {@link autoAttackOnce} commits to it iff it
+ * is worst-luck-safe. Pure / Node-safe; the bot never runs here, only the engine's idle routine.
+ */
+function seedAutoAttackWorld(seed: string, axemen: number, level: number): GameState {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.barracks = 1
+  recomputeDerived(state)
+  v.resources = { wood: D(1e7), clay: D(1e7), iron: D(1e7) }
+  v.popCap = D(1e5)
+  v.raidTimer = 1e9
+  for (const id of UNIT_IDS) v.units[id] = 0
+  v.units.axeman = axemen
+  const cx = Math.min(WORLD_SIZE, v.x + 3)
+  state.world.barbarians = [
+    { id: 'lt', x: cx, y: v.y, level, name: 'Próba', loyalty: LOYALTY_MAX, scouted: true },
+  ]
+  return state
+}
+
+/** Σ owned units across the capital roster (units stay owned while marching — only casualties drop it). */
+function capitalArmy(state: GameState): number {
+  const v = firstVillage(state)
+  let n = 0
+  for (const id of UNIT_IDS) n += v.units[id]
+  return n
+}
+
+/** Camp tier the auto-attack safety check assaults (mid-tier so the threshold army is non-trivial). */
+const AUTOATTACK_LUCK_LEVEL = 8
+/** rngStates the auto-attack safety check sweeps (covers the band down to near WORST_LUCK). */
+const AUTOATTACK_LUCK_SWEEP = 64
+
+/**
+ * AUTO-ATTACK is luck-SAFE (M5.5): the idle auto-attack routine NEVER loses its army to bad luck,
+ * because it vets every target against {@link WORST_LUCK} (the unluckiest roll) before committing.
+ * Three deterministic legs against a controlled tier-{@link AUTOATTACK_LUCK_LEVEL} camp:
+ *
+ *  - THRESHOLD: find the smallest axeman stack the guard will COMMIT ({@link autoAttackOnce} is
+ *    RNG-free, so this is stable), then sweep {@link AUTOATTACK_LUCK_SWEEP} rngStates through the
+ *    real engine. EVERY roll must WIN and bring at least one survivor home — across the whole luck
+ *    band, down to near worst luck (non-vacuity) — so the committed army is never lost.
+ *  - REFUSAL: a luck-LOSABLE army (power ≈ the wall → it loses at worst luck, wins at best) must be
+ *    REFUSED by the guard (no march), proving the plan is worst-case, not average-case.
+ *  - DANGER (non-vacuity of the refusal): force-dispatching that SAME refused army through the
+ *    engine LOSES the army on at least one unlucky roll (and wins on at least one lucky one) — so
+ *    the refusal averted a real loss, not a phantom one.
+ *
+ * A regression that planned against AVERAGE luck would lower the threshold and the THRESHOLD sweep
+ * would then record a bad-luck loss — failing the run. Value-driven; pure / deterministic.
+ */
+export function checkAutoAttackLuckSafe(seed: string): InvariantResult {
+  const level = AUTOATTACK_LUCK_LEVEL
+  const def = barbarianTarget(level).defensePower
+  const axeAtk = UNITS.axeman.attack
+  const issues: string[] = []
+
+  // THRESHOLD: smallest committed army (the guard's worst-luck-safe floor). RNG-free decision.
+  let nMin = 0
+  for (let n = 1; n <= 200; n++) {
+    const s = seedAutoAttackWorld(seed, n, level)
+    if (autoAttackOnce(firstVillage(s), s.world, s.battleLog)) {
+      nMin = n
+      break
+    }
+  }
+  if (nMin === 0) {
+    return {
+      name: 'auto-attack-luck-safe',
+      ok: false,
+      detail: `auto-attack never committed even at 200 axemen vs tier-${level} (guard too strict / unwinnable)`,
+    }
+  }
+
+  // THRESHOLD sweep: the committed army must survive EVERY luck roll.
+  let safeDispatched = 0
+  let safeLost = 0
+  let safeWiped = 0
+  let safeMin = Infinity
+  let safeMax = -Infinity
+  for (let k = 0; k < AUTOATTACK_LUCK_SWEEP; k++) {
+    const s = seedAutoAttackWorld(seed, nMin, level)
+    const v = firstVillage(s)
+    s.rngState = RNG.fromString(`${seed}:autoluck:${k}`).getState()
+    const before = capitalArmy(s)
+    if (!autoAttackOnce(v, s.world, s.battleLog)) continue
+    const march = v.marches[v.marches.length - 1]
+    let dispatchedTotal = 0
+    for (const id of UNIT_IDS) dispatchedTotal += march.units[id]
+    simulate(s, LUCK_HORIZON)
+    safeDispatched += 1
+    let won = false
+    let luck = 1
+    for (let i = s.battleLog.length - 1; i >= 0; i--) {
+      const r = s.battleLog[i]
+      if (r.kind === 'attack') {
+        won = r.won
+        luck = r.luck ?? 1
+        break
+      }
+    }
+    if (luck < safeMin) safeMin = luck
+    if (luck > safeMax) safeMax = luck
+    // survivors = owned_after − (owned_before − dispatched); with raids frozen the only delta to
+    // v.units is the attack's casualties, so this is the dispatched stack's survivor count.
+    const survivors = capitalArmy(s) - (before - dispatchedTotal)
+    if (!won) safeLost += 1
+    if (survivors < 1) safeWiped += 1
+  }
+  if (safeDispatched === 0) issues.push('threshold army never dispatched in the sweep')
+  if (safeLost > 0) issues.push(`${safeLost}/${safeDispatched} committed auto-attacks LOST the army`)
+  if (safeWiped > 0) issues.push(`${safeWiped}/${safeDispatched} committed auto-attacks attrited the army to zero`)
+  if (!(safeMin <= WORST_LUCK + 0.05)) issues.push(`sweep never reached worst luck (min ${safeMin.toFixed(3)})`)
+
+  // REFUSAL + DANGER: a luck-losable army (power ≈ wall) must be refused, and is genuinely risky.
+  const dangerAxe = Math.max(1, Math.round(def / axeAtk)) // power ≈ def → worst loses, best wins
+  const dref = seedAutoAttackWorld(seed, dangerAxe, level)
+  if (autoAttackOnce(firstVillage(dref), dref.world, dref.battleLog)) {
+    issues.push(`guard COMMITTED a luck-losable ${dangerAxe}-axeman army (power ≈ wall ${Math.round(def)})`)
+  }
+  const dangerArmy = zeroArmy()
+  dangerArmy.axeman = dangerAxe
+  let dangerLoss = 0
+  let dangerWin = 0
+  for (let k = 0; k < AUTOATTACK_LUCK_SWEEP; k++) {
+    const rngState = RNG.fromString(`${seed}:autodanger:${k}`).getState()
+    const res = resolveLuckAttack(seed, rngState, level, dangerArmy)
+    if (res === null) continue
+    if (res.won) dangerWin += 1
+    else dangerLoss += 1
+  }
+  if (dangerLoss === 0) issues.push('force-dispatched luck-losable army never lost (refusal would be vacuous)')
+  if (dangerWin === 0) issues.push('force-dispatched marginal army never won (not actually luck-marginal)')
+
+  return {
+    name: 'auto-attack-luck-safe',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `committed ${nMin}-axeman auto-attack survived all ${safeDispatched} luck rolls [${safeMin.toFixed(3)}, ${safeMax.toFixed(3)}]; guard refused the ${dangerAxe}-axeman marginal army (forced: ${dangerLoss} loss / ${dangerWin} win)`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Put a fresh capital into the M5.5 luck-determinism scenario: a home garrison so RAIDS fire
+ * across the span (each draws one luck) PLUS an in-flight ATTACK that resolves within the window
+ * (its resolution draws one luck) — so the persisted `rngState` genuinely advances and battle
+ * reports carry `luck`. Applied identically to both branches of {@link checkLuckDeterminism}, so
+ * the only thing it can reveal is a genuine luck online-vs-offline split. Mirrors
+ * {@link seedRecruitment}'s discipline (resources / popCap set directly).
+ */
+function seedLuckCombat(state: GameState): void {
+  const v = firstVillage(state)
+  v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  v.buildings.barracks = 1
+  recomputeDerived(state)
+  v.popCap = D(1000)
+  v.units.axeman = 80 // home garrison → raids active across the span
+  const army = {} as Record<UnitId, number>
+  for (const id of UNIT_IDS) army[id] = 0
+  army.axeman = 40
+  sendAttack(v, state.world, state.battleLog, targetOfLevel(state.world, 6).id, army)
+}
+
+/**
+ * M5.5 luck DETERMINISM: the luck stream is drawn only from the persisted, seeded `rngState`
+ * advanced on the fixed tick grid (tick.ts subStep), so crediting a span as one big
+ * {@link simulate} (online catch-up) must be byte-identical to the chunked offline path
+ * ({@link applyOffline}) — same rngState, same outcomes. Mirrors {@link checkOfflineDeterminism}
+ * but on the luck-driven {@link seedLuckCombat} scenario, and ALSO asserts NON-VACUITY: the
+ * rngState actually ADVANCED (luck was drawn), at least one report carries a finite `luck`, and
+ * the two branches' rngState match — so "identical" can never pass by drawing nothing. Run per
+ * seed by the runner, covering the determinism-across-seeds clause. `seconds` stays within
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller uses an hour).
+ */
+export function checkLuckDeterminism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedLuckCombat(big)
+  const rng0 = big.rngState
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedLuckCombat(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const equal = serialize(big) === serialize(chunked)
+  const advanced = big.rngState !== rng0
+  const luckReports = big.battleLog.filter(
+    (r) => (r.kind === 'attack' || r.kind === 'raid') && typeof r.luck === 'number' && Number.isFinite(r.luck),
+  ).length
+  const hasLuck = luckReports > 0
+  const rngMatches = big.rngState === chunked.rngState
+  const ok = equal && advanced && hasLuck && rngMatches
+  return {
+    name: 'luck-determinism',
+    ok,
+    detail: ok
+      ? `luck stream identical online vs chunked-offline (rngState ${rng0} -> ${big.rngState}, ${luckReports} luck-tagged report(s))`
+      : !equal
+        ? 'chunked offline catch-up diverged from a single-step simulate WITH luck-driven combat (rngState / outcomes split)'
+        : !advanced
+          ? 'rngState never advanced — no luck was drawn (vacuous determinism check)'
+          : !hasLuck
+            ? 'no battle report carried a luck roll (luck not exercised)'
+            : `rngState diverged online (${big.rngState}) vs offline (${chunked.rngState})`,
   }
 }

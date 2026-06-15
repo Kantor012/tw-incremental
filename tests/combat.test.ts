@@ -11,9 +11,14 @@ import {
   RAM_DEF_MIN,
   CATA_PER_LEVEL,
   CATA_MAX_LEVELS,
+  COMBAT_LUCK,
+  WORST_LUCK,
+  BEST_LUCK,
+  luckFactor,
 } from '../src/systems/combat'
 import { NO_TECH_MODS, type TechModifiers } from '../src/engine/state'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
+import { RNG } from '../src/engine/rng'
 
 /** A full (all UnitId present) roster — combat fns take a complete record. */
 function army(
@@ -270,6 +275,70 @@ describe('catapultLevelDamage (M5.3)', () => {
       expect(Number.isInteger(dmg)).toBe(true)
       expect(dmg).toBeGreaterThanOrEqual(0)
       expect(dmg).toBeLessThanOrEqual(CATA_MAX_LEVELS)
+    }
+  })
+})
+
+// --- combat LUCK: luckFactor + the WORST/BEST band (M5.5) --------------------------
+
+describe('combat luck constants (M5.5)', () => {
+  it('pins the +/-25% band: COMBAT_LUCK 0.25, WORST 0.75, BEST 1.25', () => {
+    // Balance knob (COMBAT_LUCK) and the two derived planning constants are fixed and
+    // symmetric around the mean 1.0 — the property the 17 balance goals rest on.
+    expect(COMBAT_LUCK).toBe(0.25)
+    expect(WORST_LUCK).toBe(1 - COMBAT_LUCK)
+    expect(BEST_LUCK).toBe(1 + COMBAT_LUCK)
+    expect(WORST_LUCK).toBe(0.75)
+    expect(BEST_LUCK).toBe(1.25)
+    // The band is symmetric: WORST and BEST are equidistant from 1.0.
+    expect(1 - WORST_LUCK).toBeCloseTo(BEST_LUCK - 1)
+  })
+})
+
+describe('luckFactor (M5.5)', () => {
+  it('always lands inside [WORST_LUCK, BEST_LUCK) for any RNG state', () => {
+    // Sample many independent streams: every draw must sit in the band — never below
+    // worst luck (the floor the auto-attacker plans against) nor at/above best.
+    for (let seed = 1; seed <= 5000; seed++) {
+      const l = luckFactor(new RNG(seed))
+      expect(l).toBeGreaterThanOrEqual(WORST_LUCK)
+      expect(l).toBeLessThan(BEST_LUCK)
+    }
+  })
+
+  it('averages ~1.0 over many draws (a symmetric, balance-neutral roll)', () => {
+    // The whole point: luck is mean-1.0 so it adds variance without shifting the
+    // economy's expected output. 50k draws from one stream pin the mean tightly.
+    const rng = new RNG(123456)
+    let sum = 0
+    const n = 50000
+    for (let i = 0; i < n; i++) sum += luckFactor(rng)
+    expect(sum / n).toBeCloseTo(1.0, 2)
+  })
+
+  it('is deterministic: the same seed yields the same luck sequence', () => {
+    const a = new RNG(42)
+    const b = new RNG(42)
+    for (let i = 0; i < 20; i++) expect(luckFactor(a)).toBe(luckFactor(b))
+  })
+
+  it('draws exactly once per call (advances the RNG by a single next())', () => {
+    // The "exactly one draw per resolved engagement" invariant rests on luckFactor
+    // consuming precisely one RNG step — so the draw count is invariant to dt chunking.
+    const rng = new RNG(7)
+    const clone = new RNG(7)
+    luckFactor(rng)
+    clone.next()
+    expect(rng.getState()).toBe(clone.getState())
+  })
+
+  it('equals rng.range(1 - COMBAT_LUCK, 1 + COMBAT_LUCK) on the same stream', () => {
+    // The contract spelled the band two ways (WORST/BEST vs 1±COMBAT_LUCK); they must
+    // be identical, so a future retune of COMBAT_LUCK keeps a single source of truth.
+    const a = new RNG(2024)
+    const b = new RNG(2024)
+    for (let i = 0; i < 10; i++) {
+      expect(luckFactor(a)).toBe(b.range(1 - COMBAT_LUCK, 1 + COMBAT_LUCK))
     }
   })
 })

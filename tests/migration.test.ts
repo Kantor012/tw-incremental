@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { D, Decimal } from '../src/engine/decimal'
 import {
   createInitialState,
+  createInitialStats,
   INITIAL_BUILDINGS,
   INITIAL_UNITS,
   recomputeDerived,
@@ -62,7 +63,7 @@ describe('migration v1 -> current', () => {
   it('migrate() chains v1->...->v8: seeds buildings, popCap, units, queue, combat, coords + world, nobles + loyalty, the tech map and wraps into villages.v0', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(13)
+    expect(migrated.version).toBe(14)
     expect(migrated.version).toBe(SAVE_VERSION)
     // v4->v5: the lone economy is wrapped under villages.v0 with a bijective order.
     expect(migrated.villageOrder).toEqual(['v0'])
@@ -268,7 +269,7 @@ describe('migration v4 -> current', () => {
   it('wraps the lone village under villages.v0 (Stolica) and globalises the battle log', () => {
     const m = migrate(rawV4())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
     // Bijective single-village order: exactly one ordered id, exactly one village.
     expect(m.villageOrder).toEqual(['v0'])
@@ -431,7 +432,7 @@ describe('migration v5 -> v6', () => {
   it('pins the capital to WORLD_CENTER, generates the barbarian world, and upgrades the legacy march', () => {
     const m = migrate(rawV5())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -582,7 +583,7 @@ describe('migration v6 -> v7', () => {
   it('backfills the academy building, the noble unit (roster + marches) and full barbarian loyalty', () => {
     const m = migrate(rawV6())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -740,7 +741,7 @@ describe('migration v7 -> v8', () => {
   it('backfills the empty account-wide tech map and carries everything else through', () => {
     const m = migrate(rawV7())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: an empty passive-tree map (absent key = level 0).
     expect(m.tech).toEqual({})
@@ -883,7 +884,7 @@ describe('migration v8 -> v9', () => {
   it('backfills the zero permanent prestige record and carries everything else through', () => {
     const m = migrate(rawV8())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the zero permanent prestige (ascension) record.
     expect(m.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
@@ -1016,7 +1017,7 @@ describe('migration v9 -> v10', () => {
   it('backfills the all-off automation record and carries everything else through', () => {
     const m = migrate(rawV9())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the all-off automation toggles + empty policy.
     expect(m.automation).toEqual({
@@ -1182,7 +1183,7 @@ describe('migration v10 -> v11', () => {
   it('backfills wall (buildings), scout (units + marches), march kind and barbarian scouted', () => {
     const m = migrate(rawV10())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
 
     const v0 = m.villages.v0
@@ -1428,7 +1429,7 @@ describe('migration v11 -> v12', () => {
   it('backfills the ram + catapult unit slots (roster + marches), preserving everything else', () => {
     const m = migrate(rawV11())
 
-    expect(m.version).toBe(13)
+    expect(m.version).toBe(14)
     expect(m.version).toBe(SAVE_VERSION)
 
     const v0 = m.villages.v0
@@ -1506,5 +1507,124 @@ describe('migration v11 -> v12', () => {
     expect(state.tech).toEqual({ eco_root: 2 })
     // recomputeDerived ran on import (eco_root level 2 → +0.04 production on sawmill lvl 2).
     expect(Number(state.villages.v0.production.wood.toString())).toBeCloseTo(2.08, 6)
+  })
+})
+
+/**
+ * A raw, fully-valid v13 save (multi-village + conquest + tech + prestige + automation +
+ * siege + lifetime stats + achievements) right before M5.5. It already carries `rngState`
+ * (serialized since v1) and a battle log, but predates the optional per-report `luck`
+ * field. The v13->v14 migration is deliberately a TRIVIAL version bump (no data
+ * transform): old reports without `luck` stay valid (absence = "luck unknown"), and any
+ * report that already carries `luck` is preserved. The log here mixes both, so the test
+ * proves the bump touches nothing but `version`.
+ */
+function rawV13() {
+  return {
+    version: 13,
+    seed: 'v13',
+    rngState: 314159,
+    createdAt: 1000,
+    lastSeen: 2000,
+    villages: {
+      v0: {
+        id: 'v0',
+        name: 'Stolica',
+        x: WORLD_CENTER.x,
+        y: WORLD_CENTER.y,
+        resources: { wood: D(10), clay: D(20), iron: D(30) },
+        production: { wood: D(2), clay: D(0.8), iron: D(0.5) },
+        storageCap: D(4000),
+        popCap: D(22),
+        buildings: {
+          hq: 3,
+          sawmill: 2,
+          clay_pit: 1,
+          iron_mine: 1,
+          warehouse: 1,
+          farm: 1,
+          barracks: 1,
+          academy: 1,
+          wall: 2,
+        },
+        units: { spearman: 5, swordsman: 0, axeman: 3, noble: 1, scout: 2, ram: 1, catapult: 1 },
+        recruitQueue: [],
+        marches: [],
+        raidTimer: 500,
+      },
+    },
+    villageOrder: ['v0'],
+    world: {
+      barbarians: [
+        { id: 'b0', x: 210, y: 198, level: 2, name: 'Obóz barbarzyńców (poz. 2)', loyalty: 100, scouted: true },
+      ],
+    },
+    // A pre-M5.5 attack report (NO luck) AND a pre-M5.5 raid report (NO luck): both must
+    // survive the bump untouched and stay valid (the field is optional in v14).
+    battleLog: [
+      { kind: 'attack', villageId: 'v0', targetLevel: 2, won: true, lootSum: '100', losses: 1 },
+      { kind: 'raid', villageId: 'v0', won: true, looted: '0', losses: 0 },
+    ],
+    tech: { eco_root: 2 },
+    prestige: { points: 3, totalEarned: 5, ascensions: 1, nodes: {} },
+    automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
+    stats: createInitialStats(),
+    achievements: { first_blood: 1 },
+  }
+}
+
+describe('migration v13 -> v14', () => {
+  it('is a trivial version bump: every field (incl. luck-less reports) carries through', () => {
+    const m = migrate(rawV13())
+
+    expect(m.version).toBe(14)
+    expect(m.version).toBe(SAVE_VERSION)
+
+    // rngState (the luck stream) is untouched — it already existed pre-M5.5.
+    expect(m.rngState).toBe(314159)
+    // The pre-M5.5 reports survive verbatim and gained NO luck field.
+    expect(m.battleLog).toHaveLength(2)
+    expect('luck' in m.battleLog[0]).toBe(false)
+    expect('luck' in m.battleLog[1]).toBe(false)
+    expect(m.battleLog[0]).toMatchObject({ kind: 'attack', villageId: 'v0', won: true })
+    expect(m.battleLog[1]).toMatchObject({ kind: 'raid', villageId: 'v0', won: true })
+    // Everything else is carried through unchanged.
+    expect(m.seed).toBe('v13')
+    expect(m.villages.v0.units.ram).toBe(1)
+    expect(m.tech).toEqual({ eco_root: 2 })
+    expect(m.achievements).toEqual({ first_blood: 1 })
+    expect(m.stats.lootHauled.toString()).toBe('0')
+  })
+
+  it('a migrated v13 save (with luck-less reports) passes validateState', () => {
+    const v = validateState(migrate(rawV13()))
+    expect(v.version).toBe(SAVE_VERSION)
+    // The old reports are accepted with no luck field present.
+    expect(v.battleLog).toHaveLength(2)
+    for (const r of v.battleLog) {
+      if (r.kind === 'attack' || r.kind === 'raid') expect(r.luck).toBeUndefined()
+    }
+  })
+
+  it('preserves a forward-compat v13 report that already carries a luck roll', () => {
+    // A save that already recorded luck (forward-compat) keeps the value verbatim.
+    const raw = rawV13() as unknown as { battleLog: Array<Record<string, unknown>> }
+    raw.battleLog[0].luck = 1.12
+    raw.battleLog[1].luck = 0.79
+
+    const m = migrate(raw)
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.battleLog[0].luck).toBe(1.12)
+    expect(m.battleLog[1].luck).toBe(0.79)
+    expect(validateState(m).version).toBe(SAVE_VERSION)
+  })
+
+  it('importSave of a v13 export migrates to v14, keeping the luck-less log valid', () => {
+    const restored = importSave(exportSave(rawV13() as never))
+    expect(restored.version).toBe(SAVE_VERSION)
+    expect(restored.battleLog).toHaveLength(2)
+    const atk = restored.battleLog[0]
+    if (atk.kind !== 'attack') throw new Error('expected an attack report')
+    expect(atk.luck).toBeUndefined()
   })
 })

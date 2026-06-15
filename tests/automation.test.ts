@@ -7,6 +7,7 @@ import {
   recomputeVillageDerived,
   NO_TECH_MODS,
   type AutomationSettings,
+  type BarbarianVillage,
   type GameState,
   type TechModifiers,
   type Village,
@@ -22,11 +23,13 @@ import { aggregateTechMods } from '../src/systems/tech'
 import { aggregatePrestigeMods, effectiveMods } from '../src/systems/prestige'
 import { nextCostAffordable } from '../src/systems/buildings'
 import { canRecruit } from '../src/systems/recruitment'
-import { sendAttack, stationedUnits, canAttack } from '../src/systems/marches'
-import { armyAttackPower } from '../src/systems/combat'
+import { sendAttack, stationedUnits, canAttack, advanceMarches } from '../src/systems/marches'
+import { armyAttackPower, luckFactor, WORST_LUCK } from '../src/systems/combat'
 import { targetsByDistance } from '../src/systems/world'
 import { BUILDING_IDS, BUILDINGS, type BuildingId } from '../src/content/buildings'
 import { barbarianTarget } from '../src/content/barbarians'
+import { RNG } from '../src/engine/rng'
+import { UNIT_IDS, type UnitId } from '../src/content/units'
 
 /**
  * M5.1 — idle automations as tech UNLOCKS + player TOGGLES. These tests pin the
@@ -385,6 +388,126 @@ describe('autoAttackOnce', () => {
     // The siege engines (and only they, plus any nobles/scouts) stay home, unharmed.
     expect(stationedUnits(v).ram).toBe(6)
     expect(stationedUnits(v).catapult).toBe(6)
+  })
+})
+
+// --- autoAttackOnce WORST-LUCK safety (M5.5) --------------------------------------
+
+/** A full (all UnitId present) roster snapshot. */
+function roster(
+  spearman = 0,
+  swordsman = 0,
+  axeman = 0,
+  noble = 0,
+  scout = 0,
+  ram = 0,
+  catapult = 0,
+): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
+}
+
+/** A barbarian camp descriptor at a chosen tier, placed 3 fields east of the capital. */
+function camp(level: number, v: Village): BarbarianVillage {
+  return { id: 'b0', x: v.x + 3, y: v.y, level, name: `Obóz (poz. ${level})`, loyalty: 100, scouted: false }
+}
+
+/** A barracks capital whose ONLY reachable target is a single camp at `level` (controlled world). */
+function singleCampState(level: number, seed = 'worst-luck'): GameState {
+  const s = createInitialState(seed, 0)
+  const v = s.villages.v0
+  v.buildings.barracks = 1
+  s.world = { barbarians: [camp(level, v)] }
+  return s
+}
+
+describe('autoAttackOnce — plans against WORST_LUCK (M5.5)', () => {
+  // The lvl-2 camp (defence 40) is the fixed bar: auto-attack demands its WORST-LUCK
+  // power (power * 0.75) clear WIN_MARGIN * 40 = 50 AND that the army still survives the
+  // attrition at that floored power. These cases pin both halves of the worst-luck gate.
+
+  it('REFUSES a fight only a good roll would win (worst-luck power misses the win margin)', () => {
+    // 1 axeman + 1 spearman = power 50. Worst-luck power 37.5 < 50 (= WIN_MARGIN*40), so the
+    // win is NOT guaranteed on a bad roll (best luck 62.5 would clear it) → no dispatch.
+    const s = singleCampState(2)
+    const v = s.villages.v0
+    v.units = roster(1, 0, 1) // power 50
+    expect(armyAttackPower(v.units, NO_TECH_MODS) * WORST_LUCK).toBeLessThan(40 * 1.25)
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(false)
+    expect(v.marches).toHaveLength(0)
+  })
+
+  it('REFUSES a win it could not carry home on a bad roll (worst-luck survivors = 0)', () => {
+    // 2 axemen = power 80; worst-luck power 60 clears WIN_MARGIN*40 = 50 (the win is safe),
+    // BUT the attrition at worst luck floors every survivor to 0 — on an AVERAGE roll one
+    // axeman would live, yet auto-attack must plan for the pech and refuse the fight.
+    const s = singleCampState(2)
+    const v = s.villages.v0
+    v.units = roster(0, 0, 2) // power 80
+    const worstPower = armyAttackPower(v.units, NO_TECH_MODS) * WORST_LUCK
+    expect(worstPower).toBeGreaterThanOrEqual(40 * 1.25) // win is guaranteed…
+    // …but worst-luck attrition wipes the stack: floor(2 * (1 - (40/60)^1.5)) = 0.
+    const worstSurvivors = Math.floor(2 * (1 - Math.pow(40 / worstPower, 1.5)))
+    expect(worstSurvivors).toBe(0)
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(false)
+    expect(v.marches).toHaveLength(0)
+  })
+
+  it('SENDS a fight that wins AND survives even on the worst roll', () => {
+    // 3 axemen = power 120; worst-luck power 90 clears the margin and keeps survivors.
+    const s = singleCampState(2)
+    const v = s.villages.v0
+    v.units = roster(0, 0, 3)
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(true)
+    expect(v.marches).toHaveLength(1)
+    expect(v.marches[0].units.axeman).toBe(3)
+  })
+
+  it('an army auto-attack DID dispatch wins AND comes home even at the unluckiest roll', () => {
+    // The hard guarantee: auto-attack never trades the army to pech. Dispatch its chosen
+    // stack, then RESOLVE the march with the lowest luck the RNG can produce (≈WORST_LUCK)
+    // — the army must still win and bring >= 1 unit home, exactly what the gate promised.
+    const minLuckSeed = (() => {
+      let best = Infinity
+      let bestSeed = 1
+      for (let seed = 1; seed < 200000; seed++) {
+        const l = luckFactor(new RNG(seed))
+        if (l < best) {
+          best = l
+          bestSeed = seed
+        }
+      }
+      return bestSeed
+    })()
+    // Sanity: the worst seed we found is essentially the WORST_LUCK floor.
+    expect(luckFactor(new RNG(minLuckSeed))).toBeLessThan(0.751)
+
+    const s = singleCampState(2)
+    const v = s.villages.v0
+    v.units = roster(0, 0, 3) // the smallest stack auto-attack will commit here
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(true)
+    expect(v.marches).toHaveLength(1)
+
+    // Resolve the dispatched march at the unluckiest roll the stream offers.
+    advanceMarches(v, s.world, s.battleLog, 1000, NO_TECH_MODS, undefined, new RNG(minLuckSeed))
+    const report = s.battleLog[0]
+    if (report.kind !== 'attack') throw new Error('expected an attack report')
+    expect(report.won).toBe(true) // won despite the pech
+    // The army survived: at least one unit is still owned (home or marching back).
+    let alive = 0
+    for (const id of UNIT_IDS) alive += v.units[id]
+    expect(alive).toBeGreaterThanOrEqual(1)
+  })
+
+  it('does not draw any luck itself: a repeat plan from the same state is byte-identical', () => {
+    // autoAttackOnce is pure (plans against the WORST_LUCK constant, never the RNG), so two
+    // independent runs from the same start agree exactly — no hidden nondeterminism.
+    const a = singleCampState(2, 'pure')
+    const b = singleCampState(2, 'pure')
+    a.villages.v0.units = roster(0, 0, 3)
+    b.villages.v0.units = roster(0, 0, 3)
+    autoAttackOnce(a.villages.v0, a.world, a.battleLog, NO_TECH_MODS)
+    autoAttackOnce(b.villages.v0, b.world, b.battleLog, NO_TECH_MODS)
+    expect(serialize(a)).toBe(serialize(b))
   })
 })
 

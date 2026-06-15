@@ -778,9 +778,13 @@ a:hover {
   margin-top: var(--space-1);
 }
 
-/* Prognoza walki. Kolor NIE jest jedynym wskaźnikiem (WCAG 1.4.1): towarzyszy mu
-   znak ✓/✗ oraz słowo („wygrana"/„porażka"). */
-.target-forecast {
+/* Prognoza walki — JEDNA reguła dla obu zakładek („Wyprawy": .target-forecast,
+   „Mapa": .map-detail-forecast), żeby ten sam werdykt wyglądał identycznie. Kolor
+   NIE jest jedynym wskaźnikiem (WCAG 1.4.1): towarzyszy mu znak ✓/✗ oraz słowo
+   („wygrana"/„porażka"); .forecast-win/.forecast-lose (niżej) nadpisują kolor dla
+   pewnych werdyktów. */
+.target-forecast,
+.map-detail-forecast {
   font-size: var(--text-sm);
   color: var(--muted);
 }

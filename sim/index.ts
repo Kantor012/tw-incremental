@@ -430,6 +430,26 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M5.5 combat luck coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M5.5 combat luck (coverage) ---')
+  const m55Names = ['luck-distribution', 'luck-varies', 'auto-attack-luck-safe', 'luck-determinism']
+  for (const r of results) {
+    const line = m55Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing distribution / variance / safety / determinism check is visible.
+    for (const name of m55Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {

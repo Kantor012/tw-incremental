@@ -1,20 +1,24 @@
 import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
 import { NO_TECH_MODS, type TechModifiers } from '../engine/state'
+import { RNG } from '../engine/rng'
 
 /**
- * Combat resolution — PURE, DETERMINISTIC, RNG-FREE (M1.3).
+ * Combat resolution — DETERMINISTIC (M1.3, luck added M5.5).
  *
  * A TW-style power model: the side with more power wins and (almost) wipes the
  * loser; the winner's casualties scale super-linearly with how close the fight
  * was, so a crushing victory is nearly bloodless while a narrow one is costly.
- * Morale / luck (the only RNG combat inputs) arrive in M5 — until then the same
- * inputs always yield the same outcome, which is what makes marches and raids
- * replay byte-identically online / offline / in the sim harness.
+ * {@link battleOutcome} itself stays PURE and RNG-FREE — the only RNG combat
+ * input is LUCK ({@link luckFactor}), a +/-{@link COMBAT_LUCK} symmetric roll
+ * the callers apply to the ATTACKER's power BEFORE handing the final figures to
+ * battleOutcome. Because every luck draw comes from the deterministic, persisted
+ * `rngState` advanced on the fixed tick grid (see tick.ts), marches and raids
+ * still replay byte-identically online / offline / in the sim harness.
  *
- * Import discipline: depends only on the units catalogue (a pure data leaf), so
- * this module can never take part in an initialisation cycle. The systems that
- * own state mutation (marches.ts, raids.ts) call into here; nothing here reaches
- * back into them.
+ * Import discipline: depends only on the units catalogue (a pure data leaf) and
+ * the RNG class (a leaf with no imports), so this module can never take part in
+ * an initialisation cycle. The systems that own state mutation (marches.ts,
+ * raids.ts) call into here; nothing here reaches back into them.
  */
 
 /** The result of one engagement, expressed as loss FRACTIONS (0..1) per side. */
@@ -53,6 +57,35 @@ export function battleOutcome(atkPower: number, defPower: number): BattleOutcome
     attackerLossFrac: 1,
     defenderLossFrac: atkPower > 0 ? Math.pow(atkPower / defPower, 1.5) : 0,
   }
+}
+
+/**
+ * Combat LUCK band (M5.5) — the symmetric, TW-flavoured +/-25% variance applied
+ * to the ATTACKER's power on every resolved engagement. A balance knob: tuning
+ * this changes how swingy combat feels without touching {@link battleOutcome}.
+ */
+export const COMBAT_LUCK = 0.25
+/** Worst-case luck multiplier (1 - {@link COMBAT_LUCK}); the auto-attacker plans for this. */
+export const WORST_LUCK = 1 - COMBAT_LUCK
+/** Best-case luck multiplier (1 + {@link COMBAT_LUCK}); used to spot a CERTAIN loss in forecasts. */
+export const BEST_LUCK = 1 + COMBAT_LUCK
+
+/**
+ * Draw one luck multiplier for a single resolved engagement (M5.5).
+ *
+ * Returns a uniform sample in [{@link WORST_LUCK}, {@link BEST_LUCK}] =
+ * [1-COMBAT_LUCK, 1+COMBAT_LUCK], i.e. mean 1.0 — symmetric, so over many fights
+ * luck nets out and the 17 balance targets hold. Callers multiply the ATTACKER's
+ * power by this BEFORE {@link battleOutcome}; battleOutcome stays RNG-free.
+ *
+ * DETERMINISM: draws from the passed {@link RNG} (the per-subStep instance seeded
+ * from the persisted `rngState`). Call EXACTLY ONCE per resolved attack/raid — not
+ * for scouts or unresolved (still-travelling) marches — so the count and order of
+ * draws is invariant to how `dt` is chopped, which is what keeps `rngState` (and
+ * thus every outcome) identical online / offline / chunked / in the sim.
+ */
+export function luckFactor(rng: RNG): number {
+  return rng.range(WORST_LUCK, BEST_LUCK)
 }
 
 /**

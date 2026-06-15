@@ -19,7 +19,9 @@ import {
   applyLosses,
   ramDefenseFactor,
   catapultLevelDamage,
+  luckFactor,
 } from './combat'
+import { RNG } from '../engine/rng'
 import { barracksUnlocked } from './recruitment'
 import { distance, barbarianById } from './world'
 import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
@@ -63,7 +65,12 @@ import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
  *
  * Determinism: marches advance on the SAME fixed TICK_RATE grid as recruitment
  * (simulate feeds this function uniform sub-steps), so online / offline / sim
- * produce byte-identical state. Combat is RNG-free until M5.
+ * produce byte-identical state. The only RNG input is combat LUCK (M5.5): each
+ * RESOLVED attack draws one {@link luckFactor} from the per-subStep {@link RNG}
+ * the tick threads in (seeded from the persisted `rngState`). Because the draw
+ * happens exactly once per resolved attack — never for scouts or still-travelling
+ * marches — on that same fixed grid, the count and order of draws is invariant to
+ * how `dt` is chopped, so `rngState` (and every outcome) still replays identically.
  */
 
 /** Re-exported so `March` / `MarchKind` can be imported from the system that owns their logic. */
@@ -380,9 +387,10 @@ function lootSum(loot: ResourceMap): string {
  * step):
  *
  *  - outbound completes  → resolve the battle (battleOutcome of the army's attack
- *    power vs the camp's EFFECTIVE defence — its base defence scaled down by any rams
- *    in the dispatched stack, {@link ramDefenseFactor}, so a ram column can crack a
- *    camp a same-size ramless army could not). Casualties leave `v.units` immediately.
+ *    power — scaled by the M5.5 LUCK roll, see below — vs the camp's EFFECTIVE
+ *    defence, its base defence scaled down by any rams in the dispatched stack,
+ *    {@link ramDefenseFactor}, so a ram column can crack a camp a same-size ramless
+ *    army could not). Casualties leave `v.units` immediately.
  *    On a win, catapults in the dispatched stack ({@link catapultLevelDamage} > 0)
  *    PERMANENTLY raze the live target's tier (`barb.level`, clamped >= 1), shrinking
  *    its future defence and loot; the snapshot `m.targetLevel` is left untouched so
@@ -413,6 +421,18 @@ function lootSum(loot: ResourceMap): string {
  * return, and `scoutsReturned` when a scout march completes its return leg. Left
  * undefined by callers that don't track stats (tests, the recon/forecast mirrors),
  * who get the exact pre-M5.4 behaviour.
+ *
+ * `rng` (M5.5, OPTIONAL) is the per-subStep {@link RNG} the tick seeds from the
+ * persisted `rngState` and threads through every village in a FIXED order. When
+ * present, each RESOLVED attack draws ONE {@link luckFactor} (a symmetric +/-25%
+ * multiplier, mean 1.0) and applies it to the army's attack power BEFORE
+ * {@link battleOutcome} — so the same fight can swing on luck — recording the roll
+ * on the report (`report.luck`). The draw happens exactly once per resolved attack:
+ * NOT for scouts and NOT for marches that don't complete their outbound leg this
+ * `dt`, which keeps the number/order of draws invariant to how `dt` is chopped (the
+ * key to identical `rngState` online / offline / sim). When `rng` is undefined
+ * (tests, the forecast mirrors), no luck is drawn — attack power is taken straight,
+ * `report.luck` is omitted, and resolution replays byte-for-byte as it did pre-M5.5.
  */
 export function advanceMarches(
   v: Village,
@@ -421,6 +441,7 @@ export function advanceMarches(
   dtSeconds: number,
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
+  rng?: RNG,
 ): ConquestEvent[] {
   const events: ConquestEvent[] = []
   if (!(dtSeconds > 0)) return events
@@ -481,21 +502,32 @@ export function advanceMarches(
       // army would lose to. Loot/losses still derive from the snapshotted tier.
       const target = barbarianTarget(m.targetLevel)
       const effDef = target.defensePower * ramDefenseFactor(m.units)
-      const outcome = battleOutcome(armyAttackPower(m.units, mods), effDef)
+      // LUCK (M5.5): when the tick threads in an RNG, draw exactly ONE symmetric
+      // +/-25% multiplier for THIS resolved attack and apply it to the army's power
+      // BEFORE battleOutcome (which stays RNG-free). Drawn here — past the scout
+      // branch and only on a completed outbound leg — so the draw count/order is
+      // invariant to dt chunking. Without an RNG (tests / forecast mirrors) luck is
+      // undefined → power is taken straight (×1) and the report omits `luck`,
+      // reproducing the pre-M5.5 resolution byte-for-byte.
+      const luck = rng !== undefined ? luckFactor(rng) : undefined
+      const effAtk = armyAttackPower(m.units, mods) * (luck ?? 1)
+      const outcome = battleOutcome(effAtk, effDef)
       const sent = m.units
 
       if (!outcome.attackerWins) {
         const survivors = applyLosses(sent, 1) // total wipe
         const losses = applyCasualties(v, sent, survivors)
         if (stats !== undefined) stats.attacksLost += 1 // M5.4: lifetime counter
-        pushBattleReport(log, {
+        const lossReport: BattleReport = {
           kind: 'attack',
           villageId: v.id,
           targetLevel: m.targetLevel,
           won: false,
           lootSum: '0',
           losses,
-        })
+        }
+        if (luck !== undefined) lossReport.luck = luck // M5.5: record the roll
+        pushBattleReport(log, lossReport)
         marches.splice(i, 1)
         break
       }
@@ -564,6 +596,7 @@ export function advanceMarches(
       // (otherwise the optional fields stay absent — a plain victory card).
       if (loyaltyHit !== undefined) report.loyaltyHit = loyaltyHit
       if (loyaltyAfter !== undefined) report.loyaltyAfter = loyaltyAfter
+      if (luck !== undefined) report.luck = luck // M5.5: record the roll
       pushBattleReport(log, report)
 
       if (totalUnits(survivors) <= 0) {

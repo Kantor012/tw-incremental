@@ -7,7 +7,6 @@ import {
   armyAttackPower,
   armyDefensePower,
   armyCarry,
-  battleOutcome,
   ramDefenseFactor,
   catapultLevelDamage,
   CATA_PER_LEVEL,
@@ -21,6 +20,12 @@ import { effectiveMods } from '../../systems/prestige'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon } from '../dom'
 import { conquestHint } from '../conquestCopy'
+import {
+  attackForecast,
+  attackConfirmMessage,
+  applyForecastClass,
+  LUCK_NOTE,
+} from '../combatForecast'
 
 /**
  * Campaign panel — the offensive screen (the "Wyprawy" tab). Since M2.2 the world
@@ -286,6 +291,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   // lockstep with map.ts via the shared ../conquestCopy module.
   const conquestNote = h('p', 'muted')
   el.appendChild(conquestNote)
+  // Static luck primer (M5.5): explains in TEXT (never colour alone) that each fight rolls
+  // ±25% attack power, so the per-card forecast reads „pewna / prawdopodobna / ryzykowna".
+  const luckNote = h('p', 'muted', LUCK_NOTE)
+  el.appendChild(luckNote)
   let lastNobleUnlocked: boolean | null = null
   // Grid template + card surface come from the shared .target-list / .target
   // classes (layout.css) — the single source of truth across tabs; no inline.
@@ -433,14 +442,11 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
           // this pre-send check can never disagree with the real outcome.
           const mods = effectiveMods(ctx.store.state)
           const effDef = barbarianTarget(barb.level).defensePower * ramDefenseFactor(army)
-          const outcome = battleOutcome(armyAttackPower(army, mods), effDef)
-          // Guard against accidentally throwing the whole army at a camp it will lose to.
-          if (
-            !outcome.attackerWins &&
-            !window.confirm(
-              'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
-            )
-          ) {
+          const fc = attackForecast(armyAttackPower(army, mods), effDef)
+          // Combat luck (M5.5): warn on anything that is NOT a CERTAIN win — even a probable
+          // win can be flipped to a wipe by a bad ±25% roll, so the player accepts that risk
+          // explicitly. The message wording adapts to the tier (probable / risky / loss).
+          if (!fc.certainWin && !window.confirm(attackConfirmMessage(fc))) {
             return
           }
         }
@@ -545,14 +551,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
           const haul = cd.lt(total) ? cd : total
           card.loot.textContent = formatInt(haul)
           // EFFECTIVE defence = base × ramDefenseFactor (engine mirror): a ram column can
-          // flip this verdict to a win and cut the loss estimate, so the player sees rams pay off.
-          const oc = battleOutcome(atkPow, barbarianTarget(lvl).defensePower * ramFactor)
-          const pct = Math.round(oc.attackerLossFrac * 100)
-          card.forecast.textContent = oc.attackerWins
-            ? '✓ wygrana · straty ~' + pct + '%'
-            : '✗ porażka'
-          card.forecast.classList.toggle('forecast-win', oc.attackerWins)
-          card.forecast.classList.toggle('forecast-lose', !oc.attackerWins)
+          // flip the verdict and cut the loss estimate, so the player sees rams pay off.
+          // Three-state forecast (M5.5) accounts for the ±25% combat luck the tick rolls:
+          // PEWNA wygrana (wins even at worst luck) / PRAWDOPODOBNA (wins on average) /
+          // RYZYKOWNA / PEWNA porażka — carried in WORDS, with colour only as a tint.
+          const fc = attackForecast(atkPow, barbarianTarget(lvl).defensePower * ramFactor)
+          card.forecast.textContent = fc.text
+          applyForecastClass(card.forecast, fc.cls)
         } else {
           card.loot.textContent = 'do ' + formatInt(total)
           card.forecast.textContent = '—'

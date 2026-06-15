@@ -20,11 +20,20 @@ import {
   canScout,
 } from '../src/systems/marches'
 import { barbarianById } from '../src/systems/world'
-import { armyAttackPower, ramDefenseFactor } from '../src/systems/combat'
+import { armyAttackPower, ramDefenseFactor, luckFactor } from '../src/systems/combat'
 import { barbarianTarget } from '../src/content/barbarians'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
+import { RNG } from '../src/engine/rng'
+
+/** First RNG seed (>=1) whose first luck draw satisfies `pred` — for deterministic luck cases. */
+function findSeed(pred: (luck: number) => boolean): number {
+  for (let s = 1; s < 200000; s++) {
+    if (pred(luckFactor(new RNG(s)))) return s
+  }
+  throw new Error('no seed produced the requested luck')
+}
 
 /** A full (all UnitId present) roster snapshot. */
 function army(
@@ -594,5 +603,111 @@ describe('determinism — a siege march replays identically (M5.3)', () => {
     expect(serialize(big)).toBe(serialize(chunked))
     expect(big.world.barbarians.find((b) => b.id === 'b0')!.level).toBe(4) // 5 catapults → -1
     expect(big.villages.v0.marches.length).toBe(0)
+  })
+})
+
+// --- combat LUCK through a resolved attack (M5.5) ----------------------------------
+
+describe('advanceMarches — combat luck (M5.5)', () => {
+  // 3 spearmen (raw attack power 30) vs the lvl-1 camp (defence 30): a dead-even fight,
+  // so the symmetric luck roll alone decides it — bad luck (×<1) drops the effective
+  // power below 30 and loses, good luck (×>1) lifts it above 30 and wins. A clean,
+  // tuning-robust knife-edge: whatever the exact roll, the SIGN of (luck − 1) is the verdict.
+  // NB: a fresh `army(3)` per use — combat MUTATES the roster it resolves, so a shared
+  // object would leak casualties from one case into the next.
+  const pechSeed = findSeed((l) => l < 1)
+  const luckySeed = findSeed((l) => l > 1)
+
+  it('bad luck loses a fight the same army wins on good luck (seeded RNG → deterministic)', () => {
+    // PECH: effective power 30 * luck(<1) < 30 → loss, army annihilated.
+    const lose = armed('luck-lose')
+    const lv = lose.villages.v0
+    lv.units = army(3) // 3 spearmen, raw power 30
+    sendAttack(lv, lose.world, lose.battleLog, 'b0', army(3))
+    advanceMarches(lv, lose.world, lose.battleLog, 1000, NO_TECH_MODS, undefined, new RNG(pechSeed))
+    const lossReport = lose.battleLog[0]
+    if (lossReport.kind !== 'attack') throw new Error('expected an attack report')
+    expect(lossReport.won).toBe(false)
+    expect(lv.units.spearman).toBe(0)
+    // The exact roll is recorded on the report and is < 1 (the pech that decided it).
+    expect(lossReport.luck).toBe(luckFactor(new RNG(pechSeed)))
+    expect(lossReport.luck!).toBeLessThan(1)
+
+    // LUCK: effective power 30 * luck(>1) > 30 → win.
+    const win = armed('luck-win')
+    const wv = win.villages.v0
+    wv.units = army(3) // a fresh 3-spearman roster
+    sendAttack(wv, win.world, win.battleLog, 'b0', army(3))
+    advanceMarches(wv, win.world, win.battleLog, 1000, NO_TECH_MODS, undefined, new RNG(luckySeed))
+    const winReport = win.battleLog[0]
+    if (winReport.kind !== 'attack') throw new Error('expected an attack report')
+    expect(winReport.won).toBe(true)
+    expect(winReport.luck).toBe(luckFactor(new RNG(luckySeed)))
+    expect(winReport.luck!).toBeGreaterThan(1)
+  })
+
+  it('records the recorded luck as a finite power multiplier inside the band', () => {
+    const s = armed('luck-band')
+    const v = s.villages.v0
+    v.units = army(0, 0, 5) // a comfortable win, so this is purely about the recorded roll
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    advanceMarches(v, s.world, s.battleLog, 1000, NO_TECH_MODS, undefined, new RNG(99))
+    const r = s.battleLog[0]
+    if (r.kind !== 'attack') throw new Error('expected an attack report')
+    expect(typeof r.luck).toBe('number')
+    expect(Number.isFinite(r.luck!)).toBe(true)
+    expect(r.luck!).toBeGreaterThanOrEqual(0.75)
+    expect(r.luck!).toBeLessThan(1.25)
+  })
+
+  it('draws EXACTLY ONCE per resolved attack (advances the RNG by a single step)', () => {
+    const s = armed('luck-once')
+    const v = s.villages.v0
+    v.units = army(0, 0, 5)
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    const rng = new RNG(31337)
+    const clone = new RNG(31337)
+    advanceMarches(v, s.world, s.battleLog, 1000, NO_TECH_MODS, undefined, rng)
+    clone.next() // exactly one luck draw should have happened
+    expect(rng.getState()).toBe(clone.getState())
+  })
+
+  it('does NOT draw luck for a march that has not resolved its outbound leg yet', () => {
+    // The draw count must track RESOLVED attacks only (dt-chunk invariance). A march
+    // mid-flight (dt below its travel time) leaves the RNG untouched.
+    const s = armed('luck-pending')
+    const v = s.villages.v0
+    v.units = army(0, 0, 5)
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    const rng = new RNG(555)
+    advanceMarches(v, s.world, s.battleLog, 1, NO_TECH_MODS, undefined, rng) // 1s < 54s travel
+    expect(s.battleLog.length).toBe(0) // not resolved → no report…
+    expect(v.marches[0].phase).toBe('outbound') // still travelling…
+    expect(rng.getState()).toBe(555 >>> 0) // …and no luck drawn
+  })
+
+  it('does NOT draw luck for a scout march (recon never fights)', () => {
+    const s = armed('luck-scout')
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 3) // scouts only
+    sendScout(v, s.world, s.battleLog, 'b0', 3)
+    const rng = new RNG(888)
+    advanceMarches(v, s.world, s.battleLog, 1000, NO_TECH_MODS, undefined, rng) // full out-and-back
+    expect(barbarianById(s.world, 'b0')!.scouted).toBe(true) // recon completed…
+    expect(s.battleLog.length).toBe(0) // a scout logs nothing
+    expect(rng.getState()).toBe(888 >>> 0) // and draws no luck
+  })
+
+  it('without an RNG, resolution is luck-free and the report omits `luck` (pre-M5.5 byte-for-byte)', () => {
+    const s = armed('luck-absent')
+    const v = s.villages.v0
+    v.units = army(0, 0, 5)
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    advanceMarches(v, s.world, s.battleLog, 1000) // no rng arg
+    const r = s.battleLog[0]
+    if (r.kind !== 'attack') throw new Error('expected an attack report')
+    expect(r.won).toBe(true)
+    expect('luck' in r).toBe(false)
+    expect(r.luck).toBeUndefined()
   })
 })

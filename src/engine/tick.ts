@@ -1,6 +1,7 @@
 import type { GameState, TechModifiers } from './state'
 import { RESOURCE_IDS } from './state'
 import { isFiniteDecimal } from './decimal'
+import { RNG } from './rng'
 import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
 import { advanceRaids } from '../systems/raids'
@@ -53,6 +54,17 @@ export const TICK_RATE = 1 / 20
  * the existing production tests hold.)
  */
 function subStep(state: GameState, dt: number, mods: TechModifiers): void {
+  // Combat LUCK (M5.5): seed ONE RNG from the persisted `rngState` at the start of the
+  // sub-step and thread that SAME instance through every village's combat (marches then
+  // raids, in villageOrder). Each RESOLVED attack / fired raid draws exactly one luckFactor
+  // from it, so over the whole sub-step the draws form one fixed-order stream. Because the
+  // sub-step itself runs on the fixed TICK_RATE grid (so the set and order of battles that
+  // resolve is invariant to how `dt` is sliced), `rngState` evolves byte-identically online
+  // / offline / sim. It is written back to `state.rngState` at the END of the sub-step
+  // (after the only draws, which all happen inside the village loop below — runAutomation
+  // plans against WORST_LUCK, a constant, and never draws), so the next sub-step resumes
+  // the exact stream. World generation uses a SEPARATE seeded stream and never touches this.
+  const rng = new RNG(state.rngState)
   // Captures (a surviving noble drove a target's loyalty to 0) are gathered across the
   // whole village loop and applied AFTER it — never mid-iteration, where minting a new
   // player village would resize villageOrder under the loop. Typed off advanceMarches'
@@ -89,8 +101,8 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
     // counters on this exact deterministic path — identical online/offline/sim, never
     // from the UI. They mutate it in place (attacks won/lost, loot hauled, camps razed,
     // scouts returned / raids repelled-lost); see advanceMarches / advanceRaids.
-    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats))
-    advanceRaids(v, state.battleLog, dt, mods, state.stats)
+    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats, rng))
+    advanceRaids(v, state.battleLog, dt, mods, state.stats, rng)
   }
   // Apply captures once, in deterministic collection order. applyConquest no-ops on a
   // barbId already removed this sub-step (two armies both flooring the same target), so
@@ -123,13 +135,22 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // into the economy and the 17 balance goals stay untouched. The returned list of newly
   // unlocked ids is unused here (the UI reads state.achievements reactively after commit).
   checkAchievements(state)
+  // M5.5: persist the advanced luck stream so the next sub-step resumes exactly where this
+  // one left off. All draws happened inside the village loop above (one per resolved attack
+  // / fired raid); nothing after it draws, so `rng.getState()` captures the whole sub-step's
+  // consumption. Stored as a uint32 (getState masks), serialized as part of the save —
+  // identical online / offline / sim because the sub-step grid makes the draw sequence
+  // invariant to the `dt` split.
+  state.rngState = rng.getState()
 }
 
 /**
  * Advance the whole simulation by `dtSeconds` of game time, mutating `state`.
  *
- * Pure (no I/O, no DOM, no clock reads, no RNG) and Node-safe so the same code path
- * runs in the browser loop, offline catch-up and the headless sim harness. The span
+ * Pure (no I/O, no DOM, no clock reads, no nondeterministic RNG: combat luck since M5.5
+ * draws only from the persisted, seeded `state.rngState` — see {@link subStep} — never
+ * from Math.random/the clock) and Node-safe so the same code path runs in the browser
+ * loop, offline catch-up and the headless sim harness. The span
  * is decomposed onto the fixed TICK_RATE grid (floor(dt/TICK_RATE) whole sub-steps +
  * one remainder) and {@link subStep} runs production, recruitment, marches and raids
  * together for every village each sub-step. Because applyOffline drives the SAME grid

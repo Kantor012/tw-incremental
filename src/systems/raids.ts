@@ -11,17 +11,23 @@ import {
 } from '../engine/state'
 import { BUILDING_IDS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
-import { battleOutcome, armyDefensePower, applyLosses } from './combat'
+import { battleOutcome, armyDefensePower, applyLosses, luckFactor } from './combat'
 import { villageDefenseMult } from './buildings'
 import { stationedUnits, pushBattleReport } from './marches'
+import type { RNG } from '../engine/rng'
+
+/** Raid report variant of {@link BattleReport}, narrowed so `luck` is settable. */
+type RaidReport = Extract<BattleReport, { kind: 'raid' }>
 
 /**
  * Raid engine — incoming barbarian attacks the player must DEFEND (M1.3). The
  * mirror of marches.ts: instead of the player attacking a camp, a barb host
- * attacks a village on a timer. Deterministic and RNG-free; the only mutating
- * entry point is {@link advanceRaids}, advanced on the SAME fixed tick grid as
- * everything else (simulate feeds it uniform sub-steps) so online / offline / sim
- * stay byte-identical.
+ * attacks a village on a timer. DETERMINISTIC: the only mutating entry point is
+ * {@link advanceRaids}, advanced on the SAME fixed tick grid as everything else
+ * (simulate feeds it uniform sub-steps). The only randomness is combat LUCK
+ * (M5.5) — one {@link luckFactor} draw per resolved raid, taken from the per-subStep
+ * `rng` the tick seeds from the persisted `rngState`; because the draw count and
+ * order are fixed by the tick grid, online / offline / sim stay byte-identical.
  *
  * Since M2.1 raids are PER-VILLAGE: every function takes the {@link Village} it
  * acts on, and the GLOBAL battle log is threaded in explicitly (`log`) so each
@@ -113,23 +119,38 @@ function raidsActive(v: Village): boolean {
  * with `mods.defenseMult`: a higher wall means a bigger defence figure into
  * {@link battleOutcome}, i.e. more raids repelled and smaller losses on the ones that
  * still land. A wall-less village has mult 1, so this is byte-identical to pre-M5.2.
+ *
+ * M5.5 LUCK: when an `rng` is threaded in (the per-subStep instance seeded from the
+ * persisted `rngState`), the RAIDER's power is multiplied by one {@link luckFactor}
+ * draw — a symmetric +/-{@link COMBAT_LUCK} roll (mean 1.0) — BEFORE {@link battleOutcome}
+ * (which itself stays RNG-free). The draw happens EXACTLY ONCE here, and `resolveRaid`
+ * is called exactly once per fired raid, so the number and order of draws is invariant
+ * to how `dt` is chopped — the property that keeps `rngState` (and every outcome) byte
+ * identical online / offline / chunked / in the sim. The roll is recorded on the report
+ * (`luck`). Callers that pass NO rng (unit tests / per-tier probes that don't exercise
+ * luck) take `luck = 1` and emit a report WITHOUT the field — pre-M5.5 byte-for-byte.
  */
 function resolveRaid(
   v: Village,
   log: BattleReport[],
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
+  rng?: RNG,
 ): void {
-  const power = raidPower(v)
+  // One luck draw per resolved raid (see docstring). Absent rng → no draw, luck = 1.
+  const luck = rng !== undefined ? luckFactor(rng) : undefined
+  const power = raidPower(v) * (luck ?? 1)
   const home = stationedUnits(v)
-  // attacker = the raid; defender = the home garrison hardened by tech (defenseMult)
-  // AND the village wall (villageDefenseMult).
+  // attacker = the raid (luck-scaled); defender = the home garrison hardened by tech
+  // (defenseMult) AND the village wall (villageDefenseMult).
   const outcome = battleOutcome(power, armyDefensePower(home, mods) * villageDefenseMult(v))
 
   if (!outcome.attackerWins) {
     // Repelled: no losses, nothing stolen (the raiders break on the wall).
     if (stats !== undefined) stats.raidsRepelled += 1 // M5.4: lifetime counter
-    pushBattleReport(log, { kind: 'raid', villageId: v.id, won: true, looted: '0', losses: 0 })
+    const report: RaidReport = { kind: 'raid', villageId: v.id, won: true, looted: '0', losses: 0 }
+    if (luck !== undefined) report.luck = luck
+    pushBattleReport(log, report)
     return
   }
 
@@ -156,13 +177,15 @@ function resolveRaid(
     looted = looted.add(steal)
   }
 
-  pushBattleReport(log, {
+  const report: RaidReport = {
     kind: 'raid',
     villageId: v.id,
     won: false,
     looted: looted.toString(),
     losses,
-  })
+  }
+  if (luck !== undefined) report.luck = luck
+  pushBattleReport(log, report)
 }
 
 /**
@@ -185,6 +208,14 @@ function resolveRaid(
  * counters grow identically online / offline / sim and never from the UI. Callers
  * that don't track stats (tests, the per-tier sim probe) leave it undefined and get
  * the exact pre-M5.4 behaviour.
+ *
+ * `rng` (M5.5, OPTIONAL) is the per-subStep RNG instance the tick seeds from the
+ * persisted `rngState` and threads into BOTH advanceMarches and advanceRaids (the
+ * SAME instance, in `villageOrder`), so combat LUCK draws come from one deterministic
+ * stream. It is passed straight to {@link resolveRaid}, which draws EXACTLY ONCE per
+ * fired raid — never for a frozen (inactive) village, so the draw count tracks the
+ * number of raids that actually resolve in the window and stays invariant to the `dt`
+ * split. Omitting it (tests / probes) keeps the pre-M5.5 luck-free resolution.
  */
 export function advanceRaids(
   v: Village,
@@ -192,6 +223,7 @@ export function advanceRaids(
   dtSeconds: number,
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
+  rng?: RNG,
 ): void {
   if (!(dtSeconds > 0)) return
   if (!raidsActive(v)) return
@@ -203,7 +235,7 @@ export function advanceRaids(
     }
     dt -= v.raidTimer
     v.raidTimer = 0
-    resolveRaid(v, log, mods, stats)
+    resolveRaid(v, log, mods, stats, rng)
     v.raidTimer = RAID_BASE_INTERVAL
   }
 }

@@ -15,7 +15,7 @@ import { barbarianTarget } from '../content/barbarians'
 import { build, nextCostAffordable } from './buildings'
 import { canRecruit, freePopulation, recruit, recruitCost } from './recruitment'
 import { canAttack, sendAttack, stationedUnits } from './marches'
-import { applyLosses, armyAttackPower } from './combat'
+import { WORST_LUCK, applyLosses, armyAttackPower } from './combat'
 import { targetsByDistance } from './world'
 
 /**
@@ -28,10 +28,12 @@ import { targetsByDistance } from './world'
  * HARD GUARANTEES (CLAUDE.md):
  *  - DETERMINISTIC & RNG-FREE here: every choice is a pure function of the village /
  *    world state on a STABLE iteration order ({@link BUILDING_IDS},
- *    {@link UNIT_IDS}, {@link targetsByDistance}'s distance+id ordering). The only
- *    randomness the game has (none in combat yet) would come from the systems these
- *    helpers call, never from this module — no `Date`, no `Math.random`. Because
- *    {@link runAutomation} runs inside the fixed-grid sub-step (tick.ts), online,
+ *    {@link UNIT_IDS}, {@link targetsByDistance}'s distance+id ordering). Combat's only
+ *    randomness is LUCK (M5.5 — the +/-COMBAT_LUCK roll drawn from `rngState` inside the
+ *    sub-step), and this module draws NONE of it: auto-attack plans against
+ *    {@link WORST_LUCK} instead (see autoAttackOnce), committing the army only to fights
+ *    it wins AND survives even on the unluckiest roll. No `Date`, no `Math.random` here.
+ *    Because {@link runAutomation} runs inside the fixed-grid sub-step (tick.ts), online,
  *    offline and the sim harness stay byte-identical with automation ON.
  *  - SELF-LIMITING (no infinite loops / no softlock): each `*Once` helper performs at
  *    most ONE action per call and is naturally bounded by the village's resources,
@@ -49,13 +51,14 @@ import { targetsByDistance } from './world'
  */
 
 /**
- * First gate auto-attack demands before committing the army: its attack power must be
- * at least this multiple of the camp's defence, so the fight is a guaranteed WIN
- * (`battleOutcome` needs power strictly > defence, and 1.25x clears that with headroom
- * for the attrition curve). Note this only secures the VICTORY, not that the army
- * survives it — a lone/marginal stack can win yet attrit to zero (see the per-type
- * floor in combat.ts). autoAttackOnce therefore pairs this with an exact survivor
- * check so the routine never feeds the army into a loss. Balance knob.
+ * First gate auto-attack demands before committing the army: its WORST-LUCK attack
+ * power (`power * WORST_LUCK`, M5.5) must be at least this multiple of the camp's
+ * defence, so the fight is a guaranteed WIN even on the unluckiest roll (`battleOutcome`
+ * needs power strictly > defence, and 1.25x clears that with headroom for the attrition
+ * curve). Note this only secures the VICTORY, not that the army survives it — a
+ * lone/marginal stack can win yet attrit to zero (see the per-type floor in combat.ts).
+ * autoAttackOnce therefore pairs this with an exact survivor check (also at WORST_LUCK)
+ * so the routine never feeds the army into a loss. Balance knob.
  */
 const WIN_MARGIN = 1.25
 
@@ -161,10 +164,12 @@ function hasMarchTo(v: Village, id: string): boolean {
  * at the NEAREST barbarian it is WIN-SAFE
  * against and has no march already flying at. "Nearest" is Euclidean with the id
  * index as a deterministic tiebreaker ({@link targetsByDistance}); "win-safe" means
- * BOTH that the army's attack power (with `mods`) clears {@link WIN_MARGIN}x the camp's
- * defence (a guaranteed win) AND that, replaying combat.ts's exact per-type attrition
- * floor, at least one unit survives to march home — so the routine never trades the
- * army for a victory it can't carry back. Returns true iff an attack was dispatched.
+ * BOTH that the army's WORST-LUCK attack power (`power * WORST_LUCK`, with `mods`; M5.5)
+ * clears {@link WIN_MARGIN}x the camp's defence (a guaranteed win even on the unluckiest
+ * roll) AND that, replaying combat.ts's exact per-type attrition floor at that same
+ * worst-luck power, at least one unit survives to march home — so the routine never
+ * trades the army for a victory it can't carry back, pech or not. Returns true iff an
+ * attack was dispatched.
  *
  * NEVER sends nobles, scouts or siege. Self-limiting: the dispatched army moves into `v.marches`, so
  * {@link stationedUnits} no longer counts it and the target gets a march — the same
@@ -192,20 +197,28 @@ export function autoAttackOnce(
   for (const id of UNIT_IDS) total += idle[id]
   if (total <= 0) return false
 
+  // Plan against WORST_LUCK (M5.5): the luck roll multiplies the attacker's power by a
+  // uniform [WORST_LUCK, BEST_LUCK] at resolution, so the army is WEAKEST — likeliest to
+  // miss the win or attrit to zero — at WORST_LUCK. Vetting every gate with this floored
+  // power means the auto-attack NEVER loses the army to bad luck; an average/best roll
+  // only ever does better.
   const power = armyAttackPower(idle, mods)
+  const worstPower = power * WORST_LUCK
   for (const b of targetsByDistance(v, world)) {
     if (hasMarchTo(v, b.id)) continue
     const def = barbarianTarget(b.level).defensePower
-    if (power < def * WIN_MARGIN) continue
+    if (worstPower < def * WIN_MARGIN) continue
     // WIN-SAFE in the strict sense: winning is NOT enough — the army must also come
-    // home alive. combat.ts floors survivors PER UNIT TYPE (applyLosses) with
-    // lossFrac = (def/power)^1.5, and advanceMarches DROPS the march entirely (army
-    // gone, zero loot) when totalUnits(survivors) <= 0. A lone or marginal stack can
-    // win yet attrit to nothing (e.g. 1 axeman power40 vs def30 → floor(1·0.35)=0), so
-    // mirror that exact resolution and refuse any target that would annihilate the
-    // dispatched army. The stack then stays home until it regroups into a survivable
-    // force — auto-attack never bleeds the army it just trained.
-    const lossFrac = power > def ? (def > 0 ? Math.pow(def / power, 1.5) : 0) : 1
+    // home alive, AND it must do both even on the unluckiest roll. combat.ts floors
+    // survivors PER UNIT TYPE (applyLosses) with lossFrac = (def/effAtk)^1.5 where
+    // effAtk = power * luck; the FEWEST survivors come at WORST_LUCK, so we replay with
+    // worstPower. advanceMarches DROPS the march entirely (army gone, zero loot) when
+    // totalUnits(survivors) <= 0. A lone or marginal stack can win yet attrit to nothing
+    // (e.g. 1 axeman power40 vs def30 → floor(1·0.35)=0), so mirror that exact resolution
+    // at worst luck and refuse any target that would annihilate the dispatched army. The
+    // stack then stays home until it regroups into a survivable force — auto-attack never
+    // bleeds the army it just trained, pech or not.
+    const lossFrac = worstPower > def ? (def > 0 ? Math.pow(def / worstPower, 1.5) : 0) : 1
     const after = applyLosses(idle, lossFrac)
     let survivors = 0
     for (const id of UNIT_IDS) survivors += after[id]

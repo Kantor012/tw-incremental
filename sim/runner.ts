@@ -49,6 +49,10 @@ import {
   checkStatsAccumulated,
   checkAchievementsUnlocked,
   checkM54Determinism,
+  checkLuckDistribution,
+  checkLuckVaries,
+  checkAutoAttackLuckSafe,
+  checkLuckDeterminism,
   contentConsumed,
   totalResources,
   seedAutomation,
@@ -871,6 +875,20 @@ export function runOne(seed: string, ticks: number): RunResult {
   })
 
   invariants.push(checkM54Determinism(seed, OFFLINE_CHECK_SECONDS))
+
+  // M5.5 combat luck — deterministic proof-of-mechanic checks. The MAIN run above is untouched
+  // (luck is symmetric, mean 1.0, drawn only from the persisted seeded rngState, and the bot
+  // keeps a worst-luck-safe loss margin, so the 17 balance goals stay measured exactly — see the
+  // balance warnings). These assert: luckFactor's distribution is the contracted +/-25% band with
+  // mean ~1.0 (luck-distribution); the SAME attack wins or loses depending on the roll
+  // (luck-varies); the idle auto-attack NEVER loses its army to bad luck while a luck-losable army
+  // is correctly refused (auto-attack-luck-safe); and the luck-driven combat replays
+  // byte-identically online vs chunked-offline with rngState advancing in lock-step
+  // (luck-determinism). runOne runs per seed, so the across-seed determinism clause is covered too.
+  invariants.push(checkLuckDistribution(seed))
+  invariants.push(checkLuckVaries(seed))
+  invariants.push(checkAutoAttackLuckSafe(seed))
+  invariants.push(checkLuckDeterminism(seed, OFFLINE_CHECK_SECONDS))
 
   const metrics = collect(
     seed,

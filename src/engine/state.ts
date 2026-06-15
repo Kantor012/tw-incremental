@@ -128,6 +128,15 @@ export type BattleReport =
       lootSum: string
       losses: number
       /**
+       * The luck roll that decided THIS engagement (M5.5): a finite multiplier in
+       * [1-COMBAT_LUCK, 1+COMBAT_LUCK] (mean 1.0) applied to the attacker's power
+       * before resolution — e.g. `1.12` = +12% lucky, `0.83` = pech. OPTIONAL so
+       * pre-M5.5 reports (which never recorded it) stay valid with no save
+       * transform; absence simply means "luck unknown for this old report". A plain
+       * finite number, never Decimal — the log stays Decimal-free JSON.
+       */
+      luck?: number
+      /**
        * Conquest PROGRESS recorded on a WON attack whose army still carried a
        * surviving noble (M2.4): `loyaltyHit` is how much loyalty this strike actually
        * removed from the target (clamped — it never drives loyalty below 0), and
@@ -141,7 +150,19 @@ export type BattleReport =
       loyaltyHit?: number
       loyaltyAfter?: number
     }
-  | { kind: 'raid'; villageId: VillageId; won: boolean; looted: string; losses: number }
+  | {
+      kind: 'raid'
+      villageId: VillageId
+      won: boolean
+      looted: string
+      losses: number
+      /**
+       * The luck roll that decided this raid (M5.5): a finite multiplier in
+       * [1-COMBAT_LUCK, 1+COMBAT_LUCK] (mean 1.0) applied to the RAIDER's power
+       * before resolution. OPTIONAL — pre-M5.5 raid reports stay valid without it.
+       */
+      luck?: number
+    }
   | {
       /**
        * A barbarian village was CONQUERED (M2.4): a won attack carrying a surviving
