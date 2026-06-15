@@ -155,7 +155,8 @@ function hasMarchTo(v: Village, id: string): boolean {
 
 /**
  * AUTO-ATTACK once: send the village's whole IDLE COMBAT army (everything at home
- * MINUS nobles — conquest stays manual) at the NEAREST barbarian it is WIN-SAFE
+ * MINUS nobles — conquest stays manual — and scouts — recon-only, attack 0/no loot)
+ * at the NEAREST barbarian it is WIN-SAFE
  * against and has no march already flying at. "Nearest" is Euclidean with the id
  * index as a deterministic tiebreaker ({@link targetsByDistance}); "win-safe" means
  * BOTH that the army's attack power (with `mods`) clears {@link WIN_MARGIN}x the camp's
@@ -163,7 +164,7 @@ function hasMarchTo(v: Village, id: string): boolean {
  * floor, at least one unit survives to march home — so the routine never trades the
  * army for a victory it can't carry back. Returns true iff an attack was dispatched.
  *
- * NEVER sends nobles. Self-limiting: the dispatched army moves into `v.marches`, so
+ * NEVER sends nobles or scouts. Self-limiting: the dispatched army moves into `v.marches`, so
  * {@link stationedUnits} no longer counts it and the target gets a march — the same
  * stack is never re-sent until it returns. A no-op (false) when there is no idle
  * combat army or no reachable beatable target.
@@ -174,9 +175,12 @@ export function autoAttackOnce(
   log: BattleReport[],
   mods: TechModifiers = NO_TECH_MODS,
 ): boolean {
-  // Idle combat army = units at home (roster − marches), nobles zeroed out.
+  // Idle combat army = units at home (roster − marches), nobles AND scouts zeroed
+  // out: nobles stay manual (conquest) and scouts are recon-only (attack 0, no loot,
+  // they must never be fed into a fight), so neither belongs in an auto-attack stack.
   const idle = stationedUnits(v)
   idle.noble = 0
+  idle.scout = 0
   let total = 0
   for (const id of UNIT_IDS) total += idle[id]
   if (total <= 0) return false

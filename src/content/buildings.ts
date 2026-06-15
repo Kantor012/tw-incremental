@@ -24,11 +24,12 @@ export type BuildingId =
   | 'farm'
   | 'barracks'
   | 'academy'
+  | 'wall'
 
 /**
- * Stable iteration order for derived-stat recompute and UI listing. `academy`
- * stays LAST so older saves' building key order is unchanged (the new building is
- * appended), keeping migration and round-trip deterministic.
+ * Stable iteration order for derived-stat recompute and UI listing. New buildings are
+ * APPENDED (here `wall`, after `academy`) so older saves' building key order is never
+ * disturbed, keeping migration and round-trip deterministic.
  */
 export const BUILDING_IDS: readonly BuildingId[] = [
   'hq',
@@ -39,6 +40,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'farm',
   'barracks',
   'academy',
+  'wall',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -62,6 +64,10 @@ export interface ResourceCost {
  *                   the village recruit the noble (see units.ts `requires`) and so
  *                   conquer barbarian villages. Pure gate: contributes nothing to a
  *                   tick-derived stat, so recompute treats it as a no-op.
+ *  - defense_bonus: fraction (e.g. 0.05) of EXTRA village defence per level (M5.2
+ *                   wall). Consumed by villageDefenseMult (systems/buildings.ts) to
+ *                   raise the standing army's defence against incoming raids; NOT a
+ *                   tick-derived stat, so recompute treats it as a no-op.
  */
 export type BuildingEffect =
   | { kind: 'production'; resource: ResourceId; perLevel: number }
@@ -70,6 +76,7 @@ export type BuildingEffect =
   | { kind: 'cost_reduction'; perLevel: number }
   | { kind: 'recruit_speed'; perLevel: number }
   | { kind: 'noble_unlock' }
+  | { kind: 'defense_bonus'; perLevel: number }
 
 export interface BuildingDef {
   id: BuildingId
@@ -207,6 +214,24 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     costFactor: 1.6,
     effect: { kind: 'noble_unlock' },
     // Starts at 0: building it is the late-M2 expansion goal that opens conquest.
+    initialLevel: 0,
+  },
+  wall: {
+    id: 'wall',
+    name: 'Mur',
+    desc: 'Umacnia wioskę. Każdy poziom zwiększa siłę obrony wioski przed najazdami barbarzyńców.',
+    category: 'military',
+    // Finite ceiling like every other building; at perLevel 0.05 a maxed wall is
+    // +50% village defence — a meaningful but bounded shield against raids.
+    maxLevel: 10,
+    baseCost: { wood: 120, clay: 200, iron: 60 },
+    costFactor: 1.27,
+    // +5% village defence per level (M5.2). LOW balance impact: it only trims raid
+    // losses (villageDefenseMult, consumed by raids.ts) — it never touches attack,
+    // production or the conquest path, so the 17 balance goals stay intact. perLevel
+    // is provisional; the Balance phase tunes it against the harness wall target.
+    effect: { kind: 'defense_bonus', perLevel: 0.05 },
+    // Starts at 0: an optional defensive investment, not part of the core build order.
     initialLevel: 0,
   },
 }

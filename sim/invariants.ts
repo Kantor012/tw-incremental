@@ -23,7 +23,9 @@ import {
   type PrestigeArchetype,
 } from '../src/content/prestige'
 import { freePopulation, recruit } from '../src/systems/recruitment'
-import { sendAttack } from '../src/systems/marches'
+import { sendAttack, sendScout } from '../src/systems/marches'
+import { advanceRaids } from '../src/systems/raids'
+import { villageDefenseMult } from '../src/systems/buildings'
 import { WORLD_SIZE } from '../src/systems/world'
 import { LOYALTY_MAX } from '../src/systems/conquest'
 import {
@@ -1165,5 +1167,226 @@ export function checkAutomationDeterminism(seed: string, seconds: number): Invar
     detail: ok
       ? undefined
       : 'chunked offline catch-up diverged from a single-step simulate WITH automation ON (auto build/recruit/attack)',
+  }
+}
+
+// --- M5.2 wall (defensive building) + scouts (recon unit) coverage ------------------------
+//
+// Three deterministic proof-of-mechanic checks for the M5.2 additions, mirroring how the
+// automation coverage proves each idle routine fires. All are pure functions of a freshly
+// seeded scenario (no bot, no clock, no RNG) so a regression that breaks the wall's raid
+// mitigation, the scout's reveal, or the offline/online parity WITH a wall + scout in flight
+// is a hard failure that blocks the commit. The MAIN run is untouched (the 17 balance goals
+// stay measured on the bot's own path — the bot already builds the wall there; it never
+// recruits scouts, so the scout path is exercised here instead).
+
+/**
+ * How many spearmen the wall-mitigation scenario garrisons. Chosen with the building sum
+ * below so the SAME raid is a marginal WIN against the wall-less garrison (it is wiped) but
+ * a clean REPEL once a maxed wall hardens it — see {@link checkWallMitigation}'s arithmetic.
+ */
+const WALL_TEST_GARRISON = 10
+
+/**
+ * MUR (wall) mitigates raids (M5.2): the SAME deterministic raid does strictly LESS damage to
+ * a walled village than to an otherwise-identical wall-less one. Builds two copies of the same
+ * seeded scenario ({@link WALL_TEST_GARRISON} spearmen, a fixed 27-level non-wall footprint
+ * so {@link raidPower} is the same in both copies, primed raid timer) differing ONLY in wall
+ * level — 0 vs the wall's
+ * maxLevel — fires exactly one raid at each via the real {@link advanceRaids} path, and asserts:
+ *
+ *  - the walled village's effective defence ({@link villageDefenseMult} > 1) exceeds the bare
+ *    one's (mult 1), AND
+ *  - the walled village loses STRICTLY fewer units to the raid (with these numbers the bare
+ *    garrison is overrun and wiped while the wall repels the raid for zero losses).
+ *
+ * With the chosen numbers: raidPower = 10 + 3·buildingSum + 0.4·(garrison·15). Bare (wall 0,
+ * sum 27): 151 > defence 150 → raid wins → 10 lost. Walled (wall 10, sum 37): raidPower 181 <
+ * defence 150·1.5 = 225 → repelled → 0 lost. The check is value-driven, not hard-coded to
+ * those totals: it just requires walledLosses < bareLosses, so a Balance retune of the wall
+ * perLevel still passes as long as the wall genuinely mitigates. Pure / deterministic — re-run
+ * twice to confirm RNG-freeness.
+ */
+export function checkWallMitigation(seed: string): InvariantResult {
+  const issues: string[] = []
+
+  // Resolve one raid against a fresh garrison with the given wall level; return its losses
+  // and the village's effective defence multiplier.
+  const resolveOne = (wallLevel: number): { losses: number; mult: number } => {
+    const state = createInitialState(seed, 0)
+    const v = firstVillage(state)
+    // Non-wall footprint (identical in both copies) → buildingLevelSum 27 without the wall.
+    v.buildings.sawmill = 10
+    v.buildings.warehouse = 10
+    v.buildings.farm = 4
+    v.buildings.wall = wallLevel
+    recomputeDerived(state)
+    v.resources = { wood: D(1000), clay: D(1000), iron: D(1000) }
+    for (const id of UNIT_IDS) v.units[id] = 0
+    v.units.spearman = WALL_TEST_GARRISON
+    v.raidTimer = 1 // next advanceRaids(…, 1) fires exactly one raid
+    const log: GameState['battleLog'] = []
+    advanceRaids(v, log, 1)
+    const report = log[log.length - 1]
+    const losses = report && report.kind === 'raid' ? report.losses : -1
+    return { losses, mult: villageDefenseMult(v) }
+  }
+
+  const bare = resolveOne(0)
+  const walled = resolveOne(BUILDINGS.wall.maxLevel)
+  // Determinism: the raid resolution is RNG-free, so a repeat must match byte-for-byte.
+  const bareAgain = resolveOne(0)
+
+  if (bare.losses < 0 || walled.losses < 0) {
+    issues.push('raid produced no report')
+  }
+  if (bare.losses !== bareAgain.losses) {
+    issues.push(`non-deterministic raid losses ${bare.losses} != ${bareAgain.losses}`)
+  }
+  if (!(walled.mult > bare.mult)) {
+    issues.push(`wall defence mult ${walled.mult} !> bare ${bare.mult}`)
+  }
+  if (!(walled.losses < bare.losses)) {
+    issues.push(`walled losses ${walled.losses} !< bare losses ${bare.losses}`)
+  }
+
+  return {
+    name: 'wall-mitigates',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `wall cut raid losses ${bare.losses} -> ${walled.losses} (defence mult ${bare.mult} -> ${walled.mult})`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * ZWIAD (scout) reveals a camp (M5.2): a dispatched scout march flips the target's
+ * {@link BarbarianVillage.scouted} flag false → true and brings every scout home unharmed
+ * WITHOUT fighting or looting. Seeds a fresh capital with a small scout garrison, a raid timer
+ * pushed far out (so no raid perturbs the recon window), dispatches a {@link sendScout} at the
+ * nearest barbarian, advances the real {@link import('../src/engine/tick').simulate} clock past
+ * a full there-and-back, and asserts:
+ *
+ *  - the target was UNSCOUTED before dispatch (scouted === false), and
+ *  - the scout march was created with `kind: 'scout'` carrying only scouts, and
+ *  - after the round trip the target is SCOUTED (scouted === true), the march has cleared, the
+ *    scouts are ALL home (none lost — recon never fights), and
+ *  - NOTHING was logged (a scout neither battles nor raids — no battle report), and
+ *  - the capital's resources stayed finite / non-negative and the army books balance
+ *    (no NaN / negative / phantom units introduced by the scout path).
+ *
+ * The reveal count (1 here) backs the contract's `scout-reveals >= 1` goal. Pure /
+ * deterministic — no bot, no RNG, raids frozen out of the window.
+ */
+export function checkScoutReveals(seed: string): InvariantResult {
+  const issues: string[] = []
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.barracks = 1
+  recomputeDerived(state)
+  v.resources = { wood: D(1000), clay: D(1000), iron: D(1000) }
+  v.popCap = D(1000)
+  for (const id of UNIT_IDS) v.units[id] = 0
+  v.units.scout = 5
+  // Push the raid clock well past the recon window so no raid touches the home scouts —
+  // isolating the scout mechanic (a returned scout garrison would otherwise be a raid target).
+  v.raidTimer = 1e9
+
+  const target = state.world.barbarians[0]
+  if (target === undefined) {
+    return { name: 'scout-reveals', ok: false, detail: 'world has no barbarian to scout' }
+  }
+  if (target.scouted !== false) issues.push('target already scouted before dispatch')
+
+  const logLenBefore = state.battleLog.length
+  const dispatched = sendScout(v, state.world, state.battleLog, target.id, 3)
+  if (!dispatched) issues.push('sendScout returned false')
+  const march = v.marches[v.marches.length - 1]
+  if (!march || march.kind !== 'scout') issues.push('no scout march created')
+  else if (march.units.scout !== 3) issues.push(`scout march carries ${march.units.scout} scouts, expected 3`)
+
+  // Advance well past a there-and-back (nearest tier-1 camp ≈ 3 fields × scout speed 9 ≈ 54s
+  // round trip; 600s is comfortably beyond, and the raid clock is frozen).
+  simulate(state, 600)
+
+  if (target.scouted !== true) issues.push('target not scouted after the scout returned')
+  if (v.marches.length !== 0) issues.push(`scout march still in flight (${v.marches.length})`)
+  if (v.units.scout !== 5) issues.push(`scouts not all home: ${v.units.scout}/5 (recon must not fight)`)
+  if (state.battleLog.length !== logLenBefore) {
+    issues.push(`scout logged ${state.battleLog.length - logLenBefore} report(s) — it must not fight`)
+  }
+
+  // No NaN / negative resources and balanced army books introduced by the scout path.
+  for (const r of RESOURCE_IDS) {
+    const res = v.resources[r]
+    if (!isFiniteDecimal(res) || res.lt(0)) issues.push(`capital.${r}=${res.toString()}`)
+  }
+  const army = checkArmyConsistency(state)
+  if (!army.ok) issues.push(`army-consistency: ${army.detail ?? 'failed'}`)
+
+  return {
+    name: 'scout-reveals',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `scout revealed ${target.id} (scouted false -> true), 5/5 scouts home, nothing fought/looted`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Put a fresh state into the M5.2 offline-parity scenario: a WALL standing (so the raid path
+ * folds {@link villageDefenseMult}), a mixed home garrison (raids fire against it across the
+ * span) AND an in-flight SCOUT march (so the scout reveal + unharmed return cross the
+ * offline/online boundary). Applied identically to both branches of
+ * {@link checkM52Determinism}, so the only thing it can reveal is a genuine wall/scout
+ * online-vs-offline split. Mirrors {@link seedRecruitment}'s discipline (resources/popCap set
+ * directly to decouple from prices).
+ */
+function seedM52(state: GameState): void {
+  const v = firstVillage(state)
+  v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  v.buildings.barracks = 1
+  v.buildings.wall = 5 // a standing wall → villageDefenseMult 1.25 in the raid path
+  recomputeDerived(state)
+  v.popCap = D(1000)
+  v.units.spearman = 20
+  v.units.axeman = 30
+  v.units.scout = 10
+  // In-flight scout at the nearest camp: its reveal + unharmed return must replay identically
+  // whether the span is one big step or many chunks.
+  sendScout(v, state.world, state.battleLog, state.world.barbarians[0].id, 5)
+}
+
+/**
+ * M5.2 offline/online parity: crediting a span as one big {@link import('../src/engine/tick').simulate}
+ * (online catch-up) must be byte-identical to the chunked offline path
+ * ({@link applyOffline}) WITH a wall standing and a scout march in flight. Mirrors
+ * {@link checkOfflineDeterminism} / {@link checkAutomationDeterminism} but seeds the
+ * {@link seedM52} scenario, so the wall's raid mitigation AND the scout's reveal/return are
+ * exercised in BOTH branches and proven to replay identically — the determinism guarantee the
+ * brief requires for the new mechanics. `seconds` stays within
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller uses an hour).
+ */
+export function checkM52Determinism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedM52(big)
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedM52(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const a = serialize(big)
+  const b = serialize(chunked)
+  const ok = a === b
+  return {
+    name: 'm52-determinism',
+    ok,
+    detail: ok
+      ? undefined
+      : 'chunked offline catch-up diverged from a single-step simulate WITH a wall + scout march in flight',
   }
 }

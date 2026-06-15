@@ -179,6 +179,14 @@ export function unitIcon(id: UnitId): SVGSVGElement {
       const gem = svg('circle', { cx: '12', cy: '13', r: '1.3', fill: '#c1663b' })
       return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [body, band, gem])
     }
+    case 'scout': {
+      // The Zwiadowca gathers information, never fights — an eye reads as
+      // "reveals" (the camp's defence/loot) rather than combat.
+      const eye = svg('path', { d: 'M2 12 C6 6 18 6 22 12 C18 18 6 18 2 12 Z', fill: 'none', stroke: '#c6cdd5', 'stroke-width': '1.6' })
+      const iris = svg('circle', { cx: '12', cy: '12', r: '3.4', fill: '#4a90c2' })
+      const pupil = svg('circle', { cx: '12', cy: '12', r: '1.5', fill: '#16202b' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [eye, iris, pupil])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla jednostki: ' + String(_exhaustive))

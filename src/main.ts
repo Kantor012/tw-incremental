@@ -16,7 +16,7 @@ import { GameLoop } from './engine/loop'
 import { EventBus, type GameEvents } from './engine/eventbus'
 import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
-import { sendAttack } from './systems/marches'
+import { sendAttack, sendScout } from './systems/marches'
 import { foundVillage } from './systems/villages'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
@@ -123,6 +123,25 @@ mountApp(root, {
     }
     return ok
   },
+  onScout: (villageId: VillageId, targetId: string, scoutCount: number) => {
+    // Dispatch a SCOUT march (M5.2): the scouts travel to the camp, flip its
+    // `scouted` flag on arrival (revealing defence/loot in the UI), and return
+    // unharmed — they never fight or loot. Fold in the EFFECTIVE march-speed bonus
+    // so the recon ETA matches an attack's. Commit + persist only on a successful send.
+    const ok = sendScout(
+      store.state.villages[villageId],
+      store.state.world,
+      store.state.battleLog,
+      targetId,
+      scoutCount,
+      effectiveMods(store.state),
+    )
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onFound: (payerVillageId: VillageId, x: number, y: number) => {
     const id = foundVillage(store.state, payerVillageId, x, y)
     if (id !== null) {
@@ -175,7 +194,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.13.0',
+  version: '0.14.0',
   offlineSeconds,
 })
 

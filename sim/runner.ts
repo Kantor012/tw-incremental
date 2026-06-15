@@ -33,6 +33,9 @@ import {
   checkNoSoftlock,
   checkOfflineDeterminism,
   checkMarchesTerminate,
+  checkWallMitigation,
+  checkScoutReveals,
+  checkM52Determinism,
   checkTechTree,
   checkTechState,
   checkPrestigeTree,
@@ -784,6 +787,17 @@ export function runOne(seed: string, ticks: number): RunResult {
   const automation = runAutomationCoverage(seed, AUTOMATION_SECONDS)
   invariants.push(...automation.invariants)
   invariants.push(checkAutomationDeterminism(seed, AUTOMATION_SECONDS))
+
+  // M5.2 wall (defensive building) + scouts (recon unit) — three deterministic proof-of-mechanic
+  // checks (no bot, no RNG). The MAIN run above is untouched (the bot already builds the wall
+  // there; it never recruits scouts), so the 17 balance goals stay measured on the pre-M5.2
+  // path. These assert: a wall strictly mitigates raid losses vs an identical wall-less village
+  // (wall-mitigates), a scout march reveals its target and returns unharmed without fighting or
+  // looting (scout-reveals), and the wall + an in-flight scout march replay byte-identically
+  // online vs chunked-offline (m52-determinism).
+  invariants.push(checkWallMitigation(seed))
+  invariants.push(checkScoutReveals(seed))
+  invariants.push(checkM52Determinism(seed, OFFLINE_CHECK_SECONDS))
 
   const metrics = collect(
     seed,

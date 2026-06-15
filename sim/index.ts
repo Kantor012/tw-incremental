@@ -354,6 +354,26 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M5.2 wall + scouts coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M5.2 wall + scouts (coverage) ---')
+  const m52Names = ['wall-mitigates', 'scout-reveals', 'm52-determinism']
+  for (const r of results) {
+    const line = m52Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface the detail of each so a passing wall/scout check is visible, not just the count.
+    for (const name of m52Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {

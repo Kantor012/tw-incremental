@@ -45,9 +45,10 @@ import { WORLD_CENTER } from '../src/systems/world'
  * tech multipliers back into every village's derived stats (production = base * (1+Σ)).
  */
 
-/** A well-formed v6 march at a concrete barbarian target (new geometry fields set). */
+/** A well-formed march at a concrete barbarian target (geometry + M5.2 kind set). */
 function sampleMarch(): March {
   return {
+    kind: 'attack',
     targetId: 'b0',
     targetLevel: 3,
     targetX: 212,
@@ -733,5 +734,92 @@ describe('save — v10 automation round-trip', () => {
     const nan = automationState()
     nan.automation.recruitTarget = Number.NaN
     expect(() => validateState(nan)).toThrow()
+  })
+})
+
+/**
+ * A fresh v11 state exercising the M5.2 additions: a built wall + a trained scout on the
+ * capital, a SCOUT march in flight (kind 'scout', scouts only, empty loot), and a
+ * barbarian flipped to scouted. Built fresh per test so the corruption mutations below
+ * never leak between cases.
+ */
+function v11State(): GameState {
+  const s = createInitialState('save-v11', 5252)
+  const v = s.villages.v0
+  v.buildings.barracks = 1
+  v.buildings.wall = 4
+  v.units.scout = 6
+  const target = s.world.barbarians[0]
+  v.marches = [
+    {
+      kind: 'scout',
+      targetId: target.id,
+      targetLevel: target.level,
+      targetX: target.x,
+      targetY: target.y,
+      units: { ...INITIAL_UNITS, scout: 2 },
+      phase: 'outbound',
+      remaining: 12,
+      loot: { wood: D(0), clay: D(0), iron: D(0) },
+    },
+  ]
+  target.scouted = true
+  recomputeDerived(s)
+  return s
+}
+
+describe('save — v11 wall + scout round-trip (M5.2)', () => {
+  it('serialize/deserialize preserves the wall level, scout count, scout-march kind and scouted flag', () => {
+    const state = v11State()
+    const json = serialize(state)
+    const back = deserialize(json)
+
+    expect(back.version).toBe(SAVE_VERSION)
+    expect(back.villages.v0.buildings.wall).toBe(4)
+    expect(back.villages.v0.units.scout).toBe(6)
+    const m = back.villages.v0.marches[0]
+    expect(m.kind).toBe('scout')
+    expect(m.units.scout).toBe(2)
+    expect(back.world.barbarians[0].scouted).toBe(true)
+    // serialize is idempotent across the round-trip (stable key order, re-tagged).
+    expect(serialize(back)).toBe(json)
+  })
+
+  it('exportSave/importSave round-trips the M5.2 fields byte-identically', () => {
+    const state = v11State()
+    const restored = importSave(exportSave(state))
+    // No migration runs at the current version and the derived fields are already
+    // consistent, so importSave's recompute changes nothing.
+    expect(serialize(restored)).toBe(serialize(state))
+    expect(restored.villages.v0.buildings.wall).toBe(4)
+    expect(restored.villages.v0.marches[0].kind).toBe('scout')
+    expect(restored.world.barbarians[0].scouted).toBe(true)
+  })
+
+  it('validateState accepts a scout march and an attack march side by side with scouted barbarians', () => {
+    const state = v11State()
+    // Add an attack march too, so BOTH kinds validate alongside one another.
+    state.villages.v0.marches.push(sampleMarch())
+    expect(validateState(state)).toBe(state)
+  })
+
+  it('rejects a march with an unknown / missing kind', () => {
+    const bad = v11State()
+    ;(bad.villages.v0.marches[0] as { kind: unknown }).kind = 'raid'
+    expect(() => validateState(bad)).toThrow()
+
+    const missing = v11State()
+    delete (missing.villages.v0.marches[0] as { kind?: unknown }).kind
+    expect(() => validateState(missing)).toThrow()
+  })
+
+  it('rejects a non-boolean / missing barbarian scouted flag', () => {
+    const wrong = v11State()
+    ;(wrong.world.barbarians[0] as { scouted: unknown }).scouted = 'yes'
+    expect(() => validateState(wrong)).toThrow()
+
+    const missing = v11State()
+    delete (missing.world.barbarians[0] as { scouted?: unknown }).scouted
+    expect(() => validateState(missing)).toThrow()
   })
 })

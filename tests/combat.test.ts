@@ -10,8 +10,14 @@ import { NO_TECH_MODS, type TechModifiers } from '../src/engine/state'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 
 /** A full (all UnitId present) roster — combat fns take a complete record. */
-function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble }
+function army(
+  spearman = 0,
+  swordsman = 0,
+  axeman = 0,
+  noble = 0,
+  scout = 0,
+): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble, scout }
 }
 
 /** NO_TECH_MODS with selected fields overridden — a terse way to build a TechModifiers. */
@@ -88,6 +94,19 @@ describe('army power roll-ups', () => {
       2 * UNITS.spearman.carry + 1 * UNITS.swordsman.carry + 3 * UNITS.axeman.carry,
     )
     expect(armyCarry(army())).toBe(0)
+  })
+
+  it('a scout-only army has no attack power and no carry (recon never fights/loots, M5.2)', () => {
+    // A stack of pure scouts (army(...,scout)) brings 0 attack and 0 carry, so it can
+    // never win a battle (battleOutcome needs power strictly > defence) nor haul loot —
+    // the combat-side guarantee behind "scouts reveal, never fight, never loot".
+    const scouts = army(0, 0, 0, 0, 20)
+    expect(armyAttackPower(scouts)).toBe(0)
+    expect(armyCarry(scouts)).toBe(0)
+    // Adding scouts to a real army changes neither its attack power nor its carry.
+    const force = army(0, 0, 5)
+    expect(armyAttackPower(army(0, 0, 5, 0, 20))).toBe(armyAttackPower(force))
+    expect(armyCarry(army(0, 0, 5, 0, 20))).toBe(armyCarry(force))
   })
 })
 

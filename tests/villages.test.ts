@@ -52,7 +52,7 @@ function addVillage(s: GameState, id: VillageId, x: number, y: number): void {
 
 /** Append a barbarian village at (x, y). */
 function addBarb(s: GameState, id: string, x: number, y: number): void {
-  s.world.barbarians.push({ id, x, y, level: 1, name: id, loyalty: 100 })
+  s.world.barbarians.push({ id, x, y, level: 1, name: id, loyalty: 100, scouted: false })
 }
 
 describe('playerVillageCount', () => {

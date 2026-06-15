@@ -41,12 +41,18 @@ import { barbarianById } from '../src/systems/world'
  * combat retuning while still proving the loyalty arithmetic.
  */
 
-/** A full (all UnitId present) roster snapshot — `noble` last, matching UNIT_IDS. */
-function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble }
+/** A full (all UnitId present) roster snapshot — `scout` last, matching UNIT_IDS. */
+function army(
+  spearman = 0,
+  swordsman = 0,
+  axeman = 0,
+  noble = 0,
+  scout = 0,
+): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble, scout }
 }
 
-/** A barbarian village descriptor at a chosen tier, position and loyalty. */
+/** A barbarian village descriptor at a chosen tier, position and loyalty (unscouted). */
 function barb(
   id: string,
   level: number,
@@ -54,7 +60,7 @@ function barb(
   y: number,
   loyalty: number = LOYALTY_MAX,
 ): BarbarianVillage {
-  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})`, loyalty }
+  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})`, loyalty, scouted: false }
 }
 
 /**

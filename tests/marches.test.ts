@@ -16,6 +16,8 @@ import {
   advanceMarches,
   stationedUnits,
   marchTime,
+  sendScout,
+  canScout,
 } from '../src/systems/marches'
 import { barbarianById } from '../src/systems/world'
 import { simulate } from '../src/engine/tick'
@@ -23,13 +25,19 @@ import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
 
 /** A full (all UnitId present) roster snapshot. */
-function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble }
+function army(
+  spearman = 0,
+  swordsman = 0,
+  axeman = 0,
+  noble = 0,
+  scout = 0,
+): Record<UnitId, number> {
+  return { spearman, swordsman, axeman, noble, scout }
 }
 
-/** A barbarian village descriptor at a chosen tier and map position (full loyalty). */
+/** A barbarian village descriptor at a chosen tier and map position (full loyalty, unscouted). */
 function barb(id: string, level: number, x: number, y: number): BarbarianVillage {
-  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})`, loyalty: 100 }
+  return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})`, loyalty: 100, scouted: false }
 }
 
 /** NO_TECH_MODS with selected fields overridden — a terse TechModifiers builder. */
@@ -311,5 +319,161 @@ describe('determinism — an in-flight march replays identically', () => {
     expect(bv.marches.length).toBe(0)
     expect(bv.units.axeman).toBeGreaterThan(0)
     expect(bv.units.axeman).toBeLessThan(6)
+  })
+
+  it('a scout march replays identically online vs chunked offline (reveal included)', () => {
+    const withScout = (seed: string): GameState => {
+      const s = armed(seed)
+      const v = s.villages.v0
+      v.units = army(0, 0, 0, 0, 4)
+      sendScout(v, s.world, s.battleLog, 'b0', 4)
+      return s
+    }
+
+    const seconds = 200 // > full scout cycle (out 27 + return 27), < raid interval (900)
+    const big = withScout('scout-det')
+    simulate(big, seconds)
+    big.lastSeen = seconds * 1000 // mirror applyOffline's bookkeeping
+
+    const chunked = withScout('scout-det')
+    applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+    // The serialized state INCLUDES the world (target.scouted), so byte-equality proves
+    // the reveal happened at the same deterministic moment online and offline.
+    expect(serialize(big)).toBe(serialize(chunked))
+    expect(big.world.barbarians.find((b) => b.id === 'b0')!.scouted).toBe(true)
+    expect(big.villages.v0.marches.length).toBe(0)
+    expect(big.villages.v0.units.scout).toBe(4) // every scout came home
+  })
+})
+
+describe('scout marches (M5.2) — canScout / sendScout', () => {
+  it('sendScout records a scout march (kind scout, scouts only, empty loot) without debiting units', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 4) // 4 scouts at home
+    const target = barbarianById(s.world, 'b0')!
+
+    expect(sendScout(v, s.world, s.battleLog, 'b0', 3)).toBe(true)
+    expect(v.marches.length).toBe(1)
+
+    const m = v.marches[0]
+    expect(m.kind).toBe('scout')
+    expect(m.phase).toBe('outbound')
+    expect(m.targetId).toBe('b0')
+    expect(m.targetLevel).toBe(1)
+    expect(m.targetX).toBe(target.x)
+    expect(m.targetY).toBe(target.y)
+    // Only scouts are dispatched; the loot map is empty (recon hauls nothing).
+    expect(m.units).toEqual(army(0, 0, 0, 0, 3))
+    expect(m.loot.wood.toString()).toBe('0')
+    expect(m.loot.clay.toString()).toBe('0')
+    expect(m.loot.iron.toString()).toBe('0')
+    // Units stay owned (population honest); the 3 dispatched are no longer at home.
+    expect(v.units.scout).toBe(4)
+    expect(stationedUnits(v).scout).toBe(1)
+    // Travel time = distance(3) * scout speed(9) * scale(1) = 27s (the fastest unit).
+    expect(m.remaining).toBe(27)
+    expect(marchTime(v, target, army(0, 0, 0, 0, 3))).toBe(27)
+    // Dispatch logs nothing.
+    expect(s.battleLog.length).toBe(0)
+  })
+
+  it('canScout gates on a real target and enough scouts at home', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 2)
+    expect(canScout(v, s.world, 'b0', 2).ok).toBe(true)
+    expect(canScout(v, s.world, 'b0', 3).ok).toBe(false) // more than at home
+    expect(canScout(v, s.world, 'b0', 0).ok).toBe(false) // must pick a positive count
+    expect(canScout(v, s.world, 'b0', 1.5).ok).toBe(false) // non-integer
+    expect(canScout(v, s.world, 'nope', 1).ok).toBe(false) // unknown target id
+    // A village with no scouts at all cannot scout.
+    const empty = armed()
+    expect(canScout(empty.villages.v0, empty.world, 'b0', 1).ok).toBe(false)
+  })
+
+  it('sendScout mirrors canScout: a rejected dispatch creates no march', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 1)
+    expect(sendScout(v, s.world, s.battleLog, 'b0', 5)).toBe(false) // more than at home
+    expect(sendScout(v, s.world, s.battleLog, 'nope', 1)).toBe(false) // unknown target
+    expect(v.marches.length).toBe(0)
+  })
+
+  it('a scout deducts scouts at home but not the combat roster (a parallel attack still fields its army)', () => {
+    // Sending scouts must not strand the fighting army: the two draw from separate
+    // pools (scouts vs axemen), each tracked through stationedUnits.
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 5, 0, 3) // 5 axemen + 3 scouts
+    expect(sendScout(v, s.world, s.battleLog, 'b0', 3)).toBe(true)
+    expect(stationedUnits(v).scout).toBe(0)
+    expect(stationedUnits(v).axeman).toBe(5) // the strike force is untouched
+    expect(canAttack(v, barbarianById(s.world, 'b0')!, army(0, 0, 5)).ok).toBe(true)
+  })
+})
+
+describe('advanceMarches — scout cycle (M5.2)', () => {
+  it('reveals the target on arrival, then brings every scout home unharmed (no battle/loot/loyalty hit)', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 3)
+    const target = barbarianById(s.world, 'b0')!
+    expect(target.scouted).toBe(false) // hidden until reconned
+    const loyaltyBefore = target.loyalty
+
+    sendScout(v, s.world, s.battleLog, 'b0', 3)
+    const t = marchTime(v, target, army(0, 0, 0, 0, 3)) // 27
+
+    // Outbound completes → the camp is REVEALED, the march turns around, NOTHING fights.
+    const eventsOut = advanceMarches(v, s.world, s.battleLog, t)
+    expect(eventsOut).toEqual([]) // a scout never queues a conquest event
+    expect(target.scouted).toBe(true) // revealed (the false→true flip)
+    expect(target.loyalty).toBe(loyaltyBefore) // recon never touches loyalty
+    expect(v.marches[0].phase).toBe('returning')
+    expect(v.marches[0].kind).toBe('scout')
+    expect(s.battleLog.length).toBe(0) // no battle report for a scout
+    expect(v.units.scout).toBe(3) // none lost — scouts don't fight
+    expect(v.resources.wood.toString()).toBe('50') // nothing looted
+
+    // Return completes → march dropped; scouts (never removed from v.units) are home.
+    const eventsBack = advanceMarches(v, s.world, s.battleLog, t)
+    expect(eventsBack).toEqual([])
+    expect(v.marches.length).toBe(0)
+    expect(v.units.scout).toBe(3) // all 3 returned
+    expect(stationedUnits(v).scout).toBe(3)
+    expect(s.battleLog.length).toBe(0)
+    expect(v.resources.wood.toString()).toBe('50') // still no loot delivered
+  })
+
+  it('a whole out-and-back scout cycle resolves within one large dt', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 2)
+    const target = barbarianById(s.world, 'b0')!
+    sendScout(v, s.world, s.battleLog, 'b0', 2)
+    // One big step (> out 27 + return 27) reveals AND brings the scouts home.
+    advanceMarches(v, s.world, s.battleLog, 1000)
+    expect(target.scouted).toBe(true)
+    expect(v.marches.length).toBe(0)
+    expect(v.units.scout).toBe(2)
+    expect(s.battleLog.length).toBe(0)
+  })
+
+  it('a scout aimed at an already-removed target still returns home (no reveal, no crash)', () => {
+    // The camp may be gone by the time the scout arrives (captured earlier, or a stale
+    // id). The scout simply finds nothing to reveal and heads home — no battle/loot.
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 0, 0, 2)
+    sendScout(v, s.world, s.battleLog, 'b0', 2)
+    // Remove the target mid-flight.
+    s.world = { barbarians: [] }
+    advanceMarches(v, s.world, s.battleLog, 1000)
+    expect(v.marches.length).toBe(0)
+    expect(v.units.scout).toBe(2) // all scouts safely home
+    expect(s.battleLog.length).toBe(0)
   })
 })

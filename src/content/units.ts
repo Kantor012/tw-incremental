@@ -18,14 +18,14 @@
 
 import type { BuildingId } from './buildings'
 
-export type UnitId = 'spearman' | 'swordsman' | 'axeman' | 'noble'
+export type UnitId = 'spearman' | 'swordsman' | 'axeman' | 'noble' | 'scout'
 
 /**
  * Stable iteration order for population roll-up, save validation and UI listing.
- * `noble` stays LAST so older saves' roster key order is unchanged (the new unit
- * is appended), keeping migration and round-trip deterministic.
+ * New units are APPENDED (here `scout`, after `noble`) so older saves' roster key
+ * order is never disturbed, keeping migration and round-trip deterministic.
  */
-export const UNIT_IDS: readonly UnitId[] = ['spearman', 'swordsman', 'axeman', 'noble']
+export const UNIT_IDS: readonly UnitId[] = ['spearman', 'swordsman', 'axeman', 'noble', 'scout']
 
 export interface UnitDef {
   id: UnitId
@@ -134,5 +134,27 @@ export const UNITS: Record<UnitId, UnitDef> = {
     defCavalry: 30,
     carry: 0,
     speed: 35,
+  },
+  // The Zwiadowca (scout): not a soldier but a RECON tool (M5.2). Sent at a barbarian
+  // camp, it reveals that camp's defence/loot (BarbarianVillage.scouted) and returns
+  // home unharmed — it never fights and never loots (attack 0, carry 0). Fast (lowest
+  // min/field) and cheap so reconnaissance is quick and low-stakes. Gated behind the
+  // barracks like the infantry triad. Auto-attack deliberately excludes it (it would
+  // add no attack power), keeping the bot's behaviour — and the 17 balance goals —
+  // unchanged. Numbers provisional; the Balance phase tunes them against the harness.
+  scout: {
+    id: 'scout',
+    name: 'Zwiadowca',
+    desc: 'Szybki zwiad. Odkrywa obronę i łup obozu barbarzyńskiego; nie walczy i nie bierze łupu.',
+    cost: { wood: 50, clay: 30, iron: 20 },
+    pop: 1,
+    recruitSeconds: 40,
+    requires: 'barracks',
+    attack: 0,
+    defInfantry: 2,
+    defCavalry: 2,
+    carry: 0,
+    // Fastest unit (lowest min/field) — recon should outrun the standing army.
+    speed: 9,
   },
 }

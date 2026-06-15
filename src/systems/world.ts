@@ -111,6 +111,9 @@ export function generateWorld(seed: string): World {
         level,
         name: `Wioska barbarzyńska (poz. ${level})`,
         loyalty: INITIAL_LOYALTY,
+        // Unscouted until a scout march reaches it (M5.2): the UI hides its defence/loot
+        // behind '?' until then. Generated false so a fresh world reveals nothing.
+        scouted: false,
       })
       index++
     }

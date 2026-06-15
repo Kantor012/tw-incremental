@@ -320,7 +320,7 @@ describe('autoAttackOnce', () => {
         s.world,
         s.battleLog,
         nearest!.id,
-        { spearman: 0, swordsman: 0, axeman: 1, noble: 0 },
+        { spearman: 0, swordsman: 0, axeman: 1, noble: 0, scout: 0 },
         NO_TECH_MODS,
       ),
     ).toBe(true)
@@ -330,6 +330,31 @@ describe('autoAttackOnce', () => {
     expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(true)
     expect(v.marches).toHaveLength(2)
     expect(v.marches[1].targetId).not.toBe(nearest!.id)
+  })
+
+  it('NEVER sends scouts: a scout-only garrison is treated as no combat army (M5.2)', () => {
+    const s = attackState()
+    const v = s.villages.v0
+    v.units.scout = 50 // recon-only: attack 0, so the idle COMBAT army is empty
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(false)
+    expect(v.marches).toHaveLength(0)
+    expect(stationedUnits(v).scout).toBe(50) // every scout stayed home
+  })
+
+  it('leaves scouts home when it dispatches the combat army (scouts excluded from the stack)', () => {
+    const s = attackState()
+    const v = s.villages.v0
+    v.units.axeman = 10 // a beatable combat army…
+    v.units.scout = 8 // …alongside scouts that must NOT be swept into the attack
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(true)
+    expect(v.marches).toHaveLength(1)
+    const m = v.marches[0]
+    expect(m.kind).toBe('attack')
+    expect(m.units.axeman).toBe(10) // the whole combat army marched…
+    expect(m.units.scout).toBe(0) // …but no scout was dispatched
+    expect(m.units.noble).toBe(0)
+    // The scouts (and only the scouts) remain at home, unharmed.
+    expect(stationedUnits(v).scout).toBe(8)
   })
 })
 

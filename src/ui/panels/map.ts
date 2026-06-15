@@ -12,7 +12,7 @@ import {
   WORLD_SIZE,
 } from '../../systems/world'
 import { canFound } from '../../systems/villages'
-import { marchTime, stationedUnits, canAttack } from '../../systems/marches'
+import { marchTime, stationedUnits, canAttack, canScout } from '../../systems/marches'
 import { unitUnlocked } from '../../systems/recruitment'
 import { armyAttackPower, armyCarry, battleOutcome } from '../../systems/combat'
 import { aggregateTechMods } from '../../systems/tech'
@@ -54,6 +54,17 @@ import { conquestHint as conquestHintText } from '../conquestCopy'
  * seed and computes distances/march times via the shared engine helpers; it owns no
  * clock and no RNG (pan/zoom are ephemeral camera state, never persisted).
  */
+
+/**
+ * Units the ATTACK composer offers (M5.2). The scout is a RECON unit with its own
+ * march kind (sendScout) and a dedicated „Zwiad" control — it has attack 0 and would
+ * only die uselessly on an attack march, so it is filtered out of the offensive
+ * composer here. Derived from UNIT_IDS so adding another combat unit needs no change.
+ */
+const ATTACK_UNIT_IDS: readonly UnitId[] = UNIT_IDS.filter((id) => id !== 'scout')
+
+/** Placeholder shown for an unscouted camp's hidden defence/loot (text, never colour). */
+const UNKNOWN = '?'
 
 /** Default viewBox aspect (h/w) used before the element has been laid out/measured. */
 const DEFAULT_ASPECT = 0.62
@@ -486,6 +497,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
 
   // ---- Selection state -----------------------------------------------------
   let selectedId: string | null = null
+  // Last-seen `scouted` flag per camp id, so update() can ANNOUNCE the moment the shown
+  // camp flips unscouted→scouted (its scout returned) — otherwise recon completion is
+  // silent (the '?' just becomes numbers). A camp first seen already scouted is recorded
+  // WITHOUT announcing (no false "discovered" on load/import).
+  const scoutedSeen = new Map<string, boolean>()
   // Founding mode (M2.3): when armed, a plain click on a FREE, valid field plants a
   // new owned village (ctx.onFound) instead of selecting a target — the two click
   // gestures are mutually exclusive so they never collide. Pan/zoom keep working (a
@@ -590,7 +606,14 @@ export function createMapPanel(ctx: UiCtx): Panel {
     return val
   }
   const defVal = mkStat('Obrona')
+  // Visually-hidden, AT-only cue explaining the '?' for keyboard/touch/SR users — the
+  // title (mouse-hover only) can't reach them. Mirrors the buildings panel's "(brak)"
+  // marker; update() fills it when unscouted and clears it once the camp is revealed.
+  const defMark = h('span', 'visually-hidden')
+  defVal.insertAdjacentElement('afterend', defMark)
   const lootVal = mkStat('Szac. łup')
+  const lootMark = h('span', 'visually-hidden')
+  lootVal.insertAdjacentElement('afterend', lootMark)
   const distVal = mkStat('Odległość')
   const timeVal = mkStat('Czas marszu')
   const loyaltyVal = mkStat('Lojalność')
@@ -632,7 +655,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
   body.appendChild(h('h4', 'recruit-subtitle', 'Skład wyprawy'))
   const composer = h('div', 'army-picker')
   const armyPicks = {} as Record<UnitId, ArmyPickRefs>
-  for (const id of UNIT_IDS) {
+  for (const id of ATTACK_UNIT_IDS) {
     const def = UNITS[id]
     const pick = h('div', 'army-pick')
     const labelRow = h('span', 'army-pick-label')
@@ -662,13 +685,13 @@ export function createMapPanel(ctx: UiCtx): Panel {
   sendAllBtn.type = 'button'
   sendAllBtn.addEventListener('click', () => {
     const home = stationedUnits(activeVillage())
-    for (const id of UNIT_IDS) armyPicks[id].input.value = String(home[id])
+    for (const id of ATTACK_UNIT_IDS) armyPicks[id].input.value = String(home[id])
     update()
   })
   const clearBtn = h('button', 'btn btn-ghost', 'Wyczyść')
   clearBtn.type = 'button'
   clearBtn.addEventListener('click', () => {
-    for (const id of UNIT_IDS) armyPicks[id].input.value = '0'
+    for (const id of ATTACK_UNIT_IDS) armyPicks[id].input.value = '0'
     update()
   })
   const attackBtn = h('button', 'btn btn-primary', 'Atakuj')
@@ -683,6 +706,48 @@ export function createMapPanel(ctx: UiCtx): Panel {
   msg.setAttribute('aria-live', 'polite')
   body.appendChild(msg)
 
+  // ---- Scout (recon) — M5.2 -----------------------------------------------
+  // A separate dispatch from the attack composer: scouts travel to the selected camp,
+  // REVEAL its defence/loot (the '?' above turns into numbers) and return unharmed.
+  // Reuses the army-pick / recruit-controls classes so no new CSS is needed.
+  body.appendChild(h('h4', 'recruit-subtitle', 'Zwiad'))
+  const scoutHint = h(
+    'p',
+    'muted',
+    'Wyślij zwiadowców, aby odkryć obronę i łup obozu. Zwiad nie walczy i wraca cały.',
+  )
+  body.appendChild(scoutHint)
+  const scoutPick = h('div', 'army-pick')
+  const scoutLabel = h('span', 'army-pick-label')
+  const scoutIconWrap = h('span', 'res-icon-wrap')
+  scoutIconWrap.appendChild(unitIcon('scout'))
+  scoutLabel.appendChild(scoutIconWrap)
+  scoutLabel.appendChild(document.createTextNode(' ' + UNITS.scout.name))
+  const scoutAvail = h('span', 'army-pick-avail num muted')
+  const scoutInput = h('input', 'recruit-count num')
+  scoutInput.type = 'number'
+  scoutInput.min = '0'
+  scoutInput.step = '1'
+  scoutInput.value = '1'
+  scoutInput.inputMode = 'numeric'
+  scoutInput.setAttribute('aria-label', 'Liczba zwiadowców do wysłania')
+  scoutInput.addEventListener('input', () => update())
+  scoutPick.appendChild(scoutLabel)
+  scoutPick.appendChild(scoutAvail)
+  scoutPick.appendChild(scoutInput)
+  body.appendChild(scoutPick)
+
+  const scoutActions = h('div', 'recruit-controls')
+  const scoutBtn = h('button', 'btn btn-ghost', 'Wyślij zwiad')
+  scoutBtn.type = 'button'
+  scoutActions.appendChild(scoutBtn)
+  body.appendChild(scoutActions)
+
+  const scoutMsg = h('p', 'recruit-msg muted')
+  scoutMsg.setAttribute('role', 'status')
+  scoutMsg.setAttribute('aria-live', 'polite')
+  body.appendChild(scoutMsg)
+
   detail.appendChild(body)
   // Anchor the floating/sheet card to the POSITIONED map viewport (.map-wrap is
   // position:relative), not the unpositioned .map-panel — otherwise position:absolute
@@ -693,11 +758,17 @@ export function createMapPanel(ctx: UiCtx): Panel {
   // bottom controls on phones) and toggles nothing but its look — JS owns visibility.
   wrap.appendChild(foundStatus)
 
-  /** Read the composed army from the inputs, clamped per-type to the home garrison. */
+  /**
+   * Read the composed army from the inputs, clamped per-type to the home garrison.
+   * Returns a COMPLETE roster (every UnitId present) so the combat/march helpers that
+   * iterate UNIT_IDS see a defined count for each — the scout has no input here and
+   * stays 0 (it is dispatched only via the separate „Zwiad" control, not attacks).
+   */
   const readArmy = (v: Village): Record<UnitId, number> => {
     const home = stationedUnits(v)
     const army = {} as Record<UnitId, number>
-    for (const id of UNIT_IDS) {
+    for (const id of UNIT_IDS) army[id] = 0
+    for (const id of ATTACK_UNIT_IDS) {
       const parsed = Math.floor(Number(armyPicks[id].input.value))
       const n = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
       army[id] = Math.min(n, home[id])
@@ -727,23 +798,65 @@ export function createMapPanel(ctx: UiCtx): Panel {
       update()
       return
     }
-    const target = barbarianTarget(barb.level)
-    const mods = aggregateTechMods(ctx.store.state.tech)
-    const outcome = battleOutcome(armyAttackPower(army, mods), target.defensePower)
-    if (
-      !outcome.attackerWins &&
-      !window.confirm(
-        'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
-      )
-    ) {
-      return
+    // Fog of war (M5.2): only reveal a loss FORECAST for a SCOUTED camp — otherwise the
+    // confirm would leak the very defence the scout is meant to uncover. An unscouted
+    // attack instead warns that the target is unknown (attacking blind is still allowed).
+    if (!barb.scouted) {
+      if (
+        !window.confirm(
+          'Cel niezbadany — nie znasz jego obrony. Wyślij najpierw zwiad lub zaatakuj w ciemno. Wysłać mimo to?',
+        )
+      ) {
+        return
+      }
+    } else {
+      const target = barbarianTarget(barb.level)
+      const mods = aggregateTechMods(ctx.store.state.tech)
+      const outcome = battleOutcome(armyAttackPower(army, mods), target.defensePower)
+      if (
+        !outcome.attackerWins &&
+        !window.confirm(
+          'Prognoza: porażka — wysłana armia prawdopodobnie zostanie zniszczona. Wysłać mimo to?',
+        )
+      ) {
+        return
+      }
     }
     const ok = ctx.onAttack(ctx.activeVillageId.value, barb.id, army)
     if (ok) {
       msg.textContent = 'Wysłano wyprawę: ' + barb.name + '.'
-      for (const id of UNIT_IDS) armyPicks[id].input.value = '0'
+      for (const id of ATTACK_UNIT_IDS) armyPicks[id].input.value = '0'
     } else {
       msg.textContent = 'Nie udało się wysłać wyprawy.'
+    }
+    update()
+  })
+
+  scoutBtn.addEventListener('click', () => {
+    const v = activeVillage()
+    const world = ctx.store.state.world
+    if (selectedId === null) return
+    const barb = barbarianById(world, selectedId)
+    if (barb === undefined) {
+      scoutMsg.textContent = 'Cel już nie istnieje.'
+      update()
+      return
+    }
+    const parsed = Math.floor(Number(scoutInput.value))
+    const count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+    const mods = aggregateTechMods(ctx.store.state.tech)
+    const verdict = canScout(v, world, barb.id, count, mods)
+    if (!verdict.ok) {
+      scoutMsg.textContent = verdict.reason ?? 'Nie można wysłać zwiadu.'
+      update()
+      return
+    }
+    const ok = ctx.onScout(ctx.activeVillageId.value, barb.id, count)
+    if (ok) {
+      scoutMsg.textContent = 'Wysłano zwiad: ' + barb.name + '.'
+      scoutInput.value = '1'
+    } else {
+      scoutMsg.textContent = 'Nie udało się wysłać zwiadu.'
     }
     update()
   })
@@ -1088,15 +1201,47 @@ export function createMapPanel(ctx: UiCtx): Panel {
 
     nameEl.textContent = selected.name
     levelEl.textContent = 'poz. ' + selected.level
-    defVal.textContent = formatInt(target.defensePower)
+
+    // Fog of war (M5.2): an UNSCOUTED camp hides its defence and loot behind a textual
+    // '?' (never colour alone) with a guiding title; a returning scout flips `scouted`
+    // and this update() reveals the real numbers on the next frame.
+    const scouted = selected.scouted
+    // Scout-reveal feedback (M5.2): close the discovery loop. If the shown camp's
+    // `scouted` flipped false→true since the last frame (a scout just returned),
+    // announce it politely so a player who tabbed away learns recon finished. First
+    // sighting of a camp only records its state (no false "discovered").
+    const seenScouted = scoutedSeen.get(selected.id)
+    if (seenScouted === undefined) {
+      scoutedSeen.set(selected.id, scouted)
+    } else if (seenScouted !== scouted) {
+      scoutedSeen.set(selected.id, scouted)
+      if (scouted) scoutMsg.textContent = 'Zwiad zakończony — odkryto obronę: ' + selected.name + '.'
+    }
+    if (scouted) {
+      defVal.textContent = formatInt(target.defensePower)
+      defVal.title = ''
+      defMark.textContent = ''
+    } else {
+      defVal.textContent = UNKNOWN
+      defVal.title = 'Wyślij zwiad, aby poznać obronę.'
+      defMark.textContent = ' (nieznane — wyślij zwiad, aby poznać)'
+    }
 
     const totalLoot = totalLootOf(selected.level)
-    if (composed > 0) {
+    if (!scouted) {
+      lootVal.textContent = UNKNOWN
+      lootVal.title = 'Wyślij zwiad, aby poznać łup.'
+      lootMark.textContent = ' (nieznane — wyślij zwiad, aby poznać)'
+    } else if (composed > 0) {
       const cd = D(armyCarry(army))
       const haul = cd.lt(totalLoot) ? cd : totalLoot
       lootVal.textContent = formatInt(haul)
+      lootVal.title = ''
+      lootMark.textContent = ''
     } else {
       lootVal.textContent = 'do ' + formatNumber(totalLoot)
+      lootVal.title = ''
+      lootMark.textContent = ''
     }
 
     distVal.textContent = formatNumber(distance(v.x, v.y, selected.x, selected.y), 1) + ' pól'
@@ -1112,7 +1257,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
     // adapting to whether this village can yet field a Szlachcic (academy unlocked).
     conquestHint.textContent = conquestHintText(unitUnlocked(v, 'noble'))
 
-    if (composed > 0) {
+    if (!scouted) {
+      // No forecast for an unscouted camp — it would leak the hidden defence.
+      setForecast('Wyślij zwiad, aby poznać prognozę bitwy.')
+      forecast.classList.remove('forecast-win', 'forecast-lose')
+    } else if (composed > 0) {
       const oc = battleOutcome(armyAttackPower(army, mods), target.defensePower)
       const pct = Math.round(oc.attackerLossFrac * 100)
       setForecast(oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka')
@@ -1124,7 +1273,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
     }
 
     // Composer availability + clamp any over-cap entry down to the garrison.
-    for (const id of UNIT_IDS) {
+    for (const id of ATTACK_UNIT_IDS) {
       const pick = armyPicks[id]
       pick.avail.textContent = 'dostępne: ' + formatInt(home[id])
       pick.input.max = String(home[id])
@@ -1134,7 +1283,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
     }
 
     let homeSum = 0
-    for (const id of UNIT_IDS) homeSum += home[id]
+    for (const id of ATTACK_UNIT_IDS) homeSum += home[id]
     sendAllBtn.disabled = homeSum <= 0
     clearBtn.disabled = composed <= 0
 
@@ -1144,6 +1293,26 @@ export function createMapPanel(ctx: UiCtx): Panel {
     attackBtn.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
     attackBtn.title = verdict.ok ? '' : (verdict.reason ?? '')
     attackBtn.setAttribute('aria-label', 'Atakuj: ' + selected.name + ' (poziom ' + selected.level + ')')
+
+    // ---- Scout control (M5.2) ----
+    // Availability + the canScout verdict drive the input/button. The scout count is
+    // clamped to the garrison; aria-disabled (not `disabled`) keeps the button focusable
+    // so its reason reaches AT, with the handler a guarded no-op when canScout rejects.
+    const homeScouts = home.scout
+    scoutAvail.textContent = 'dostępne: ' + formatInt(homeScouts)
+    scoutInput.max = String(homeScouts)
+    scoutInput.disabled = homeScouts <= 0
+    const scoutCur = Math.floor(Number(scoutInput.value))
+    if (Number.isFinite(scoutCur) && scoutCur > homeScouts) scoutInput.value = String(homeScouts)
+    const scoutParsed = Math.floor(Number(scoutInput.value))
+    const scoutCount = Number.isFinite(scoutParsed) && scoutParsed > 0 ? scoutParsed : 0
+    const scoutVerdict = canScout(v, world, selected.id, scoutCount, mods)
+    scoutBtn.setAttribute('aria-disabled', scoutVerdict.ok ? 'false' : 'true')
+    scoutBtn.title = scoutVerdict.ok ? '' : (scoutVerdict.reason ?? '')
+    scoutBtn.setAttribute(
+      'aria-label',
+      'Wyślij zwiad: ' + selected.name + (scouted ? ' (już zbadany)' : ''),
+    )
   }
 
   return { el, update }

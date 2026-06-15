@@ -128,6 +128,32 @@ export function build(
 }
 
 /**
+ * Multiplicative shield this village's standing army enjoys when DEFENDING against
+ * incoming raids (M5.2 wall). 1 = no bonus (no wall); 1.5 = a maxed wall at the
+ * default perLevel 0.05 (+50% defence).
+ *
+ * Data-driven and ADDITIVE, exactly mirroring how {@link costReduction} rolls up its
+ * own effect kind: it sums `level * perLevel` across every `defense_bonus` building in
+ * the village and returns `1 + that sum`. With only the `wall` building this is the
+ * contract's `1 + wallLevel * perLevel`, but a second fortification building is a pure
+ * data entry in buildings.ts with ZERO change here (CLAUDE.md hard rule #5).
+ *
+ * Returns a plain `number` to multiply straight into {@link armyDefensePower}'s output
+ * in raids.ts — the wall raises ONLY raid defence, never attack, production or the
+ * conquest path, so the balance impact is the intended LOW one. Pure / deterministic:
+ * no clock, no RNG, no allocation.
+ */
+export function villageDefenseMult(v: Village): number {
+  let bonus = 0
+  for (const id of BUILDING_IDS) {
+    const effect = BUILDINGS[id].effect
+    if (effect.kind !== 'defense_bonus') continue
+    bonus += v.buildings[id] * effect.perLevel
+  }
+  return 1 + bonus
+}
+
+/**
  * UI helper: the next level's cost in `v` plus whether it is affordable / maxed.
  * `mods` (M3.2) are the account-wide tech multipliers folded into the cost; defaults to
  * {@link NO_TECH_MODS} so existing callers compile, live callers thread the real mods.

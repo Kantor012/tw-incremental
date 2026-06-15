@@ -62,7 +62,7 @@ describe('migration v1 -> current', () => {
   it('migrate() chains v1->...->v8: seeds buildings, popCap, units, queue, combat, coords + world, nobles + loyalty, the tech map and wraps into villages.v0', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(10)
+    expect(migrated.version).toBe(11)
     expect(migrated.version).toBe(SAVE_VERSION)
     // v4->v5: the lone economy is wrapped under villages.v0 with a bijective order.
     expect(migrated.villageOrder).toEqual(['v0'])
@@ -214,7 +214,7 @@ describe('migration v3 -> current', () => {
     expect(v0.raidTimer).toBeGreaterThan(0)
     // Pre-existing recruitment state is carried through into the village; the v6->v7
     // step appends the noble:0 slot to the roster without touching the old counts.
-    expect(v0.units).toEqual({ spearman: 2, swordsman: 0, axeman: 1, noble: 0 })
+    expect(v0.units).toEqual({ spearman: 2, swordsman: 0, axeman: 1, noble: 0, scout: 0 })
     expect(v0.buildings.barracks).toBe(1)
   })
 
@@ -268,7 +268,7 @@ describe('migration v4 -> current', () => {
   it('wraps the lone village under villages.v0 (Stolica) and globalises the battle log', () => {
     const m = migrate(rawV4())
 
-    expect(m.version).toBe(10)
+    expect(m.version).toBe(11)
     expect(m.version).toBe(SAVE_VERSION)
     // Bijective single-village order: exactly one ordered id, exactly one village.
     expect(m.villageOrder).toEqual(['v0'])
@@ -282,7 +282,7 @@ describe('migration v4 -> current', () => {
     // step then appends the conquest keys (academy:0 / noble:0) without clobbering the
     // carried levels/counts.
     expect(v0.buildings).toEqual({ ...INITIAL_BUILDINGS, ...rawV4().buildings })
-    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0, scout: 0 })
     expect(v0.resources.wood.toString()).toBe('10')
     expect(v0.resources.clay.toString()).toBe('20')
     expect(v0.resources.iron.toString()).toBe('30')
@@ -431,7 +431,7 @@ describe('migration v5 -> v6', () => {
   it('pins the capital to WORLD_CENTER, generates the barbarian world, and upgrades the legacy march', () => {
     const m = migrate(rawV5())
 
-    expect(m.version).toBe(10)
+    expect(m.version).toBe(11)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -582,7 +582,7 @@ describe('migration v6 -> v7', () => {
   it('backfills the academy building, the noble unit (roster + marches) and full barbarian loyalty', () => {
     const m = migrate(rawV6())
 
-    expect(m.version).toBe(10)
+    expect(m.version).toBe(11)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -599,12 +599,12 @@ describe('migration v6 -> v7', () => {
     for (const id of BUILDING_IDS) expect(typeof v0.buildings[id]).toBe('number')
 
     // The new noble unit is seeded at 0 in the village roster; existing counts kept.
-    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0, scout: 0 })
     for (const id of UNIT_IDS) expect(typeof v0.units[id]).toBe('number')
 
     // The in-flight march's dispatched subset ALSO gains the noble:0 slot (over the
     // full zero roster), with the rest of the march snapshot left untouched.
-    expect(v0.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 2, noble: 0 })
+    expect(v0.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 2, noble: 0, scout: 0 })
     expect(v0.marches[0].targetId).toBe('b7')
     expect(v0.marches[0].targetLevel).toBe(3)
     expect(v0.marches[0].phase).toBe('returning')
@@ -740,7 +740,7 @@ describe('migration v7 -> v8', () => {
   it('backfills the empty account-wide tech map and carries everything else through', () => {
     const m = migrate(rawV7())
 
-    expect(m.version).toBe(10)
+    expect(m.version).toBe(11)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: an empty passive-tree map (absent key = level 0).
     expect(m.tech).toEqual({})
@@ -754,7 +754,7 @@ describe('migration v7 -> v8', () => {
     expect(v0.y).toBe(WORLD_CENTER.y)
     expect(v0.buildings.academy).toBe(0)
     expect(v0.buildings.sawmill).toBe(2)
-    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0, scout: 0 })
     expect(v0.marches[0].units.noble).toBe(0)
     expect(v0.marches[0].loot.wood.toString()).toBe('50')
     expect(v0.resources.wood.toString()).toBe('10')
@@ -883,7 +883,7 @@ describe('migration v8 -> v9', () => {
   it('backfills the zero permanent prestige record and carries everything else through', () => {
     const m = migrate(rawV8())
 
-    expect(m.version).toBe(10)
+    expect(m.version).toBe(11)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the zero permanent prestige (ascension) record.
     expect(m.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
@@ -899,7 +899,7 @@ describe('migration v8 -> v9', () => {
     expect(v0.y).toBe(WORLD_CENTER.y)
     expect(v0.buildings.academy).toBe(0)
     expect(v0.buildings.sawmill).toBe(2)
-    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0, scout: 0 })
     expect(v0.marches[0].units.noble).toBe(0)
     expect(v0.marches[0].loot.wood.toString()).toBe('50')
     expect(v0.resources.wood.toString()).toBe('10')
@@ -1016,7 +1016,7 @@ describe('migration v9 -> v10', () => {
   it('backfills the all-off automation record and carries everything else through', () => {
     const m = migrate(rawV9())
 
-    expect(m.version).toBe(10)
+    expect(m.version).toBe(11)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the all-off automation toggles + empty policy.
     expect(m.automation).toEqual({
@@ -1035,7 +1035,7 @@ describe('migration v9 -> v10', () => {
     const v0 = m.villages.v0
     expect(v0.name).toBe('Stolica')
     expect(v0.buildings.barracks).toBe(1)
-    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0, scout: 0 })
     expect(v0.resources.wood.toString()).toBe('10')
     expect(m.seed).toBe('v9')
     expect(m.rngState).toBe(777)
@@ -1117,6 +1117,146 @@ describe('migration v9 -> v10', () => {
   })
 })
 
+/**
+ * A raw v10 save: the multi-village + conquest + tech + prestige + automation shape
+ * right before M5.2. It predates FOUR new bits of state, all backfilled by v10->v11:
+ *  - the 'wall' BUILDING key (every village's `buildings`) and the 'scout' UNIT key
+ *    (every village's `units` AND every in-flight march's dispatched subset);
+ *  - a `kind` discriminant on every march (defaulting to 'attack', the only pre-M5.2 kind);
+ *  - a `scouted` flag on every barbarian (defaulting to false / undiscovered).
+ * So its village has NO wall, NO scout, its march carries NO kind, and its barbarian
+ * has NO scouted — exactly the four things the v10->v11 migration must add WITHOUT
+ * disturbing anything else (all-default backfill ⇒ plays exactly like pre-M5.2).
+ */
+function rawV10() {
+  return {
+    version: 10,
+    seed: 'v10',
+    rngState: 999,
+    createdAt: 1000,
+    lastSeen: 2000,
+    villages: {
+      v0: {
+        id: 'v0',
+        name: 'Stolica',
+        x: WORLD_CENTER.x,
+        y: WORLD_CENTER.y,
+        resources: { wood: D(10), clay: D(20), iron: D(30) },
+        production: { wood: D(2), clay: D(0.8), iron: D(0.5) },
+        storageCap: D(4000),
+        popCap: D(22),
+        buildings: { hq: 1, sawmill: 2, clay_pit: 1, iron_mine: 1, warehouse: 1, farm: 1, barracks: 1, academy: 0 },
+        units: { spearman: 5, swordsman: 0, axeman: 3, noble: 0 },
+        recruitQueue: [],
+        marches: [
+          {
+            // No `kind` here (pre-M5.2) and no scout slot — both backfilled by v10->v11.
+            targetId: 'b0',
+            targetLevel: 2,
+            targetX: 210,
+            targetY: 198,
+            units: { spearman: 0, swordsman: 0, axeman: 2, noble: 0 },
+            phase: 'returning',
+            remaining: 30,
+            loot: { wood: D(50), clay: D(40), iron: D(10) },
+          },
+        ],
+        raidTimer: 500,
+      },
+    },
+    villageOrder: ['v0'],
+    world: {
+      barbarians: [
+        // No `scouted` here (pre-M5.2) — backfilled false by v10->v11.
+        { id: 'b0', x: 210, y: 198, level: 2, name: 'Obóz barbarzyńców (poz. 2)', loyalty: 100 },
+      ],
+    },
+    battleLog: [],
+    tech: { eco_root: 2 },
+    prestige: { points: 3, totalEarned: 5, ascensions: 1, nodes: {} },
+    automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
+  }
+}
+
+describe('migration v10 -> v11', () => {
+  it('backfills wall (buildings), scout (units + marches), march kind and barbarian scouted', () => {
+    const m = migrate(rawV10())
+
+    expect(m.version).toBe(11)
+    expect(m.version).toBe(SAVE_VERSION)
+
+    const v0 = m.villages.v0
+    // The new 'wall' building key lands at level 0 WITHOUT clobbering carried levels.
+    expect(v0.buildings.wall).toBe(0)
+    expect(v0.buildings.sawmill).toBe(2)
+    expect(v0.buildings).toEqual({ ...INITIAL_BUILDINGS, ...rawV10().villages.v0.buildings })
+    // The new 'scout' unit key lands at 0 (roster), carried counts preserved.
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0, scout: 0 })
+    // Every in-flight march gains kind:'attack' (the only pre-M5.2 kind) and a scout:0 slot.
+    expect(v0.marches.length).toBe(1)
+    expect(v0.marches[0].kind).toBe('attack')
+    expect(v0.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 2, noble: 0, scout: 0 })
+    // Loot Decimals are carried through untouched.
+    expect(v0.marches[0].loot.wood.toString()).toBe('50')
+    // Every barbarian gains scouted:false (undiscovered); loyalty is left intact.
+    expect(m.world.barbarians.length).toBe(1)
+    expect(m.world.barbarians[0].scouted).toBe(false)
+    expect(m.world.barbarians[0].loyalty).toBe(100)
+    // Everything else carries through verbatim (v10->v11 touches nothing but those four).
+    expect(m.tech).toEqual({ eco_root: 2 })
+    expect(m.automation).toEqual({
+      build: false,
+      recruit: false,
+      attack: false,
+      recruitUnit: null,
+      recruitTarget: 0,
+    })
+    expect(m.seed).toBe('v10')
+  })
+
+  it('a migrated v10 save passes validateState (the new keys/flags are all valid defaults)', () => {
+    const v = validateState(migrate(rawV10()))
+    expect(v.version).toBe(SAVE_VERSION)
+    expect(v.villages.v0.buildings.wall).toBe(0)
+    expect(v.villages.v0.units.scout).toBe(0)
+    expect(v.villages.v0.marches[0].kind).toBe('attack')
+    expect(v.world.barbarians[0].scouted).toBe(false)
+  })
+
+  it('preserves a march kind / barbarian scouted a forward-compat v10 save already carries', () => {
+    // A save that already carries a STRING kind / BOOLEAN scouted keeps them verbatim —
+    // the default only fills a missing/wrong-typed one — so a newer/hand-edited save
+    // round-trips faithfully (and still validates: 'scout' and true are both in-band).
+    const raw = rawV10() as {
+      villages: { v0: { marches: { kind?: string }[] } }
+      world: { barbarians: { scouted?: boolean }[] }
+    }
+    raw.villages.v0.marches[0].kind = 'scout'
+    raw.world.barbarians[0].scouted = true
+    const m = migrate(raw)
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.villages.v0.marches[0].kind).toBe('scout')
+    expect(m.world.barbarians[0].scouted).toBe(true)
+    expect(validateState(m).version).toBe(SAVE_VERSION)
+  })
+
+  it('importSave of a v10 export backfills wall/scout/kind/scouted and re-derives stats', () => {
+    // Encode exactly as exportSave would (Decimals tagged); import migrates v10->v11.
+    const b64 = exportSave(rawV10() as never)
+    const state = importSave(b64)
+
+    expect(state.version).toBe(SAVE_VERSION)
+    expect(state.villages.v0.buildings.wall).toBe(0)
+    expect(state.villages.v0.units.scout).toBe(0)
+    expect(state.villages.v0.marches[0].kind).toBe('attack')
+    expect(state.world.barbarians[0].scouted).toBe(false)
+    // The carried tech survived the migration too.
+    expect(state.tech).toEqual({ eco_root: 2 })
+    // recomputeDerived ran on import (eco_root level 2 → +0.04 production on sawmill lvl 2).
+    expect(Number(state.villages.v0.production.wood.toString())).toBeCloseTo(2.08, 6)
+  })
+})
+
 describe('save v2 round-trip', () => {
   it('serialize(deserialize(serialize(s))) === serialize(s) for a fresh state', () => {
     const state = createInitialState('rt', 5000)
@@ -1162,26 +1302,28 @@ describe('save v2 round-trip', () => {
     const state = createInitialState('combat', 11000)
     state.villages.v0.buildings.barracks = 1
     recomputeDerived(state)
-    state.villages.v0.units = { spearman: 4, swordsman: 0, axeman: 6, noble: 0 }
+    state.villages.v0.units = { spearman: 4, swordsman: 0, axeman: 6, noble: 0, scout: 0 }
     // A returning march carrying loot (Decimals) + an outbound march with zero loot.
     // Both carry the M2.2 spatial snapshot (targetId + targetX/targetY geometry).
     state.villages.v0.marches = [
       {
+        kind: 'attack',
         targetId: 'b12',
         targetLevel: 3,
         targetX: 209,
         targetY: 198,
-        units: { spearman: 0, swordsman: 0, axeman: 5, noble: 0 },
+        units: { spearman: 0, swordsman: 0, axeman: 5, noble: 0, scout: 0 },
         phase: 'returning',
         remaining: 42.5,
         loot: { wood: D(120), clay: D(80), iron: D(15) },
       },
       {
+        kind: 'attack',
         targetId: 'b3',
         targetLevel: 1,
         targetX: 197,
         targetY: 203,
-        units: { spearman: 2, swordsman: 0, axeman: 0, noble: 0 },
+        units: { spearman: 2, swordsman: 0, axeman: 0, noble: 0, scout: 0 },
         phase: 'outbound',
         remaining: 18,
         loot: { wood: D(0), clay: D(0), iron: D(0) },
@@ -1203,7 +1345,7 @@ describe('save v2 round-trip', () => {
     // Loot Decimals survive the {$d} tag round-trip.
     expect(rv0.marches[0].phase).toBe('returning')
     expect(rv0.marches[0].remaining).toBe(42.5)
-    expect(rv0.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 5, noble: 0 })
+    expect(rv0.marches[0].units).toEqual({ spearman: 0, swordsman: 0, axeman: 5, noble: 0, scout: 0 })
     expect(rv0.marches[0].loot.wood.toString()).toBe('120')
     // The M2.2 spatial snapshot (target id + coords) round-trips as plain JSON.
     expect(rv0.marches[0].targetId).toBe('b12')

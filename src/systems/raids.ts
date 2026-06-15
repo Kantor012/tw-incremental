@@ -11,6 +11,7 @@ import {
 import { BUILDING_IDS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
 import { battleOutcome, armyDefensePower, applyLosses } from './combat'
+import { villageDefenseMult } from './buildings'
 import { stationedUnits, pushBattleReport } from './marches'
 
 /**
@@ -105,11 +106,19 @@ function raidsActive(v: Village): boolean {
  * not the player's defence, and scaling it by `defenseMult` too would cancel the
  * very bonus the player paid for. Default {@link NO_TECH_MODS} (1) reproduces the
  * pre-M3.2 outcome byte-for-byte for any caller that does not thread tech.
+ *
+ * M5.2: the home defence is additionally multiplied by {@link villageDefenseMult}, the
+ * village's WALL shield (1 = no wall). The wall is a building, not tech, so it stacks
+ * with `mods.defenseMult`: a higher wall means a bigger defence figure into
+ * {@link battleOutcome}, i.e. more raids repelled and smaller losses on the ones that
+ * still land. A wall-less village has mult 1, so this is byte-identical to pre-M5.2.
  */
 function resolveRaid(v: Village, log: BattleReport[], mods: TechModifiers = NO_TECH_MODS): void {
   const power = raidPower(v)
   const home = stationedUnits(v)
-  const outcome = battleOutcome(power, armyDefensePower(home, mods)) // attacker = the raid
+  // attacker = the raid; defender = the home garrison hardened by tech (defenseMult)
+  // AND the village wall (villageDefenseMult).
+  const outcome = battleOutcome(power, armyDefensePower(home, mods) * villageDefenseMult(v))
 
   if (!outcome.attackerWins) {
     // Repelled: no losses, nothing stolen (the raiders break on the wall).

@@ -13,6 +13,7 @@ import {
   canAfford,
   costReduction,
   nextCostAffordable,
+  villageDefenseMult,
 } from '../src/systems/buildings'
 import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 
@@ -261,8 +262,11 @@ describe('academy (Pałac — noble-unlock building)', () => {
     expect(def.initialLevel ?? 0).toBe(0)
   })
 
-  it('appears LAST in the stable BUILDING_IDS order', () => {
-    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('academy')
+  it('appears right before the M5.2 wall in the stable BUILDING_IDS order', () => {
+    // The academy was appended before the wall; the wall (M5.2) is now the last key, so
+    // the academy sits second-to-last. Both checks pin the stable, append-only order.
+    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('academy')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('wall')
   })
 
   it('recomputeVillageDerived ignores it — raising the academy changes no derived stat', () => {
@@ -301,5 +305,102 @@ describe('academy (Pałac — noble-unlock building)', () => {
     expect(v2.buildings.academy).toBe(BUILDINGS.academy.maxLevel)
     expect(build(v2, 'academy')).toBe(false) // already maxed — no mutation
     expect(v2.buildings.academy).toBe(BUILDINGS.academy.maxLevel)
+  })
+})
+
+/**
+ * M5.2 — the wall (Mur) is a defensive building: a `defense_bonus` effect that raises
+ * the village's raid defence via {@link villageDefenseMult}. Like the academy it
+ * contributes to NO tick-derived stat (production / storage / pop), so recompute must
+ * treat it as a pure no-op while the generic cost/affordability/max engine still
+ * applies; villageDefenseMult is the one consumer of its effect.
+ */
+describe('wall (Mur — defensive building)', () => {
+  it('catalogue: military, maxLevel 10, the contract cost/factor and a defense_bonus effect', () => {
+    const def = BUILDINGS.wall
+    expect(def.id).toBe('wall')
+    expect(def.name).toBe('Mur')
+    expect(def.category).toBe('military')
+    expect(def.maxLevel).toBe(10)
+    expect(def.baseCost).toEqual({ wood: 120, clay: 200, iron: 60 })
+    expect(def.costFactor).toBe(1.27)
+    expect(def.effect).toEqual({ kind: 'defense_bonus', perLevel: 0.05 })
+    // A fresh village never starts with a wall (optional defensive investment).
+    expect(def.initialLevel ?? 0).toBe(0)
+  })
+
+  it('appears LAST in the stable BUILDING_IDS order (appended for M5.2)', () => {
+    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('wall')
+  })
+
+  it('recomputeVillageDerived ignores it — raising the wall changes no derived stat', () => {
+    const v = createVillage('v0', 'Stolica')
+    const before = {
+      wood: v.production.wood.toString(),
+      clay: v.production.clay.toString(),
+      iron: v.production.iron.toString(),
+      storage: v.storageCap.toString(),
+      pop: v.popCap.toString(),
+    }
+
+    v.buildings.wall = BUILDINGS.wall.maxLevel
+    recomputeVillageDerived(v)
+
+    expect(v.production.wood.toString()).toBe(before.wood)
+    expect(v.production.clay.toString()).toBe(before.clay)
+    expect(v.production.iron.toString()).toBe(before.iron)
+    expect(v.storageCap.toString()).toBe(before.storage)
+    expect(v.popCap.toString()).toBe(before.pop)
+  })
+
+  it('uses the generic engine: cost grows with level and build() maxes out at level 10', () => {
+    const v = rich()
+    const atL0 = buildingCost(v, 'wall')
+    v.buildings.wall = 5
+    const atL5 = buildingCost(v, 'wall')
+    expect(atL5.wood.gt(atL0.wood)).toBe(true)
+    expect(atL5.clay.gt(atL0.clay)).toBe(true)
+
+    // From scratch: ten buys reach the ceiling, the eleventh is refused.
+    const v2 = rich()
+    for (let i = 0; i < BUILDINGS.wall.maxLevel; i++) expect(build(v2, 'wall')).toBe(true)
+    expect(v2.buildings.wall).toBe(BUILDINGS.wall.maxLevel)
+    expect(build(v2, 'wall')).toBe(false) // already maxed — no mutation
+    expect(v2.buildings.wall).toBe(BUILDINGS.wall.maxLevel)
+  })
+
+  describe('villageDefenseMult', () => {
+    it('is exactly 1 with no wall (byte-identical to pre-M5.2 raid defence)', () => {
+      const v = createVillage('v0', 'Stolica')
+      expect(v.buildings.wall).toBe(0)
+      expect(villageDefenseMult(v)).toBe(1)
+    })
+
+    it('rises by perLevel per wall level and is monotonic in the level', () => {
+      const v = createVillage('v0', 'Stolica')
+      const perLevel = (BUILDINGS.wall.effect as { perLevel: number }).perLevel
+      let prev = villageDefenseMult(v)
+      for (let level = 1; level <= BUILDINGS.wall.maxLevel; level++) {
+        v.buildings.wall = level
+        const mult = villageDefenseMult(v)
+        // Each level adds exactly perLevel (the additive roll-up: 1 + level*perLevel).
+        expect(mult).toBeCloseTo(1 + level * perLevel)
+        expect(mult).toBeGreaterThan(prev) // strictly increasing with the level
+        prev = mult
+      }
+      // A maxed wall is +50% at the default perLevel 0.05.
+      v.buildings.wall = BUILDINGS.wall.maxLevel
+      expect(villageDefenseMult(v)).toBeCloseTo(1.5)
+    })
+
+    it('multiplies an army defence figure (the value raids.ts feeds to battleOutcome)', () => {
+      const v = createVillage('v0', 'Stolica')
+      v.buildings.wall = 10 // +50%
+      // The wall raises whatever raw defence the garrison brings — a higher figure into
+      // battleOutcome means more raids repelled / smaller losses (verified end-to-end in
+      // raids.test.ts). Here we pin the multiplier maths the raid path relies on.
+      const rawDefence = 200
+      expect(rawDefence * villageDefenseMult(v)).toBeCloseTo(300)
+    })
   })
 })

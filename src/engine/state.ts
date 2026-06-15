@@ -51,6 +51,19 @@ export interface RecruitOrder {
 }
 
 /**
+ * What a {@link March} is FOR (M5.2). Two deterministic kinds share the same mover
+ * (advanceMarches) and travel maths but resolve differently on arrival:
+ *  - `attack` — the classic PvE strike: resolves a battle, takes casualties and loot,
+ *    and (with a surviving noble) erodes loyalty / conquers.
+ *  - `scout`  — pure RECON: on arrival it flips the target's {@link BarbarianVillage.scouted}
+ *    flag true (revealing its defence/loot in the UI), never fights, never loots, and
+ *    every scout returns home unharmed.
+ * Marches carried over by the v10→v11 save migration default to `'attack'` (the only
+ * kind that existed before M5.2).
+ */
+export type MarchKind = 'attack' | 'scout'
+
+/**
  * One army in transit to / from a barbarian camp (M1.3). Defined inline here (not
  * in marches.ts) so the state shape — the single serialized source of truth — has
  * no runtime dependency on a system module: marches.ts imports this TYPE back, and
@@ -67,6 +80,12 @@ export interface RecruitOrder {
  * roster); `loot` is on Decimal (the economy rule).
  */
 export interface March {
+  /**
+   * What this march is for (M5.2): an `attack` (battle + loot + conquest) or a `scout`
+   * (pure recon — reveals the target, never fights/loots, always returns). The v10→v11
+   * save migration backfills `'attack'` on every pre-M5.2 march. See {@link MarchKind}.
+   */
+  kind: MarchKind
   /**
    * Id of the targeted {@link BarbarianVillage} (`'b0'`, `'b1'`, …). `'legacy'` for
    * marches carried over by the v5→v6 save migration, which predates map coordinates
@@ -240,6 +259,14 @@ export interface BarbarianVillage {
    * world state (unlike the derived combat numbers), so it serializes and migrates.
    */
   loyalty: number
+  /**
+   * Whether the player has SCOUTED this camp (M5.2). Starts `false`: until a scout
+   * march reaches the camp and returns, the UI shows its defence/loot as `?`. A
+   * returning `scout` march (see {@link MarchKind}) flips it `true`, revealing the
+   * real numbers. MUTABLE world state, so it serializes; `generateWorld` seeds it
+   * `false` for fresh barbarians and the v10→v11 save migration backfills `false`.
+   */
+  scouted: boolean
 }
 
 /**
@@ -476,6 +503,8 @@ export function recomputeVillageDerived(v: Village, mods: TechModifiers = NO_TEC
         break // consumed by recruitSpeedMult (recruitment), not a tick-derived stat
       case 'noble_unlock':
         break // binary gate consumed by recruitment (unitUnlocked), not a tick-derived stat
+      case 'defense_bonus':
+        break // M5.2 wall: consumed by villageDefenseMult (raids), not a tick-derived stat
     }
   }
 

@@ -71,6 +71,13 @@ describe('generateWorld — invariants', () => {
     }
   })
 
+  it('seeds every barbarian unscouted (scouted === false) and at full loyalty (M2.4/M5.2)', () => {
+    for (const b of world.barbarians) {
+      expect(b.scouted).toBe(false) // hidden defence/loot until a scout reaches it
+      expect(b.loyalty).toBe(100)
+    }
+  })
+
   it('places more low-tier villages than high-tier ones', () => {
     const low = world.barbarians.filter((b) => b.level === 1).length
     const high = world.barbarians.filter((b) => b.level === MAX_TARGET_LEVEL).length
@@ -199,9 +206,9 @@ describe('targetsByDistance', () => {
     // Synthetic world: b0 and b2 are equidistant from the origin; b2 must follow b0.
     const tieWorld: World = {
       barbarians: [
-        { id: 'b0', x: 10, y: 0, level: 1, name: 'a', loyalty: 100 },
-        { id: 'b1', x: 50, y: 0, level: 2, name: 'b', loyalty: 100 },
-        { id: 'b2', x: 0, y: 10, level: 3, name: 'c', loyalty: 100 },
+        { id: 'b0', x: 10, y: 0, level: 1, name: 'a', loyalty: 100, scouted: false },
+        { id: 'b1', x: 50, y: 0, level: 2, name: 'b', loyalty: 100, scouted: false },
+        { id: 'b2', x: 0, y: 10, level: 3, name: 'c', loyalty: 100, scouted: false },
       ],
     }
     const sorted = targetsByDistance(villageAt(0, 0), tieWorld)

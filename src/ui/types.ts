@@ -46,6 +46,16 @@ export interface UiCtx {
    */
   onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => boolean
   /**
+   * Send `scoutCount` scouts from `villageId` to RECON the barbarian village `targetId`
+   * (an id from `store.state.world.barbarians`); returns true on a successful send (a
+   * `scout` march is queued and the scouts leave the home garrison until they return).
+   * On arrival the target's defence/loot is REVEALED (`BarbarianVillage.scouted` flips
+   * true); the scouts fight nothing, take no loot and return unharmed (M5.2). The map/
+   * campaign panel reads `canScout` (systems/marches) itself for the disabled cue — this
+   * callback is the commit, not the validation.
+   */
+  onScout: (villageId: VillageId, targetId: string, scoutCount: number) => boolean
+  /**
    * Found a new owned village at map field `(x, y)`, paid from `payerVillageId`.
    * Returns the new village's id on success (cost spent, village added, committed +
    * persisted), or `null` when founding was rejected (geometry/affordability — the

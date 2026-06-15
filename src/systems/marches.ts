@@ -26,6 +26,13 @@ import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
  * {@link World} and returns the {@link ConquestEvent}s for the tick to apply) and
  * {@link sendAttack} (dispatch). Node-safe (no DOM/clock/RNG).
  *
+ * Since M5.2 the same mover also carries SCOUT marches (see {@link MarchKind}): a
+ * `scout` march travels and returns on the identical clock/geometry but, on arrival,
+ * merely flips the target's {@link BarbarianVillage.scouted} flag — it fights nothing,
+ * loots nothing, loses no scouts and never touches conquest/loyalty. Dispatch is
+ * {@link sendScout} / gate {@link canScout}; resolution lives in the same
+ * {@link advanceMarches} loop, branched on `march.kind`.
+ *
  * Since M2.2 a march targets a specific {@link BarbarianVillage} by id, and travel
  * time comes from the EUCLIDEAN distance between the source village and the target
  * (see {@link marchTime} / world.ts). Combat & loot are unchanged: both still read
@@ -51,8 +58,8 @@ import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
  * produce byte-identical state. Combat is RNG-free until M5.
  */
 
-/** Re-exported so `March` can be imported from the system that owns its logic. */
-export type { March } from '../engine/state'
+/** Re-exported so `March` / `MarchKind` can be imported from the system that owns their logic. */
+export type { March, MarchKind } from '../engine/state'
 
 /** Cap on retained battle-log entries (oldest dropped first). Shared with raids. */
 const BATTLE_LOG_MAX = 20
@@ -185,6 +192,35 @@ export function canAttack(
 }
 
 /**
+ * Whether a SCOUT march from `v` against the barbarian village `targetId` (M5.2) can
+ * be launched right now, with a PL reason when not. Pure recon, so the gate is light:
+ * the target must EXIST in `world` (a stale/invalid id is rejected) and `scoutCount`
+ * must be a positive integer not exceeding the scouts currently AT HOME
+ * ({@link stationedUnits}). No barracks check is needed — owning a scout already
+ * implies the barracks was built — and there is no level/army-power gate because a
+ * scout never fights. `mods` is accepted for signature symmetry with {@link sendScout}
+ * (recon validation does not depend on tech), hence the underscore. Pure / Node-safe.
+ */
+export function canScout(
+  v: Village,
+  world: World,
+  targetId: string,
+  scoutCount: number,
+  _mods: TechModifiers = NO_TECH_MODS,
+): { ok: boolean; reason?: string } {
+  const target = barbarianById(world, targetId)
+  if (target === undefined) return { ok: false, reason: 'Niepoprawny cel.' }
+  if (!Number.isInteger(scoutCount) || scoutCount <= 0) {
+    return { ok: false, reason: 'Wskaż liczbę zwiadowców.' }
+  }
+  const home = stationedUnits(v)
+  if (scoutCount > (home.scout ?? 0)) {
+    return { ok: false, reason: 'Za mało zwiadowców w domu.' }
+  }
+  return { ok: true }
+}
+
+/**
  * Dispatch an attack from `v` at the barbarian village `targetId` (looked up in
  * `world`). No-op returning false when the target is absent (e.g. a stale id) or
  * {@link canAttack} rejects. Records the march as a snapshot — the dispatched army,
@@ -210,6 +246,46 @@ export function sendAttack(
   const sent = emptyUnits()
   for (const id of UNIT_IDS) sent[id] = units[id] ?? 0
   v.marches.push({
+    kind: 'attack',
+    targetId: target.id,
+    targetLevel: target.level,
+    targetX: target.x,
+    targetY: target.y,
+    units: sent,
+    phase: 'outbound',
+    remaining: marchTime(v, target, sent, mods),
+    loot: emptyLoot(),
+  })
+  return true
+}
+
+/**
+ * Dispatch a SCOUT march from `v` at the barbarian village `targetId` (M5.2). No-op
+ * returning false when the target is absent (stale id) or {@link canScout} rejects.
+ * Mirrors {@link sendAttack}'s snapshot discipline — it records the dispatched scouts,
+ * the target's id, its camp tier and its map coordinates WITHOUT debiting `v.units`
+ * (the scouts stay owned and {@link stationedUnits} subtracts them so they can't be
+ * sent twice) — but the march is tagged `kind: 'scout'` and carries an EMPTY loot map:
+ * recon never hauls anything. Resolution (reveal + unharmed return) happens in
+ * {@link advanceMarches}. The global battle `log` is taken explicitly (unused here —
+ * scouting logs nothing) to keep the dispatch signatures uniform. `mods` scales the
+ * (symmetric) travel time via {@link marchTime}, exactly like an attack.
+ */
+export function sendScout(
+  v: Village,
+  world: World,
+  _log: BattleReport[],
+  targetId: string,
+  scoutCount: number,
+  mods: TechModifiers = NO_TECH_MODS,
+): boolean {
+  const target = barbarianById(world, targetId)
+  if (target === undefined) return false
+  if (!canScout(v, world, targetId, scoutCount, mods).ok) return false
+  const sent = emptyUnits()
+  sent.scout = scoutCount
+  v.marches.push({
+    kind: 'scout',
     targetId: target.id,
     targetLevel: target.level,
     targetX: target.x,
@@ -305,6 +381,12 @@ function lootSum(loot: ResourceMap): string {
  *  - returning completes → deliver the loot (clamped) and drop the march. Survivors
  *    were never removed from `v.units`, so there is nothing to add back.
  *
+ * SCOUT marches (M5.2, `kind === 'scout'`) share the loop but resolve differently:
+ * outbound completion sets the LIVE target's {@link BarbarianVillage.scouted} flag
+ * true (no battle, no casualties, no loot, no conquest event) and flips to the return
+ * leg; returning completion simply drops the march (the scouts, still counted in
+ * `v.units`, are home). No battle report is logged for a scout.
+ *
  * Every report is tagged with `villageId: v.id`. Iterates back-to-front so a
  * completed march can be spliced without disturbing the indices still to process.
  */
@@ -331,12 +413,33 @@ export function advanceMarches(
       m.remaining = 0
 
       if (m.phase === 'returning') {
-        deliverLoot(v, m.loot)
+        // Attacks deliver their carry-capped haul; scouts carry nothing (and their
+        // survivors were never removed from v.units), so a scout's return leg just
+        // retires the march. Either way the march is done.
+        if (m.kind === 'attack') deliverLoot(v, m.loot)
         marches.splice(i, 1)
         break
       }
 
-      // Outbound complete → resolve the engagement.
+      // Outbound complete → resolve the arrival.
+
+      // SCOUT (M5.2): pure recon. REVEAL the camp (its defence/loot stop showing as
+      // '?' in the UI), then turn straight around. The target may already be gone
+      // (captured earlier this sub-step, or a stale/edited id) — then there is simply
+      // nothing to reveal — but the scouts ALWAYS head home: no battle, no losses, no
+      // loot, no conquest/loyalty. The return leg reuses the snapshotted geometry so
+      // the symmetric travel time matches the outbound leg.
+      if (m.kind === 'scout') {
+        const barb = barbarianById(world, m.targetId)
+        if (barb !== undefined) barb.scouted = true
+        m.phase = 'returning'
+        m.remaining = marchTime(v, { x: m.targetX, y: m.targetY }, m.units, mods)
+        // m.loot stays the empty map; loop continues so a large dt may also complete
+        // the return leg this step.
+        continue
+      }
+
+      // ATTACK → resolve the engagement.
       const target = barbarianTarget(m.targetLevel)
       const outcome = battleOutcome(armyAttackPower(m.units, mods), target.defensePower)
       const sent = m.units

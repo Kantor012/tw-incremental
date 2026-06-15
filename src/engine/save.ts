@@ -35,7 +35,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 10
+export const SAVE_VERSION = 11
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -325,6 +325,62 @@ export function migrate(raw: any): any {
         : { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
       version: 10,
     }),
+    // v10 -> v11: wall (defensive building) + scouts (recon unit + march kinds) (M5.2).
+    // A v10 save predates FOUR new bits of state, all backfilled WITHOUT disturbing the
+    // player's progress:
+    //  - the new 'wall' BUILDING key and 'scout' UNIT key (both appended to
+    //    BUILDING_IDS / UNIT_IDS): every village's `buildings` gains wall:0 and `units`
+    //    gains scout:0 by spreading INITIAL_BUILDINGS / INITIAL_UNITS *first*, so the
+    //    save's own levels/counts win over the seed and existing progress is preserved
+    //    (exactly as the v2->v3 / v6->v7 building-and-unit backfills did). Without this,
+    //    validateVillage — which iterates the now-longer lists — would reject the save;
+    //  - every in-flight march gets the scout:0 unit slot the same way, and gains
+    //    `kind: 'attack'` (the only kind that existed before M5.2) unless it already
+    //    carries a string one (forward-compat);
+    //  - every barbarian gains `scouted: false` (undiscovered) unless it already carries
+    //    a boolean one (forward-compat).
+    // Malformed entries are left as-is so validateState rejects them loudly. Nothing is
+    // recomputed here; importSave's recomputeDerived pass runs afterwards exactly as for
+    // every other migration.
+    10: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        const marches = Array.isArray(v.marches)
+          ? v.marches.map((m: any) =>
+              isObject(m)
+                ? {
+                    ...m,
+                    kind: typeof m.kind === 'string' ? m.kind : 'attack',
+                    units: { ...INITIAL_UNITS, ...(isObject(m.units) ? m.units : {}) },
+                  }
+                : m,
+            )
+          : v.marches
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+          units: { ...INITIAL_UNITS, ...(isObject(v.units) ? v.units : {}) },
+          marches,
+        }
+      }
+      const barbarians = Array.isArray(s.world?.barbarians)
+        ? s.world.barbarians.map((b: any) =>
+            isObject(b)
+              ? { ...b, scouted: typeof b.scouted === 'boolean' ? b.scouted : false }
+              : b,
+          )
+        : s.world?.barbarians
+      const world = isObject(s.world) ? { ...s.world, barbarians } : s.world
+      return { ...s, villages, world, version: 11 }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -433,6 +489,13 @@ function validateVillage(v: unknown, id: string): void {
   if (!Array.isArray(marches)) throw new Error(`save: village ${id} invalid marches`)
   for (const m of marches) {
     if (!isObject(m)) throw new Error(`save: village ${id} invalid march`)
+    // kind (M5.2) is the march's purpose discriminant: 'attack' (battle + loot +
+    // conquest) or 'scout' (pure recon — reveals the target, never fights/loots). The
+    // v10->v11 migration backfills 'attack' on every pre-M5.2 march, so a migrated save
+    // always carries a valid kind; anything else means a corrupt/tampered save.
+    if (m.kind !== 'attack' && m.kind !== 'scout') {
+      throw new Error(`save: village ${id} invalid march kind`)
+    }
     // targetLevel is the SNAPSHOT combat/loot tier (1..MAX_TARGET_LEVEL); the M2.2
     // fields (targetId + the targetX/targetY geometry snapshot) drive line drawing
     // and the return-leg distance, so coords must be finite. targetId is 'legacy'
@@ -493,8 +556,10 @@ function validateVillage(v: unknown, id: string): void {
  * village key is ordered, exactly once — so the tick iterates each village once and
  * never references a missing entry), every village passes {@link validateVillage},
  * the spatial `world` (M2.2) is checked (its `barbarians` list, each with a finite
- * coordinate, a level in [1, MAX_TARGET_LEVEL] and — since M2.4 — a `loyalty` in
- * [0, 100]), the GLOBAL battle log is validated (each report's `villageId`, plus the
+ * coordinate, a level in [1, MAX_TARGET_LEVEL], a `loyalty` in [0, 100] since M2.4 and
+ * a boolean `scouted` since M5.2), every village's marches now also carry a `kind`
+ * discriminant in {`attack`, `scout`} (M5.2) and the new `wall` building / `scout` unit
+ * validate like any other roster entry (the lists simply grew), the GLOBAL battle log is validated (each report's `villageId`, plus the
  * M2.4 `conquer` variant alongside the existing `attack` / `raid`), and finally the
  * M3.1 `tech` map is checked (an object whose every present key is a known node id at
  * an integer level within that node's [0, maxLevel] band; unknown keys are rejected),
@@ -573,6 +638,13 @@ export function validateState(s: unknown): GameState {
     // maths, so reject it loudly rather than autosave a corrupt world.
     if (typeof b.loyalty !== 'number' || !Number.isFinite(b.loyalty) || b.loyalty < 0 || b.loyalty > 100) {
       throw new Error('save: invalid barbarian loyalty')
+    }
+    // Scouted flag (M5.2) — a plain boolean: false until a scout march has reached and
+    // returned from this camp, then true (the UI gates its defence/loot reveal on it).
+    // generateWorld seeds false and the v10->v11 migration backfills false, so a fresh or
+    // migrated world always carries a boolean; anything else means a corrupt/tampered save.
+    if (typeof b.scouted !== 'boolean') {
+      throw new Error('save: invalid barbarian scouted')
     }
   }
 

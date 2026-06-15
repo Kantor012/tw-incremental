@@ -13,7 +13,7 @@ import {
   type BuildingId,
   type BuildingDef,
 } from '../../content/buildings'
-import { nextCostAffordable, costReduction } from '../../systems/buildings'
+import { nextCostAffordable, costReduction, villageDefenseMult } from '../../systems/buildings'
 import { recruitSpeedMult } from '../../systems/recruitment'
 import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
@@ -97,6 +97,11 @@ function effectText(v: Village, id: BuildingId, mods: TechModifiers = NO_TECH_MO
       return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(v, mods)) * 100) + '%'
     case 'noble_unlock':
       return 'Odblokowuje szlachcica (przejmowanie wiosek)'
+    case 'defense_bonus':
+      // The wall raises ONLY the village's raid defence (villageDefenseMult, consumed
+      // by raids.ts) — show the resulting bonus as a percentage so it reads like the
+      // other global-effect lines (e.g. "+50%" for a maxed wall at perLevel 0.05).
+      return 'Obrona wioski: +' + Math.round((villageDefenseMult(v) - 1) * 100) + '%'
     default: {
       const _exhaustive: never = e
       return String(_exhaustive)
