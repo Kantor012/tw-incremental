@@ -322,6 +322,31 @@ export interface PrestigeState {
 }
 
 /**
+ * The PERMANENT era account state (M6.1) — the SECOND meta-layer, sitting ABOVE
+ * prestige. Survives every era reset (`newEra`, the great reset): you bank
+ * {@link points} (EP) by starting a Nowa Era — which WIPES the whole prestige
+ * account and the run — and spend them in the era tree, whose purchased levels live
+ * in {@link nodes}. The economic effect of those nodes is TRANSIENT (rolled up by
+ * `aggregateEraMods` and combined onto the tech × prestige bag by `effectiveMods`),
+ * plus the signature `pp_mult` that multiplies prestige-point gain; only this raw
+ * account state serializes. Mirrors {@link PrestigeState} exactly.
+ */
+export interface EraState {
+  /** Unspent era points (EP) available to buy nodes. Plain finite number >= 0. */
+  points: number
+  /** Lifetime EP ever earned across all eras (monotonic; stats/UI). >= 0. */
+  totalEarned: number
+  /** Number of eras started so far (great resets). >= 0. */
+  eras: number
+  /**
+   * Purchased level per era node id (absent key = level 0). The single permanent
+   * era-tree state — its effects are recomputed from this map by `aggregateEraMods`
+   * and never stored derived (mirrors {@link GameState.tech} / {@link PrestigeState.nodes}).
+   */
+  nodes: Record<string, number>
+}
+
+/**
  * The three routines the idle layer can run for the player (M5.1). Each is
  * UNLOCKED via the tech tree (a binary `automation_unlock` gateway) and then TOGGLED
  * on by the player; both must be true for the routine to fire in the deterministic
@@ -440,6 +465,15 @@ export interface GameState {
    * {@link PrestigeState}.
    */
   prestige: PrestigeState
+  /**
+   * PERMANENT era account state (M6.1) — the SECOND meta-layer above prestige:
+   * banked era points (EP), lifetime totals, era count and the purchased era-tree
+   * levels. SURVIVES every era reset (`newEra`, which itself WIPES the prestige
+   * account and the run); its node effects combine onto the tech × prestige bag via
+   * `effectiveMods`, and its signature `pp_mult` multiplies prestige-point gain. See
+   * {@link EraState}.
+   */
+  era: EraState
   /**
    * Idle automation toggles + policy (M5.1). The routines themselves are gated by
    * the tech tree (see {@link TechModifiers.automations}); this is the player's
@@ -695,6 +729,7 @@ export function createInitialState(seed: string, now: number): GameState {
     battleLog: [],
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
+    era: { points: 0, totalEarned: 0, eras: 0, nodes: {} },
     automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
     stats: createInitialStats(),
     achievements: {},

@@ -124,6 +124,31 @@ export interface BalanceTargets {
    */
   requirePrestigeProductionUplift: boolean
 
+  // --- M6.1 era (great reset / second meta-layer) goals (warnings) ---
+  /**
+   * The bot must start at least this many eras (great resets) over the (separate) era run —
+   * proof the second meta-layer is reachable within a reasonable session AND repeats
+   * deterministically. >= 1 is the contract floor; the bot self-limits eras (see
+   * sim/bot.BOT_MAX_ERAS) so this never runs away. Reaching it requires the prestige loop to
+   * accumulate enough account-wide progress that {@link import('../src/systems/era').pendingEraPoints}
+   * (a cube root of the prestige score) clears {@link import('./bot').ERA_MIN_EP}; if it cannot be
+   * hit, EP_SCALE / eraScore (systems/era.ts) or the ERA_MIN_EP heuristic need tuning.
+   */
+  minEras: number
+  /**
+   * The bot must BUY at least this many era-node levels from banked EP over the era run — proof
+   * the era tree is a reachable EP sink and the purchase path is exercised. Sized at the
+   * proof-of-mechanic floor; a regression that leaves the (rare) EP unspendable trips a warning.
+   */
+  minEraPurchases: number
+  /**
+   * The signature `pp_mult` era effect must actually FOLD INTO prestige-point gain: a maxed
+   * pp_mult era node must raise pendingPrestigePoints for a fixed prestige score
+   * (eraPpUplift > 1). True turns this into a (warning) target — the confirmation that each new
+   * era accelerates the whole prestige loop.
+   */
+  requireEraPpUplift: boolean
+
   // --- M5.1 automation (idle routines) goals (HARD — see runner.runAutomationCoverage) ---
   // These are proof-of-mechanic floors for the SEPARATE automation coverage run (automation
   // ON), NOT balance-curve warnings: with the deterministic seeded scenario each routine
@@ -218,6 +243,18 @@ export const TARGETS: BalanceTargets = {
   minAscensions: 1,
   minPrestigePurchases: 8,
   requirePrestigeProductionUplift: true,
+
+  // M6.1: era online. A matured prestige loop should accumulate enough account-wide progress
+  // (lifetime PP + ascensions + prestige nodes) that its CUBE-root EP yield clears the era
+  // floor, letting the bot perform a Nowa Era (the great reset that WIPES the prestige account
+  // but banks permanent era points) and spend EP on the era tree. Measured by a SEPARATE
+  // era-driving run (see sim/runner.runEra) so the M1–M5 + prestige targets stay measured on an
+  // un-reset account. Floors at the proof-of-mechanic level (>= 1 era / >= 1 era level), and the
+  // pp_mult uplift confirms each era accelerates the prestige loop. If these cannot be hit
+  // without changing the tree, tune EP_SCALE / eraScore (systems/era.ts) — see manifest notes.
+  minEras: 1,
+  minEraPurchases: 1,
+  requireEraPpUplift: true,
 
   // M5.1: automation online. With the three gateways unlocked and every toggle ON, the
   // SEPARATE coverage run (automation OFF in the main run, so the goals above are untouched)

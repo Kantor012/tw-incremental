@@ -1,5 +1,5 @@
 import { D, ZERO, isFiniteDecimal, type Decimal } from '../src/engine/decimal'
-import { serialize, deserialize } from '../src/engine/save'
+import { serialize, deserialize, exportSave, importSave } from '../src/engine/save'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
 import {
@@ -23,6 +23,12 @@ import {
   PRESTIGE_ROOTS,
   type PrestigeArchetype,
 } from '../src/content/prestige'
+import {
+  ERA_NODES,
+  ERA_NODE_IDS,
+  ERA_ROOTS,
+  type EraArchetype,
+} from '../src/content/era'
 import { ACHIEVEMENT_IDS } from '../src/content/achievements'
 import { checkAchievements } from '../src/systems/achievements'
 import { freePopulation, recruit } from '../src/systems/recruitment'
@@ -57,6 +63,7 @@ import {
   deadPrestigeNodes,
   prestigeNodeLevel,
 } from '../src/systems/prestige'
+import { eraHasCycle, orphanEraNodes, deadEraNodes, newEra } from '../src/systems/era'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
@@ -808,6 +815,296 @@ export function checkAscendValid(state: GameState): InvariantResult {
     name: 'ascend-valid',
     ok: issues.length === 0,
     detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Smallest centre-to-centre distance two DISTINCT era-node positions may have in the computed
+ * layout before it counts as a gross overlap. The era tree is laid out by the SAME generic
+ * radial algorithm as the tech / prestige trees, so it inherits the same generous floor
+ * (mirrors {@link PRESTIGE_MIN_NODE_SEP}); it trips immediately if a topology / algorithm
+ * change ever stacks two era nodes on the same spot.
+ */
+const ERA_MIN_NODE_SEP = 24
+
+/** The maxLevel band each era archetype must sit in (CLAUDE.md tree rule, mirrors prestige). */
+function eraBandOk(archetype: EraArchetype, maxLevel: number): boolean {
+  return archetype === 'gateway'
+    ? maxLevel === 1
+    : archetype === 'notable'
+      ? maxLevel >= 2 && maxLevel <= 3
+      : maxLevel >= 7 && maxLevel <= 10 // minor
+}
+
+/**
+ * STATIC era-tree invariants (M6.1) — pure functions of the {@link ERA_NODES} catalogue + the
+ * generic {@link layoutNodes} layout, independent of any {@link GameState}, so the runner
+ * asserts them ONCE per run (like {@link checkPrestigeTree}). A single FAIL is a commit
+ * blocker: a malformed era tree would mis-drive the second meta-layer and the constellation
+ * view. Mirrors checkPrestigeTree exactly, bound to the era data:
+ *  - era-acyclic:        the prerequisite graph is a DAG — {@link eraHasCycle}.
+ *  - era-no-orphans:     every node reachable from an {@link ERA_ROOTS} root — {@link orphanEraNodes}.
+ *  - era-no-dead-perks:  every node has a real effect (perLevel > 0) — {@link deadEraNodes}.
+ *  - era-maxlevel-range: every maxLevel is an integer in [1, 10].
+ *  - era-archetype-band: maxLevel matches the archetype band (gateway 1 / notable 2-3 / minor 7-10).
+ *  - era-roots:          ERA_ROOTS non-empty; every root exists and truly has no prerequisite.
+ *  - era-layout-complete:   a FINITE position for every node id.
+ *  - era-layout-no-overlap: no two distinct centres closer than {@link ERA_MIN_NODE_SEP}.
+ *  - era-edges-valid:    every edge endpoint is a known node and the edge count equals the
+ *                        total number of (known) prerequisite links.
+ */
+export function checkEraTree(): InvariantResult[] {
+  const results: InvariantResult[] = []
+
+  const cycle = eraHasCycle()
+  results.push({
+    name: 'era-acyclic',
+    ok: !cycle,
+    detail: cycle ? 'prerequisite graph contains a cycle (must be a DAG)' : undefined,
+  })
+
+  const orphans = orphanEraNodes()
+  results.push({
+    name: 'era-no-orphans',
+    ok: orphans.length === 0,
+    detail: orphans.length ? `unreachable from roots: ${orphans.join(', ')}` : undefined,
+  })
+
+  const dead = deadEraNodes()
+  results.push({
+    name: 'era-no-dead-perks',
+    ok: dead.length === 0,
+    detail: dead.length ? `no effect / perLevel<=0: ${dead.join(', ')}` : undefined,
+  })
+
+  const badLevel: string[] = []
+  const badBand: string[] = []
+  for (const id of ERA_NODE_IDS) {
+    const node = ERA_NODES[id]
+    const m = node.maxLevel
+    if (!Number.isInteger(m) || m < 1 || m > 10) badLevel.push(`${id}=${m}`)
+    if (!eraBandOk(node.archetype, m)) badBand.push(`${id}(${node.archetype})=${m}`)
+  }
+  results.push({
+    name: 'era-maxlevel-range',
+    ok: badLevel.length === 0,
+    detail: badLevel.length ? `maxLevel out of [1,10]: ${badLevel.join(', ')}` : undefined,
+  })
+  results.push({
+    name: 'era-archetype-band',
+    ok: badBand.length === 0,
+    detail: badBand.length ? `maxLevel off archetype band: ${badBand.join(', ')}` : undefined,
+  })
+
+  const rootIssues: string[] = []
+  if (ERA_ROOTS.length === 0) rootIssues.push('no roots')
+  for (const id of ERA_ROOTS) {
+    const node = ERA_NODES[id]
+    if (!node) rootIssues.push(`unknown root ${id}`)
+    else if (node.prerequisites.length > 0) rootIssues.push(`root ${id} has prerequisites`)
+  }
+  results.push({
+    name: 'era-roots',
+    ok: rootIssues.length === 0,
+    detail: rootIssues.length ? rootIssues.join('; ') : undefined,
+  })
+
+  const pos = layoutNodes(ERA_NODES, ERA_NODE_IDS)
+  const missing: string[] = []
+  for (const id of ERA_NODE_IDS) {
+    const p = pos[id]
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) missing.push(id)
+  }
+  results.push({
+    name: 'era-layout-complete',
+    ok: missing.length === 0,
+    detail: missing.length ? `no finite position for: ${missing.join(', ')}` : undefined,
+  })
+
+  let overlap: string | null = null
+  for (let i = 0; i < ERA_NODE_IDS.length && overlap === null; i++) {
+    const a = pos[ERA_NODE_IDS[i]]
+    if (!a) continue
+    for (let j = i + 1; j < ERA_NODE_IDS.length; j++) {
+      const b = pos[ERA_NODE_IDS[j]]
+      if (!b) continue
+      const d = Math.hypot(a.x - b.x, a.y - b.y)
+      if (d < ERA_MIN_NODE_SEP) {
+        overlap = `${ERA_NODE_IDS[i]} & ${ERA_NODE_IDS[j]} only ${d.toFixed(1)} apart`
+        break
+      }
+    }
+  }
+  results.push({
+    name: 'era-layout-no-overlap',
+    ok: overlap === null,
+    detail: overlap ?? undefined,
+  })
+
+  let expectedEdges = 0
+  for (const id of ERA_NODE_IDS) {
+    for (const pre of ERA_NODES[id].prerequisites) if (pre in ERA_NODES) expectedEdges += 1
+  }
+  const edges = nodeEdges(ERA_NODES, ERA_NODE_IDS)
+  const badEdge = edges.find((e) => !(e.from in ERA_NODES) || !(e.to in ERA_NODES))
+  const edgeOk = badEdge === undefined && edges.length === expectedEdges
+  results.push({
+    name: 'era-edges-valid',
+    ok: edgeOk,
+    detail: edgeOk
+      ? undefined
+      : badEdge
+        ? `edge with unknown endpoint ${badEdge.from}->${badEdge.to}`
+        : `edge count ${edges.length} != prerequisite links ${expectedEdges}`,
+  })
+
+  return results
+}
+
+/** True when two era node maps hold the same keys at the same levels (order-independent). */
+function sameEraNodes(a: Record<string, number>, b: Record<string, number>): boolean {
+  const ak = Object.keys(a)
+  const bk = Object.keys(b)
+  if (ak.length !== bk.length) return false
+  for (const k of ak) if (a[k] !== b[k]) return false
+  return true
+}
+
+/**
+ * Era round-trip (M6.1): the PERMANENT era account ({@link GameState.era} — EP balance,
+ * lifetime totals, era count and the purchased era-tree levels) must survive the real
+ * export/import (base64) path byte-for-byte. The whole-state {@link checkRoundTrip} already
+ * proves serialize/deserialize is loss-free; this is the targeted proof that the v15 save
+ * carries the era account specifically — the bit that SURVIVES every era reset (CLAUDE.md hard
+ * rule #3). Compares the four fields (nodes order-independently). Pure function of the state.
+ */
+export function checkEraRoundTrip(state: GameState): InvariantResult {
+  const restored = importSave(exportSave(state))
+  const a = state.era
+  const b = restored.era
+  const ok =
+    a.points === b.points &&
+    a.totalEarned === b.totalEarned &&
+    a.eras === b.eras &&
+    sameEraNodes(a.nodes, b.nodes)
+  return {
+    name: 'era-round-trip',
+    ok,
+    detail: ok
+      ? undefined
+      : `era account changed across export/import: ` +
+        `{points:${a.points},totalEarned:${a.totalEarned},eras:${a.eras}} -> ` +
+        `{points:${b.points},totalEarned:${b.totalEarned},eras:${b.eras}}`,
+  }
+}
+
+/**
+ * newEra determinism (M6.1): the GREAT RESET takes no clock and draws its regenerated world +
+ * rngState from a per-era seed (`seed + ':era' + N`), so two identical accounts performing a
+ * Nowa Era must yield a byte-identical state — surviving era account, wiped prestige account,
+ * regenerated world AND rngState all in lock-step. Mirrors the run-level 'determinism' /
+ * 'prestige-determinism' checks but for the era primitive: two fresh states are seeded with the
+ * SAME prestige progress (so {@link pendingEraPoints} > 0 and the reset actually fires), then
+ * {@link newEra}'d and serialized; a divergence means newEra introduced hidden nondeterminism
+ * (a clock read or an unseeded RNG). Self-contained (no runner import), Node-safe.
+ */
+export function checkNewEraDeterminism(seed: string): InvariantResult {
+  const seedAccount = (s: GameState): void => {
+    // Identical prestige progress on both copies so the EP yield (and thus the reset) is real.
+    s.prestige.totalEarned = 100
+    s.prestige.ascensions = 4
+    s.prestige.nodes = { prosperity_root: 2 }
+  }
+  const a = createInitialState(seed, 0)
+  const b = createInitialState(seed, 0)
+  seedAccount(a)
+  seedAccount(b)
+  const epA = newEra(a)
+  const epB = newEra(b)
+
+  const serA = serialize(a)
+  const serB = serialize(b)
+  const ok = epA > 0 && epA === epB && serA === serB
+  return {
+    name: 'era-determinism',
+    ok,
+    detail: ok
+      ? undefined
+      : epA <= 0
+        ? 'newEra banked no EP from the seeded prestige account (cannot test the reset)'
+        : 'two newEra resets from the same seed diverged (era account / wiped prestige / world / rngState)',
+  }
+}
+
+/**
+ * Game-seconds the post-era capital is advanced by idle production before it MUST offer a
+ * progress action, and the coarse step between availability probes. A just-reset capital starts
+ * at the bare starting pool (50/50/50, EXACTLY like a fresh {@link createInitialState} start),
+ * which is below even the cheapest build — so it has NOTHING affordable at the very instant and
+ * only unlocks its first action after a few seconds of accrual (empirically ~4s on every seed).
+ * The horizon is a generous, bounded multiple of that, so the guard still catches a PERMANENT
+ * dead-end (an action that never appears) while never reading a FALSE stall on the normal
+ * "wait for the first tick of production" instant — the exact trap {@link import('./runner')}'s
+ * runEra documents when it skips the just-reset tick.
+ */
+const ERA_PLAYABILITY_HORIZON = 600
+const ERA_PLAYABILITY_STEP = 5
+
+/**
+ * No softlock after a Nowa Era (M6.1): the great reset rebuilds the run as ONE fresh capital
+ * (mirroring a fresh {@link createInitialState} start, which runContinuous already proves
+ * playable), so it must never land in a PERMANENT stall. Seeds enough prestige progress that
+ * {@link newEra} banks EP and fires, then asserts the reset run reaches a state with at least
+ * one available progress action ({@link chooseAction} non-null) under the EFFECTIVE mods
+ * (tech × prestige × era).
+ *
+ * Crucially it does NOT probe the BARE just-reset instant: a just-reset capital has accrued
+ * nothing yet and sits at the bare starting pool, below the cheapest build, so NO action is
+ * affordable for the first few seconds — exactly like a brand-new game, and exactly the FALSE
+ * stall runner.runEra calls out (which is why it skips the just-reset tick). Instead we advance
+ * the reset run by idle production over a BOUNDED horizon ({@link ERA_PLAYABILITY_HORIZON}) and
+ * pass the moment an action appears; only a capital that NEVER unlocks one within the horizon is
+ * a genuine softlock. The surviving era multipliers can only HELP (production accrues faster),
+ * so this is the "a Nowa Era leaves the game grywalny" guard the era layer needs. Deterministic
+ * (the advance draws only the seeded rngState newEra installed) and self-contained — no clock.
+ */
+export function checkEraNoSoftlock(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  // Enough account-wide prestige progress that a Nowa Era can actually be banked.
+  state.prestige.totalEarned = 100
+  state.prestige.ascensions = 4
+  const ep = newEra(state)
+  if (ep <= 0) {
+    return {
+      name: 'era-no-softlock',
+      ok: false,
+      detail: 'newEra banked no EP from a seeded prestige account (cannot test post-era playability)',
+    }
+  }
+
+  // True iff SOME village offers a progress action right now under the effective mods.
+  const hasAction = (): boolean => {
+    const mods = effectiveMods(state)
+    for (const vid of state.villageOrder) {
+      if (chooseAction(state.villages[vid], state.world, mods) !== null) return true
+    }
+    return false
+  }
+
+  // Probe immediately (an era start-resource head-start can make it playable at once), then let
+  // idle production accrue in coarse steps until an action unlocks or the horizon is exhausted.
+  let ok = hasAction()
+  for (let t = 0; !ok && t < ERA_PLAYABILITY_HORIZON; t += ERA_PLAYABILITY_STEP) {
+    simulate(state, ERA_PLAYABILITY_STEP)
+    ok = hasAction()
+  }
+
+  return {
+    name: 'era-no-softlock',
+    ok,
+    detail: ok
+      ? undefined
+      : `fresh post-era capital has no available build/recruit/attack action within ${ERA_PLAYABILITY_HORIZON}s of idle production`,
   }
 }
 

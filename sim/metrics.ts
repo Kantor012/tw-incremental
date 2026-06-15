@@ -163,6 +163,28 @@ export interface RunMetrics {
    */
   prestigeStartResourceBonus: number
 
+  // --- M6.1 era (great reset / second meta-layer) ---
+  // Measured by a SEPARATE run (see runner.runEra) that drives BOTH ascensions and eras so
+  // prestige progress accumulates and CONVERTS to eras — kept apart from the main + prestige
+  // runs, which never start an era (newEra WIPES the whole prestige account), so those metrics
+  // stay measured on an un-reset account.
+  /** Eras the bot started (great resets) over the era run — the era loop fired N times. */
+  eras: number
+  /** Successful era-node level purchases over the era run (one per accepted purchaseEra). */
+  eraPurchases: number
+  /** Distinct era nodes owned at level >= 1 at the end of the era run. */
+  eraNodesOwned: number
+  /** Σ owned era-node levels at the end of the era run. */
+  eraLevelsOwned: number
+  /**
+   * BONUS CONFIRMATION: the signature `pp_mult` era effect actually FOLDS INTO prestige-point
+   * gain. The ratio pendingPrestigePoints(with a maxed pp_mult era node) / pendingPrestigePoints
+   * (none), measured on a FIXED prestige score — independent of whether the bot's greedy
+   * source-order buy reached the pp_mult node this run. > 1 proves each new era accelerates the
+   * whole prestige loop (the era's reason to exist).
+   */
+  eraPpUplift: number
+
   // --- M5.1 automation (idle routines) ---
   // Measured by a SEPARATE coverage run (see runner.runAutomationCoverage) with the three
   // automation gateways unlocked and every toggle ON — kept apart from the MAIN run, which
@@ -247,6 +269,26 @@ export interface PrestigeRunStats {
   productionMult: number
   /** Per-resource start-resource head-start the surviving prestige nodes grant (bonus proof). */
   startResourceBonus: number
+}
+
+/**
+ * Era (M6.1) counters from the SEPARATE era-driving run (see runner.runEra). Kept apart from
+ * {@link RunStats} / {@link PrestigeRunStats} because it is produced by a different run — the
+ * only one that ever starts a Nowa Era (newEra WIPES the prestige account), so the main +
+ * prestige targets stay measured on an un-reset account. {@link collect} folds these straight
+ * into the matching {@link RunMetrics} era fields.
+ */
+export interface EraRunStats {
+  /** Eras started (great resets) over the run. */
+  eras: number
+  /** Successful era-node level purchases over the run. */
+  purchases: number
+  /** Distinct era nodes owned at level >= 1 at run end. */
+  nodesOwned: number
+  /** Σ owned era-node levels at run end. */
+  levelsOwned: number
+  /** pp_mult uplift on prestige-point gain at a fixed prestige score (bonus proof; > 1 = live). */
+  ppUplift: number
 }
 
 /**
@@ -379,6 +421,7 @@ export function collect(
   state: GameState,
   stats: RunStats,
   prestige: PrestigeRunStats,
+  era: EraRunStats,
   automation: AutomationRunStats,
 ): RunMetrics {
   const first = firstVillage(state)
@@ -489,6 +532,12 @@ export function collect(
     prestigeLevelsOwned: prestige.levelsOwned,
     prestigeProductionMult: prestige.productionMult,
     prestigeStartResourceBonus: prestige.startResourceBonus,
+
+    eras: era.eras,
+    eraPurchases: era.purchases,
+    eraNodesOwned: era.nodesOwned,
+    eraLevelsOwned: era.levelsOwned,
+    eraPpUplift: era.ppUplift,
 
     automationBuilt: automation.built,
     automationRecruited: automation.recruited,

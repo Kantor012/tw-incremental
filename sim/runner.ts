@@ -8,7 +8,7 @@ import {
 import { simulate } from '../src/engine/tick'
 import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
-import { BUILDING_IDS } from '../src/content/buildings'
+import { BUILDING_IDS, BUILDINGS } from '../src/content/buildings'
 import { recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { foundVillage } from '../src/systems/villages'
@@ -19,8 +19,11 @@ import {
   purchasePrestige,
   startResourceBonus,
   prestigeNodeLevel,
+  pendingPrestigePoints,
 } from '../src/systems/prestige'
 import { PRESTIGE_NODE_IDS } from '../src/content/prestige'
+import { newEra, purchaseEra, canPurchaseEra, eraNodeLevel } from '../src/systems/era'
+import { ERA_NODES, ERA_NODE_IDS } from '../src/content/era'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
@@ -57,6 +60,10 @@ import {
   totalResources,
   seedAutomation,
   checkAutomationDeterminism,
+  checkEraTree,
+  checkEraRoundTrip,
+  checkNewEraDeterminism,
+  checkEraNoSoftlock,
   type InvariantResult,
 } from './invariants'
 import {
@@ -66,6 +73,7 @@ import {
   chooseTech,
   chooseAscend,
   choosePrestige,
+  chooseEra,
 } from './bot'
 import {
   collect,
@@ -77,6 +85,7 @@ import {
   type RunMetrics,
   type RunStats,
   type PrestigeRunStats,
+  type EraRunStats,
   type AutomationRunStats,
 } from './metrics'
 
@@ -127,6 +136,18 @@ const TECH_DECIDE_EVERY = 8
  * (continuous + determinism repeat + split-with-save) is a small add over the main run.
  */
 const PRESTIGE_TICKS = 6000
+
+/**
+ * Step budget for the SEPARATE era (great-reset) run (M6.1). Longer than {@link PRESTIGE_TICKS}
+ * because each era is a SECOND-order reset: the bot must drive the prestige loop (several
+ * ascensions) until the prestige account scores enough that the CUBE-root EP yield clears the era
+ * floor, perform a Nowa Era — which WIPES the prestige account back to a 0 score — then rebuild and
+ * do it again, up to {@link import('./bot').BOT_MAX_ERAS}. The sim measures both eras landing well
+ * inside this window (the first era around tick ~3-4k, the second by ~7-8k); the surplus headroom
+ * keeps the run robust to seed variation. Bounded by the era + ascension caps, so the loop always
+ * terminates regardless of the budget.
+ */
+const ERA_TICKS = 12000
 
 /**
  * Span (game-seconds) of the SEPARATE M5.1 automation coverage run. One hour is long enough
@@ -582,6 +603,181 @@ function runPrestigeSplit(seed: string, ticks: number, dt: number): GameState {
   return state
 }
 
+// --- M6.1 era (great reset / second meta-layer) run -------------------------------------------
+//
+// A SEPARATE run from every measurement above, mirroring the prestige run's rationale: newEra
+// performs the GREAT RESET — it WIPES the ENTIRE prestige account (PP, prestige nodes, ascensions)
+// and resets the run to one fresh capital, banking permanent ERA POINTS (EP). Folding it into the
+// primary or prestige run would zero out the cumulative progression those targets measure. Here the
+// bot plays normally via the same {@link step}, ascends via {@link prestigeDrive} so the prestige
+// account ACCUMULATES, and once that account scores enough that the cube-root EP yield clears the era
+// floor it starts a Nowa Era ({@link eraDrive}) and spends the banked EP on the era tree — repeating
+// up to the era cap. The PERMANENT era account (EP / totals / era count / node levels) survives every
+// reset, AND its multipliers fold into every future run (effectiveMods) — exactly what
+// {@link checkEraTree} / {@link checkEraRoundTrip} and the era balance targets verify.
+
+/**
+ * The era loop for ONE step's worth of decision, AFTER {@link step} + {@link prestigeDrive} have
+ * advanced the economy and banked prestige progress: if {@link chooseEra} says it's worthwhile,
+ * perform the great reset ({@link newEra}, banking the pending EP and wiping the prestige account)
+ * then spend the banked EP greedily on the era tree — buying each node in {@link ERA_NODE_IDS} order
+ * up to its ceiling / the EP on hand ({@link canPurchaseEra} -> {@link purchaseEra}). A source-order
+ * forward pass suffices because prerequisites always precede their dependents in ERA_NODE_IDS (append
+ * discipline). Returns whether an era started and the number of era-node levels bought this step.
+ * Pure-ish — it only mutates `state` through the engine's own newEra / purchaseEra, so two identical
+ * runs start eras and buy identically (the determinism / save-load invariants hold across the reset).
+ */
+function eraDrive(state: GameState): { started: boolean; purchases: number } {
+  if (!chooseEra(state)) return { started: false, purchases: 0 }
+  newEra(state)
+  let purchases = 0
+  for (const id of ERA_NODE_IDS) {
+    while (canPurchaseEra(state, id).ok) {
+      if (!purchaseEra(state, id)) break
+      purchases += 1
+    }
+  }
+  return { started: true, purchases }
+}
+
+/** What an era run yields: the final state, sampled invariants, and the era tally. */
+interface EraRun {
+  state: GameState
+  invariants: InvariantResult[]
+  stats: EraRunStats
+}
+
+/**
+ * Run a fresh state forward for `ticks` steps WITH BOTH the prestige loop AND the era loop active.
+ * Each step plays normally ({@link step}), then {@link prestigeDrive} ascends + buys so the prestige
+ * account accumulates, then {@link eraDrive} converts a worthwhile account into a Nowa Era + era
+ * buys. After every era reset, when `withInvariants`, the post-reset state is asserted valid and
+ * playable (resource / army / world / placement / loyalty / prestige-state — now WIPED but valid —
+ * era round-trip / whole-state round-trip). At the end the pp_mult uplift is MEASURED on a fixed
+ * prestige score — the proof an era accelerates the prestige loop.
+ */
+function runEra(seed: string, ticks: number, dt: number, withInvariants: boolean): EraRun {
+  const state = createInitialState(seed, 0)
+  const scratch = emptyUnitCounts()
+  const invariants: InvariantResult[] = []
+  let purchases = 0
+  let firstEraTick: number | null = null
+
+  for (let i = 0; i < ticks; i++) {
+    step(state, dt, scratch, i)
+    // Prestige first so the account accumulates, then convert worthwhile progress to an era.
+    prestigeDrive(state)
+    const { started, purchases: bought } = eraDrive(state)
+    if (!started) continue
+    purchases += bought
+    if (firstEraTick === null) firstEraTick = i
+
+    if (withInvariants) {
+      // Assert the RESET ITSELF left a valid, playable single-capital state with a WIPED prestige
+      // account and a surviving era account. As in runPrestige we do NOT sample no-softlock at this
+      // instant: a just-reset capital has accrued nothing this tick, so checkNoSoftlock (which
+      // ignores production) would read a false stall — checkEraNoSoftlock covers post-era playability
+      // structurally, and the run REACHING the next era proves it progresses.
+      const phase = `era${state.era.eras}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkLoyalty(state)], phase))
+      invariants.push(...tag([checkPrestigeState(state)], phase))
+      invariants.push(...tag([checkEraRoundTrip(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+    }
+  }
+
+  if (withInvariants) {
+    invariants.push(...tag(runInvariants(state), 'efinal'))
+    invariants.push(...tag([checkArmyConsistency(state)], 'efinal'))
+    invariants.push(...tag([checkWorldConsistency(state)], 'efinal'))
+    invariants.push(...tag([checkPrestigeState(state)], 'efinal'))
+    invariants.push(...tag([checkEraRoundTrip(state)], 'efinal'))
+    invariants.push(...tag([checkRoundTrip(state)], 'efinal'))
+    // Lifetime stats + achievements SURVIVE every era reset (newEra leaves them untouched).
+    invariants.push(...tag([checkStats(state)], 'efinal'))
+    invariants.push(...tag([checkAchievementsValid(state)], 'efinal'))
+    // Whole-run no-softlock (mirrors runPrestige's pfinal): the era run made progress iff it
+    // started an era / bought at least once, so the run never stalled overall.
+    invariants.push(
+      ...tag([checkNoSoftlock(state, totalResources(state), purchases > 0 || firstEraTick !== null)], 'efinal'),
+    )
+  }
+
+  // eraPpUplift: CONSTRUCTED proof that a pp_mult era node lifts prestige-point gain for a FIXED
+  // prestige score — independent of whether the bot's greedy source-order buy reached the pp_mult
+  // node this run (EP is rare, so it usually fills the first root first). Take a fresh, fully-built
+  // capital (so the score is large enough that the multiplier shows past the floor), measure
+  // pendingPrestigePoints with no era nodes, then again with the pp_mult node maxed; the ratio > 1
+  // is the proof. Data-driven: finds the pp_mult node rather than hard-coding legacy_root.
+  const ppNodeId = ERA_NODE_IDS.find((id) => ERA_NODES[id].effect.kind === 'pp_mult')
+  let ppUplift = 1
+  if (ppNodeId !== undefined) {
+    const probe = createInitialState(seed, 0)
+    const cap = probe.villages[probe.villageOrder[0]]
+    for (const id of BUILDING_IDS) cap.buildings[id] = BUILDINGS[id].maxLevel
+    const before = pendingPrestigePoints(probe)
+    probe.era.nodes = { [ppNodeId]: ERA_NODES[ppNodeId].maxLevel }
+    const after = pendingPrestigePoints(probe)
+    ppUplift = before > 0 ? after / before : 1
+  }
+
+  let nodesOwned = 0
+  let levelsOwned = 0
+  for (const id of ERA_NODE_IDS) {
+    const lvl = eraNodeLevel(state, id)
+    if (lvl > 0) {
+      nodesOwned += 1
+      levelsOwned += lvl
+    }
+  }
+
+  return {
+    state,
+    invariants,
+    stats: {
+      eras: state.era.eras,
+      purchases,
+      nodesOwned,
+      levelsOwned,
+      ppUplift,
+    },
+  }
+}
+
+/**
+ * Era run to the halfway point, persisted via the real export/import (base64) path — crossing at
+ * least one Nowa Era (the first lands well before the half mark) — then continued. The total step
+ * count matches the continuous era run, so any divergence is a save/load fault. This is the proof
+ * the GREAT RESET survives a save/load ACROSS the reset byte-identically — the highest-risk save/load
+ * path under CLAUDE.md hard rule #3: newEra regenerates the world + rngState, WIPES the prestige
+ * account and banks EP, so a deserialize-then-diverge of the freshly-installed rngState / world would
+ * strand the run. The per-era {@link checkEraRoundTrip} / {@link checkRoundTrip} only prove the
+ * post-reset SNAPSHOT round-trips byte-identically; only CONTINUING the loaded post-era save (here)
+ * proves it then runs identically to the continuous era run. The PERMANENT era account (banked EP +
+ * purchased node levels) rides through the v15 save.
+ */
+function runEraSplit(seed: string, ticks: number, dt: number): GameState {
+  const half = Math.floor(ticks / 2)
+  const scratch = emptyUnitCounts()
+  let state = createInitialState(seed, 0)
+  for (let i = 0; i < half; i++) {
+    step(state, dt, scratch, i)
+    prestigeDrive(state)
+    eraDrive(state)
+  }
+  state = importSave(exportSave(state))
+  for (let i = half; i < ticks; i++) {
+    step(state, dt, scratch, i)
+    prestigeDrive(state)
+    eraDrive(state)
+  }
+  return state
+}
+
 // --- M5.1 automation (idle routines) coverage --------------------------------------------
 //
 // A SEPARATE run from the main economy/combat/tech/expansion/prestige measurement. It must
@@ -801,6 +997,55 @@ export function runOne(seed: string, ticks: number): RunResult {
   // non-overlapping layout and well-formed edges. Asserted once per run (tagged 'prestige').
   invariants.push(...tag(checkPrestigeTree(), 'prestige'))
 
+  // M6.1 era (great reset / second meta-layer) — a SEPARATE run so the M1–M3 + prestige targets
+  // stay measured on an un-reset account (newEra WIPES the whole prestige account). Drives the bot
+  // through its eras (each preceded by enough ascensions that the cube-root EP yield clears the era
+  // floor), banks + spends EP on the era tree, and asserts the reset stays valid/playable.
+  const era = runEra(seed, ERA_TICKS, dt, true)
+  invariants.push(...era.invariants)
+  const eraSerA = serialize(era.state)
+
+  // Determinism: a second identical era run must be byte-equal. This covers the FULL era loop
+  // end-to-end (step + prestigeDrive + the chooseEra gate + the ERA_NODE_IDS purchase pass across
+  // repeated great resets), not just the newEra primitive ({@link checkNewEraDeterminism}). Named
+  // 'era-run-determinism' to stay distinct from that primitive's 'era-determinism', so both surface
+  // separately in the report (mirrors 'prestige-determinism').
+  const eraRepeat = runEra(seed, ERA_TICKS, dt, false)
+  const eraSerB = serialize(eraRepeat.state)
+  invariants.push({
+    name: 'era-run-determinism',
+    ok: eraSerA === eraSerB,
+    detail: eraSerA === eraSerB ? undefined : 'two identical era runs of the same seed diverged',
+  })
+
+  // Save-load continuation ACROSS a Nowa Era: a mid-run export/import — crossing the GREAT RESET
+  // (regenerated world + rngState, wiped prestige, banked EP) — must not change the outcome. The
+  // proof the highest-risk save/load path (CLAUDE.md hard rule #3) carries the run losslessly and
+  // CONTINUES identically, which the per-era post-reset snapshot round-trip cannot show. Mirrors
+  // 'prestige-save-load-continuation'.
+  const eraSplit = runEraSplit(seed, ERA_TICKS, dt)
+  const eraSerC = serialize(eraSplit)
+  invariants.push({
+    name: 'era-save-load-continuation',
+    ok: eraSerA === eraSerC,
+    detail:
+      eraSerA === eraSerC
+        ? undefined
+        : 'split era run with mid save/load diverged from the continuous era run',
+  })
+
+  // M6.1 static era-tree invariants (catalogue + layout, state-independent), mirroring
+  // checkPrestigeTree: a DAG with no orphans / dead perks, archetype-banded maxLevels, a complete
+  // non-overlapping layout and well-formed edges. Asserted once per run (tagged 'era').
+  invariants.push(...tag(checkEraTree(), 'era'))
+
+  // M6.1 newEra determinism + post-era playability (self-contained, no clock / no RNG): the great
+  // reset replays byte-identically from the same seed (surviving era account + wiped prestige +
+  // regenerated world + rngState all in lock-step), and a fresh post-era capital always has an
+  // available progress action (the reset never softlocks).
+  invariants.push(checkNewEraDeterminism(seed))
+  invariants.push(checkEraNoSoftlock(seed))
+
   // M5.1 automation (idle routines) — a SEPARATE coverage run with the three gateways
   // unlocked and every toggle ON (the main run keeps automation OFF, so the targets above are
   // untouched). Asserts each routine demonstrably fires (auto build/recruit/attack) and that
@@ -897,6 +1142,7 @@ export function runOne(seed: string, ticks: number): RunResult {
     primary.state,
     primary.stats,
     prestige.stats,
+    era.stats,
     automation.stats,
   )
   const ok = invariants.every((r) => r.ok)

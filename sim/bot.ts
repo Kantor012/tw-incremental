@@ -44,6 +44,7 @@ import {
   prestigeNodeLevel,
   prestigeNodeCost,
 } from '../src/systems/prestige'
+import { pendingEraPoints } from '../src/systems/era'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -799,4 +800,39 @@ export function choosePrestige(state: GameState): string | null {
     }
   }
   return best
+}
+
+/**
+ * Profitability floor for starting a Nowa Era (M6.1): the bot performs the GREAT RESET
+ * only once doing so RIGHT NOW would bank at least this many era points — enough for a
+ * meaningful era purchase (a couple of baseCost-1 root levels). EP is far rarer than PP
+ * (the EP yield is a CUBE root of the prestige-account score, where PP uses a square
+ * root), so this threshold paces the era loop the way {@link ASCEND_MIN_PP} paces
+ * ascensions: a just-reset era wipes the prestige account, so {@link pendingEraPoints}
+ * collapses to 0 and the bot must rebuild — and re-ascend — the prestige account before it
+ * can ever start another era. There is no degenerate "Nowa Era for nothing" cycle.
+ */
+export const ERA_MIN_EP = 3
+
+/**
+ * Hard cap on eras the bot starts in one harness run (M6.1), mirroring
+ * {@link BOT_MAX_ASCENSIONS}. Each Nowa Era is itself a (greater) reset, so an unbounded
+ * loop would never terminate the headless sim; this bounds it while still proving the
+ * mechanic REPEATS deterministically (>= 1 with headroom). The {@link ERA_MIN_EP}
+ * threshold already paces them; this is the belt-and-suspenders runtime guard.
+ */
+export const BOT_MAX_ERAS = 2
+
+/**
+ * NOWA ERA decision (M6.1): true when the bot should perform the great reset for era points
+ * THIS step. Gated on (a) the era cap {@link BOT_MAX_ERAS} (so the resetting loop always
+ * terminates) and (b) the {@link ERA_MIN_EP} profitability floor on {@link pendingEraPoints}
+ * (so a reset always banks a worthwhile, spendable amount — and so a just-reset era, whose
+ * prestige account is wiped to a 0 score, can never immediately re-fire). A pure function of
+ * `state`, so two identical runs start eras at the same ticks — the determinism / save-load
+ * invariants hold across the reset. `maxEras` is overridable for tests.
+ */
+export function chooseEra(state: GameState, maxEras: number = BOT_MAX_ERAS): boolean {
+  if (state.era.eras >= maxEras) return false
+  return pendingEraPoints(state) >= ERA_MIN_EP
 }

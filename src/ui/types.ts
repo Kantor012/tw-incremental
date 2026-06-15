@@ -89,6 +89,25 @@ export interface UiCtx {
    */
   onPurchasePrestige: (nodeId: string) => boolean
   /**
+   * NOWA ERA (M6.1): bank the pending ERA POINTS and perform the GREAT RESET — WIPE the
+   * ENTIRE prestige account (PP, all prestige nodes, ascensions) and reset the run to a
+   * fresh capital (world regenerated from a per-era seed, tech/battle log cleared, era
+   * start bonuses applied). Returns the number of EP awarded — `0` when starting an era
+   * was a no-op (no pending points). On a positive result the new era is already committed
+   * + persisted. The panel confirms the destructive reset with the player itself; this
+   * callback is the commit, not the prompt. The PERMANENT era tree + banked EP and the
+   * lifetime stats/achievements survive.
+   */
+  onNewEra: () => number
+  /**
+   * Purchase the NEXT level of the era node `nodeId`, paid from banked ERA POINTS;
+   * returns true on success (EP spent, `state.era.nodes[nodeId]` incremented, derived
+   * multipliers recomputed, committed + persisted). The era panel reads `canPurchaseEra`
+   * (systems/era) itself for the disabled/affordability cue — this callback is the commit,
+   * not the validation.
+   */
+  onPurchaseEra: (nodeId: string) => boolean
+  /**
    * Patch the idle automation toggles / policy (M5.1): merge `patch` into
    * `store.state.automation`, then commit + persist (no recompute — the automation
    * state is read directly by the tick, not folded into derived stats). The

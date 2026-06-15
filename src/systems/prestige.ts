@@ -10,6 +10,14 @@ import {
 import { aggregateTechMods } from './tech'
 import { generateWorld, WORLD_CENTER } from './world'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS, PRESTIGE_ROOTS } from '../content/prestige'
+// VALUE import of the era (M6.1) roll-ups — used ONLY inside function bodies below
+// (`effectiveMods`, `pendingPrestigePoints`, `ascend`), never at module top level, so
+// the systems/era.ts <-> here cycle stays benign exactly like the state.ts edge above:
+// by the time any of these run, both modules are fully evaluated. era.ts does NOT import
+// back from this module, so this is the single direction of the edge. The era bag
+// COMBINES onto the tech × prestige bag (so all three trees fold into derived stats),
+// `eraPpMult` scales PP gain, and `eraStartResourceBonus` extends the run head-start.
+import { aggregateEraMods, eraPpMult, eraStartResourceBonus } from './era'
 
 /**
  * Prestige (ascension) engine (M4.1) — the PERMANENT meta-layer on top of tech.
@@ -189,7 +197,11 @@ function combine(tech: TechModifiers, prestige: TechModifiers): TechModifiers {
 export function effectiveMods(state: GameState): TechModifiers {
   const techMods = aggregateTechMods(state.tech ?? {})
   const prestigeNodes = state.prestige ? state.prestige.nodes : {}
-  return combine(techMods, aggregatePrestigeMods(prestigeNodes))
+  const eraNodes = state.era ? state.era.nodes : {}
+  // Fold all THREE trees: (tech × prestige) × era. `combine(x, identityBag) === x`
+  // byte-for-byte, and aggregateEraMods({}) IS the identity bag, so a no-era save folds
+  // to exactly the pre-M6.1 value — the M1-M5 balance targets stay byte-identical.
+  return combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes))
 }
 
 /**
@@ -223,7 +235,9 @@ export function prestigeScore(state: GameState): number {
 export function pendingPrestigePoints(state: GameState): number {
   const score = prestigeScore(state)
   if (!(score > 0)) return 0
-  return Math.floor(Math.sqrt(score) * PP_SCALE)
+  // The era tree's signature `pp_mult` (M6.1) scales the whole yield, so each new era
+  // accelerates the prestige loop. With no era nodes `eraPpMult` is 1, a no-op.
+  return Math.floor(Math.sqrt(score) * PP_SCALE * eraPpMult(state))
 }
 
 /**
@@ -331,8 +345,8 @@ export function purchasePrestige(state: GameState, id: string): boolean {
  *    (DETERMINISTIC): a single fresh capital at the world centre, the barbarian world
  *    regenerated from that seed, and `rngState` reset to `RNG.fromString(thatSeed)`;
  *  - clear the transient run state: `tech = {}`, `battleLog = []`;
- *  - apply the PERMANENT head-start: `+startResourceBonus` to EACH resource of the new
- *    capital (read from the surviving prestige nodes);
+ *  - apply the PERMANENT head-start: `+startResourceBonus + eraStartResourceBonus` to
+ *    EACH resource of the new capital (read from the surviving prestige + era nodes);
  *  - `recomputeDerived` so derived stats reflect the surviving prestige multipliers.
  *
  * `prestige.nodes/points/totalEarned/ascensions` PERSIST. `seed`, `createdAt` and
@@ -353,8 +367,10 @@ export function ascend(state: GameState): number {
 
   // Fresh single capital at the world centre (mirrors createInitialState's 'v0').
   const capital = createVillage('v0', 'Stolica', WORLD_CENTER.x, WORLD_CENTER.y)
-  // Permanent head-start from the prestige tree: +bonus to EACH starting resource.
-  const bonus = startResourceBonus(state)
+  // Permanent head-start from BOTH meta-trees: the prestige start-resources plus the era
+  // start-resources (M6.1), so a deeper era tree speeds up every ordinary ascension too.
+  // With no era nodes eraStartResourceBonus is 0, so a pre-M6.1 run is unchanged.
+  const bonus = startResourceBonus(state) + eraStartResourceBonus(state)
   if (bonus > 0) {
     for (const r of RESOURCE_IDS) capital.resources[r] = capital.resources[r].add(bonus)
   }

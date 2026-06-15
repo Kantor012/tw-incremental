@@ -12,6 +12,7 @@ import { UNIT_IDS } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
+import { ERA_NODES, ERA_NODE_IDS } from '../content/era'
 import { ACHIEVEMENT_IDS } from '../content/achievements'
 import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
@@ -33,10 +34,12 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  *   (content/barbarians.ts); those too are read ONLY inside `migrate`, so the wider
  *   value cycle (save → world → barbarians → state → save) stays benign. The tech
  *   catalogue (`TECH_NODES` / `TECH_NODE_IDS`, content/tech.ts, used by the v8
- *   validation) and the prestige catalogue (`PRESTIGE_NODES` / `PRESTIGE_NODE_IDS`,
- *   content/prestige.ts, used by the v9 validation) are PURE DATA that import only the
- *   erased `ResourceId` type from state.ts, so they add no runtime edge and can never
- *   form an initialisation cycle. The achievements id list (`ACHIEVEMENT_IDS`,
+ *   validation), the prestige catalogue (`PRESTIGE_NODES` / `PRESTIGE_NODE_IDS`,
+ *   content/prestige.ts, used by the v9 validation) and the era catalogue (`ERA_NODES` /
+ *   `ERA_NODE_IDS`, content/era.ts, used by the v15 validation) are PURE DATA that import
+ *   only the erased `ResourceId` type from state.ts (era.ts imports nothing at all), so
+ *   they add no runtime edge and can never form an initialisation cycle. The achievements
+ *   id list (`ACHIEVEMENT_IDS`,
  *   content/achievements.ts, used by the v13 validation) is the same: that module imports
  *   ONLY erased types (`GameState` / `Stats` from state.ts, `BuildingId` from
  *   buildings.ts), so it too adds no runtime edge.
@@ -45,7 +48,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 14
+export const SAVE_VERSION = 15
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -465,6 +468,22 @@ export function migrate(raw: any): any {
     // schema bump gets an entry — CLAUDE.md hard rule #3). validateState now additionally
     // vets any PRESENT `luck` on an attack / raid report (finite number > 0).
     13: (s) => ({ ...s, version: 14 }),
+    // v14 -> v15: era / great reset (M6.1). A v14 save predates the permanent, account-wide
+    // era tree (the SECOND meta-layer above prestige), so backfill the single new field —
+    // `era`, the persistent { points, totalEarned, eras, nodes } record (current EP balance,
+    // lifetime EP earned, era count and a sparse { nodeId: level } map). The era multipliers
+    // it drives are TRANSIENT (folded by aggregateEraMods inside effectiveMods in
+    // recomputeDerived, plus eraPpMult on the PP yield), so nothing else is stored or seeded
+    // here. A forward-compat save that already carries an object `era` keeps it verbatim; any
+    // non-object (corrupt/missing) is reset to the zero state. Nothing is recomputed here;
+    // importSave's recomputeDerived pass runs afterwards exactly as for every other migration
+    // (and now also folds in the — empty — era mods, an identity bag, so the result is
+    // byte-identical to the pre-M6.1 derived stats). Mirrors the v8->v9 prestige backfill.
+    14: (s) => ({
+      ...s,
+      era: isObject(s.era) ? s.era : { points: 0, totalEarned: 0, eras: 0, nodes: {} },
+      version: 15,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -867,6 +886,42 @@ export function validateState(s: unknown): GameState {
     const maxLevel = PRESTIGE_NODES[nodeId].maxLevel
     if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
       throw new Error(`save: invalid prestige level ${nodeId}`)
+    }
+  }
+
+  // PERMANENT era record (M6.1) — the SECOND meta-layer account, which SURVIVES every era
+  // reset (and which a Nowa Era wipes the prestige account in favour of). `points` (current
+  // EP balance), `totalEarned` (lifetime EP earned) and `eras` (great-reset count) are
+  // finite, non-negative numbers; a NaN/Infinity/negative would poison the EP economy and
+  // the era maths and then get autosaved (CLAUDE.md hard rule #3). `nodes` is a sparse
+  // `{ nodeId: level }` map exactly like `prestige.nodes` (absent key = level 0): the
+  // multipliers it drives are TRANSIENT (re-derived by aggregateEraMods inside effectiveMods
+  // in recomputeDerived after import, plus eraPpMult on the PP yield), so only the levels
+  // persist. Every PRESENT key must be a KNOWN era node id whose level is an integer inside
+  // that node's [0, maxLevel] band; unknown keys are REJECTED for the same reason as the
+  // tech/prestige maps — `nodes` is a free-form account-wide map written ONLY by
+  // onPurchaseEra (known ids), so a key outside ERA_NODE_IDS means a corrupt/tampered/
+  // forward-version save (downgrade is best-effort, like the rest of forward-compat). An
+  // empty `{}` always passes, which the v14->v15 migration guarantees.
+  const { era } = s
+  if (!isObject(era)) throw new Error('save: missing era')
+  for (const key of ['points', 'totalEarned', 'eras'] as const) {
+    const n = era[key]
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+      throw new Error(`save: invalid era ${key}`)
+    }
+  }
+  const eraNodes = era.nodes
+  if (!isObject(eraNodes)) throw new Error('save: invalid era nodes')
+  const knownEraIds = ERA_NODE_IDS as readonly string[]
+  for (const nodeId of Object.keys(eraNodes)) {
+    if (!knownEraIds.includes(nodeId)) {
+      throw new Error(`save: unknown era node ${nodeId}`)
+    }
+    const level = eraNodes[nodeId]
+    const maxLevel = ERA_NODES[nodeId].maxLevel
+    if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
+      throw new Error(`save: invalid era level ${nodeId}`)
     }
   }
 

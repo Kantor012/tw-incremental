@@ -214,6 +214,24 @@ function evalTargets(r: RunResult): TargetCheck[] {
           ? 'no prestige nodes owned — uplift n/a'
           : `production x${m.prestigeProductionMult.toFixed(3)} over no-prestige base (+${m.prestigeStartResourceBonus}/res start bonus)`,
     },
+    {
+      // M6.1: the bot must start at least minEras eras in the separate era run.
+      name: 'eras-started',
+      ok: m.eras >= TARGETS.minEras,
+      detail: `started ${m.eras} era(s) (target >= ${TARGETS.minEras})`,
+    },
+    {
+      // M6.1: the bot must buy at least minEraPurchases era-node levels from banked EP.
+      name: 'era-nodes-purchased',
+      ok: m.eraPurchases >= TARGETS.minEraPurchases,
+      detail: `bought ${m.eraPurchases} era levels (${m.eraNodesOwned} nodes, ${m.eraLevelsOwned} levels; target >= ${TARGETS.minEraPurchases})`,
+    },
+    {
+      // M6.1: confirms the signature pp_mult era effect lifts prestige-point gain.
+      name: 'era-pp-uplift',
+      ok: !TARGETS.requireEraPpUplift || m.eraPpUplift > 1,
+      detail: `pp gain x${m.eraPpUplift.toFixed(3)} with a maxed pp_mult era node (fixed prestige score)`,
+    },
   ]
 }
 
@@ -338,6 +356,18 @@ async function main(): Promise<void> {
       `${m.seed.padEnd(8)} | ${String(m.ascensions).padStart(10)} (${m.firstAscendTick ?? 'n/a'}) | ` +
         `${m.prestigePointsBanked} / ${m.prestigeTotalEarned} | ${String(m.prestigePurchases).padStart(13)} | ` +
         `${String(m.prestigeNodesOwned).padStart(11)} | x${m.prestigeProductionMult.toFixed(3)} | +${m.prestigeStartResourceBonus}/res`,
+    )
+  }
+  console.log('')
+
+  // --- Era per seed (M6.1 second meta-layer; separate era-driving run) ---
+  console.log('--- Era (end) ---')
+  console.log('seed     | eras started | levels bought | nodes owned | total levels | pp-gain uplift')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.eras).padStart(12)} | ${String(m.eraPurchases).padStart(13)} | ` +
+        `${String(m.eraNodesOwned).padStart(11)} | ${String(m.eraLevelsOwned).padStart(12)} | x${m.eraPpUplift.toFixed(3)}`,
     )
   }
   console.log('')

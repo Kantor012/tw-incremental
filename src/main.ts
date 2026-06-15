@@ -20,6 +20,7 @@ import { sendAttack, sendScout } from './systems/marches'
 import { foundVillage } from './systems/villages'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
+import { newEra, purchaseEra } from './systems/era'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -186,6 +187,34 @@ mountApp(root, {
     }
     return ok
   },
+  onNewEra: () => {
+    // newEra (M6.1) banks the pending EP and performs the GREAT RESET in place: it WIPES
+    // the ENTIRE prestige account (PP, prestige nodes, ascensions) and rebuilds the run
+    // from a per-era seed (fresh capital, world regenerated, tech/log cleared, era start
+    // bonus applied); the era account + lifetime stats/achievements survive. No-op
+    // (returns 0) when there is nothing to bank. The active village is gone after the
+    // reset, so resnap to the new run's first village before committing so the selection
+    // stays valid (mirrors onAscend).
+    const ep = newEra(store.state)
+    if (ep > 0) {
+      if (store.state.villages[activeVillageId.value] === undefined) {
+        activeVillageId.value = store.state.villageOrder[0]
+      }
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ep
+  },
+  onPurchaseEra: (nodeId: string) => {
+    // purchaseEra spends banked EP and recomputes derived multipliers internally (the new
+    // permanent bonus folds into every village); persist + commit on success.
+    const ok = purchaseEra(store.state, nodeId)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onSetAutomation: (patch) => {
     // Merge the partial toggle/policy patch into state.automation, then commit +
     // persist. No recompute: the automation settings are read directly each sub-step
@@ -194,7 +223,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.18.0',
+  version: '0.19.0',
   offlineSeconds,
 })
 
