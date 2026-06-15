@@ -823,3 +823,86 @@ describe('save — v11 wall + scout round-trip (M5.2)', () => {
     expect(() => validateState(missing)).toThrow()
   })
 })
+
+/**
+ * A fresh v12 state exercising the M5.3 additions: the two siege units (ram + catapult)
+ * trained on the capital AND dispatched in an in-flight attack march. M5.3 adds no new
+ * building / march kind / barbarian field — siege is a per-unit role tag plus pure
+ * combat/march logic — so the only thing to round-trip is the wider unit roster. Built
+ * fresh per test so the corruption mutations below never leak between cases.
+ */
+function v12State(): GameState {
+  const s = createInitialState('save-v12', 6363)
+  const v = s.villages.v0
+  v.buildings.barracks = 1
+  v.buildings.academy = 1 // siege gates behind the academy
+  v.units.axeman = 8
+  v.units.ram = 7
+  v.units.catapult = 3
+  const target = s.world.barbarians[0]
+  v.marches = [
+    {
+      kind: 'attack',
+      targetId: target.id,
+      targetLevel: target.level,
+      targetX: target.x,
+      targetY: target.y,
+      // A siege column on the road: rams + catapults in the dispatched subset.
+      units: { ...INITIAL_UNITS, axeman: 4, ram: 2, catapult: 1 },
+      phase: 'outbound',
+      remaining: 33,
+      loot: { wood: D(0), clay: D(0), iron: D(0) },
+    },
+  ]
+  recomputeDerived(s)
+  return s
+}
+
+describe('save — v12 siege units round-trip (M5.3)', () => {
+  it('serialize/deserialize preserves the ram/catapult counts (roster + march)', () => {
+    const state = v12State()
+    const json = serialize(state)
+    const back = deserialize(json)
+
+    expect(back.version).toBe(SAVE_VERSION)
+    expect(back.villages.v0.units.ram).toBe(7)
+    expect(back.villages.v0.units.catapult).toBe(3)
+    const m = back.villages.v0.marches[0]
+    expect(m.units.ram).toBe(2)
+    expect(m.units.catapult).toBe(1)
+    // serialize is idempotent across the round-trip (stable key order, re-tagged).
+    expect(serialize(back)).toBe(json)
+  })
+
+  it('exportSave/importSave round-trips the siege roster byte-identically', () => {
+    const state = v12State()
+    const restored = importSave(exportSave(state))
+    // No migration runs at the current version and the derived fields are already
+    // consistent, so importSave's recompute changes nothing.
+    expect(serialize(restored)).toBe(serialize(state))
+    expect(restored.villages.v0.units.ram).toBe(7)
+    expect(restored.villages.v0.units.catapult).toBe(3)
+    expect(restored.villages.v0.marches[0].units.ram).toBe(2)
+  })
+
+  it('validateState accepts in-band siege counts and rejects a negative / fractional / missing one', () => {
+    const ok = v12State()
+    expect(validateState(ok)).toBe(ok)
+
+    const neg = v12State()
+    neg.villages.v0.units.ram = -1
+    expect(() => validateState(neg)).toThrow()
+
+    const frac = v12State()
+    frac.villages.v0.units.catapult = 1.5
+    expect(() => validateState(frac)).toThrow()
+
+    const missing = v12State()
+    delete (missing.villages.v0.units as { ram?: number }).ram
+    expect(() => validateState(missing)).toThrow()
+
+    const marchMissing = v12State()
+    delete (marchMissing.villages.v0.marches[0].units as { catapult?: number }).catapult
+    expect(() => validateState(marchMissing)).toThrow()
+  })
+})

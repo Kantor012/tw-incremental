@@ -14,8 +14,15 @@ import {
 import { canFound } from '../../systems/villages'
 import { marchTime, stationedUnits, canAttack, canScout } from '../../systems/marches'
 import { unitUnlocked } from '../../systems/recruitment'
-import { armyAttackPower, armyCarry, battleOutcome } from '../../systems/combat'
-import { aggregateTechMods } from '../../systems/tech'
+import {
+  armyAttackPower,
+  armyCarry,
+  battleOutcome,
+  ramDefenseFactor,
+  catapultLevelDamage,
+  CATA_PER_LEVEL,
+} from '../../systems/combat'
+import { effectiveMods } from '../../systems/prestige'
 import type { UiCtx, Panel } from '../types'
 import { h, svg, SVG_NS, unitIcon, shieldIcon } from '../dom'
 // Aliased: the detail card already has a local element named `conquestHint`.
@@ -639,6 +646,17 @@ export function createMapPanel(ctx: UiCtx): Panel {
   forecast.setAttribute('role', 'status')
   forecast.setAttribute('aria-live', 'polite')
   body.appendChild(forecast)
+
+  // Siege effects of the composed army (M5.3), conveyed in WORDS (never colour/glyph
+  // alone) so rams' defence cut and catapults' razing reach AT/colour-blind users. The
+  // catapult clause is computed against THIS camp's real level headroom (clamp >= 1), so a
+  // level-1 camp is told the truth (no drop) instead of the army-wide overstatement.
+  // `hidden` (not just empty) when the army carries no siege, so it leaves the layout and
+  // the accessibility tree entirely; update() fills/toggles it. Mirrors campaign.ts.
+  const siegeNote = h('p', 'map-detail-siege muted')
+  siegeNote.hidden = true
+  body.appendChild(siegeNote)
+
   // update() runs on EVERY store revision (every tick). Re-assigning an aria-live
   // region's textContent re-announces it to assistive tech even when unchanged, so
   // guard the write to fire only on an actual forecast change (the class toggles
@@ -810,9 +828,13 @@ export function createMapPanel(ctx: UiCtx): Panel {
         return
       }
     } else {
-      const target = barbarianTarget(barb.level)
-      const mods = aggregateTechMods(ctx.store.state.tech)
-      const outcome = battleOutcome(armyAttackPower(army, mods), target.defensePower)
+      // Mirror marches.advanceMarches exactly: the camp's base defence is scaled DOWN by
+      // any rams in this stack (ramDefenseFactor, ramless = ×1), and the fight uses the
+      // EFFECTIVE tech × prestige mods the tick resolves with (effectiveMods) — so this
+      // pre-send check can never disagree with the real outcome (or with the „Wyprawy" tab).
+      const mods = effectiveMods(ctx.store.state)
+      const effDef = barbarianTarget(barb.level).defensePower * ramDefenseFactor(army)
+      const outcome = battleOutcome(armyAttackPower(army, mods), effDef)
       if (
         !outcome.attackerWins &&
         !window.confirm(
@@ -844,7 +866,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
     }
     const parsed = Math.floor(Number(scoutInput.value))
     const count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
-    const mods = aggregateTechMods(ctx.store.state.tech)
+    const mods = effectiveMods(ctx.store.state)
     const verdict = canScout(v, world, barb.id, count, mods)
     if (!verdict.ok) {
       scoutMsg.textContent = verdict.reason ?? 'Nie można wysłać zwiadu.'
@@ -1136,9 +1158,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
   const update = (): void => {
     const v = activeVillage()
     const world = ctx.store.state.world
-    // Account-wide tech mods, computed once per frame and threaded into every display
-    // estimate (march time, attack forecast) so what the map shows matches a dispatch.
-    const mods = aggregateTechMods(ctx.store.state.tech)
+    // EFFECTIVE tech × prestige mods — the SAME bag the tick resolves marches/raids with
+    // (engine/tick.ts) and that onAttack/onScout dispatch with (main.ts). Computed once per
+    // frame and threaded into every display estimate (march time, marker progress, the attack
+    // forecast) so what the map shows matches a dispatch — and matches the „Wyprawy" tab.
+    const mods = effectiveMods(ctx.store.state)
 
     rebuildBarbs()
     rebuildPlayers()
@@ -1198,6 +1222,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
     const composed = armySize(army)
     const home = stationedUnits(v)
     const target = barbarianTarget(selected.level)
+    // Siege (M5.3), mirrored from marches.advanceMarches so the card can't disagree with
+    // the engine: rams scale the camp's defence DOWN for the fight (ramFactor; ramless = ×1),
+    // and catapults raze the camp's tier on a WIN (catapultLevelDamage levels, clamp >= 1).
+    const ramFactor = ramDefenseFactor(army)
+    const razeLevels = catapultLevelDamage(army)
 
     nameEl.textContent = selected.name
     levelEl.textContent = 'poz. ' + selected.level
@@ -1218,9 +1247,19 @@ export function createMapPanel(ctx: UiCtx): Panel {
       if (scouted) scoutMsg.textContent = 'Zwiad zakończony — odkryto obronę: ' + selected.name + '.'
     }
     if (scouted) {
-      defVal.textContent = formatInt(target.defensePower)
+      // Show the EFFECTIVE defence after any ram cut (base → reduced), so the number lines
+      // up with the army's attack power and the win/loss verdict below; an AT-only marker
+      // spells out the reduced value (the arrow is a visual shorthand).
+      const base = target.defensePower
+      if (ramFactor < 1) {
+        const eff = Math.round(base * ramFactor)
+        defVal.textContent = formatInt(base) + ' → ' + formatInt(eff)
+        defMark.textContent = ' (po taranach: ' + formatInt(eff) + ')'
+      } else {
+        defVal.textContent = formatInt(base)
+        defMark.textContent = ''
+      }
       defVal.title = ''
-      defMark.textContent = ''
     } else {
       defVal.textContent = UNKNOWN
       defVal.title = 'Wyślij zwiad, aby poznać obronę.'
@@ -1262,7 +1301,9 @@ export function createMapPanel(ctx: UiCtx): Panel {
       setForecast('Wyślij zwiad, aby poznać prognozę bitwy.')
       forecast.classList.remove('forecast-win', 'forecast-lose')
     } else if (composed > 0) {
-      const oc = battleOutcome(armyAttackPower(army, mods), target.defensePower)
+      // EFFECTIVE defence = base × ramFactor (engine mirror): a ram column can flip this
+      // verdict to a win and cut the loss estimate, so the player sees rams pay off.
+      const oc = battleOutcome(armyAttackPower(army, mods), target.defensePower * ramFactor)
       const pct = Math.round(oc.attackerLossFrac * 100)
       setForecast(oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka')
       forecast.classList.toggle('forecast-win', oc.attackerWins)
@@ -1271,6 +1312,34 @@ export function createMapPanel(ctx: UiCtx): Panel {
       setForecast('Wybierz jednostki, aby zobaczyć prognozę.')
       forecast.classList.remove('forecast-win', 'forecast-lose')
     }
+
+    // Siege summary (M5.3): army-side info (no hidden camp stat beyond the always-known
+    // level), so shown even under fog of war. The catapult clause is computed against THIS
+    // camp's real headroom — the clamp >= 1 means a level-1 camp can't be razed, so it is
+    // told so rather than promised a non-existent drop (per-camp accuracy).
+    const siegeParts: string[] = []
+    if (ramFactor < 1) {
+      siegeParts.push('Tarany osłabią obronę obozu o ' + Math.round((1 - ramFactor) * 100) + '%.')
+    }
+    if (army.catapult > 0) {
+      const actualDrop = razeLevels > 0 ? Math.min(razeLevels, selected.level - 1) : 0
+      if (actualDrop > 0) {
+        siegeParts.push(
+          'Po wygranym ataku katapulty obniżą poziom obozu o ' +
+            actualDrop +
+            ' (mniejszy przyszły łup).',
+        )
+      } else if (razeLevels === 0) {
+        siegeParts.push(
+          'Za mało katapult, by obniżyć poziom obozu (potrzeba ' + CATA_PER_LEVEL + ' na poziom).',
+        )
+      } else {
+        siegeParts.push('Obóz jest na najniższym poziomie — katapulty go nie obniżą.')
+      }
+    }
+    const siegeText = siegeParts.join(' ')
+    siegeNote.textContent = siegeText
+    siegeNote.hidden = siegeText.length === 0
 
     // Composer availability + clamp any over-cap entry down to the garrison.
     for (const id of ATTACK_UNIT_IDS) {

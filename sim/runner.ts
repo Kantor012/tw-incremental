@@ -36,6 +36,9 @@ import {
   checkWallMitigation,
   checkScoutReveals,
   checkM52Determinism,
+  checkRamCracks,
+  checkCatapultRazes,
+  checkM53Determinism,
   checkTechTree,
   checkTechState,
   checkPrestigeTree,
@@ -798,6 +801,18 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkWallMitigation(seed))
   invariants.push(checkScoutReveals(seed))
   invariants.push(checkM52Determinism(seed, OFFLINE_CHECK_SECONDS))
+
+  // M5.3 siege (ram + catapult) — three deterministic proof-of-mechanic checks (no bot, no RNG).
+  // The MAIN run above is untouched (the bot never fields siege: it is academy-gated and never
+  // the cheapest recruit, and auto-attack explicitly excludes ram/catapult), so the 17 balance
+  // goals stay measured on the pre-M5.3 path. These assert: a ram column cracks a camp the same
+  // ramless army cannot beat — purely via the lowered effective defence (ram-cracks); a won
+  // catapult attack permanently lowers the camp's level with a >= 1 clamp, while a catapult-less
+  // win and a loss leave it intact (catapult-razes); and a wall-cracking + level-razing siege
+  // march replays byte-identically online vs chunked-offline (m53-determinism).
+  invariants.push(checkRamCracks(seed))
+  invariants.push(checkCatapultRazes(seed))
+  invariants.push(checkM53Determinism(seed, OFFLINE_CHECK_SECONDS))
 
   const metrics = collect(
     seed,

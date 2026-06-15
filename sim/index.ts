@@ -374,6 +374,26 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M5.3 siege (ram + catapult) coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M5.3 siege: ram + catapult (coverage) ---')
+  const m53Names = ['ram-cracks', 'catapult-razes', 'm53-determinism']
+  for (const r of results) {
+    const line = m53Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface the detail of each so a passing ram/catapult check is visible, not just the count.
+    for (const name of m53Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {

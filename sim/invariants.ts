@@ -14,7 +14,7 @@ import {
 } from '../src/engine/state'
 import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
-import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
+import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS, TECH_ROOTS } from '../src/content/tech'
 import {
   PRESTIGE_NODES,
@@ -24,6 +24,12 @@ import {
 } from '../src/content/prestige'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack, sendScout } from '../src/systems/marches'
+import {
+  armyAttackPower,
+  battleOutcome,
+  ramDefenseFactor,
+  catapultLevelDamage,
+} from '../src/systems/combat'
 import { advanceRaids } from '../src/systems/raids'
 import { villageDefenseMult } from '../src/systems/buildings'
 import { WORLD_SIZE } from '../src/systems/world'
@@ -1388,5 +1394,314 @@ export function checkM52Determinism(seed: string, seconds: number): InvariantRes
     detail: ok
       ? undefined
       : 'chunked offline catch-up diverged from a single-step simulate WITH a wall + scout march in flight',
+  }
+}
+
+// --- M5.3 siege (ram + catapult) coverage -------------------------------------------------
+//
+// Three deterministic proof-of-mechanic checks for the M5.3 siege engines, mirroring the M5.2
+// wall/scout coverage. All are pure functions of a freshly seeded scenario (no bot, no clock,
+// no RNG) so a regression that breaks the ram's wall-cracking, the catapult's permanent level
+// razing, or the offline/online parity WITH a siege march in flight is a hard failure that
+// blocks the commit. The MAIN run is untouched (the bot never fields siege — it is gated behind
+// the academy and is never the cheapest recruit, and auto-attack explicitly excludes ram /
+// catapult), so the 17 balance goals stay measured on the pre-M5.3 path; the siege paths are
+// exercised here instead.
+
+/** A fresh complete zero roster (every UnitId present) for the siege coverage scenarios. */
+function zeroArmy(): Record<UnitId, number> {
+  const r = {} as Record<UnitId, number>
+  for (const id of UNIT_IDS) r[id] = 0
+  return r
+}
+
+/** Camp tier the ram-crack scenario assaults — high enough that the win band below is wide. */
+const RAM_CRACK_LEVEL = 13
+/** Rams fielded by the crack scenario: ramDefenseFactor(25) = 1 − 25·0.02 = 0.5 (−50% wall). */
+const RAM_CRACK_RAMS = 25
+/** Horizon (game-seconds) a siege attack is simulated for — well past a tier-13 round trip. */
+const SIEGE_HORIZON = 6000
+
+/**
+ * Resolve a single siege attack carrying `army` at a camp of tier `level` through the REAL
+ * engine ({@link sendAttack} + {@link simulate}), on a fresh seeded capital with raids frozen
+ * out so the ONLY battle report is this attack. Returns whether the engine resolved a WIN and
+ * the live target's camp level before dispatch / after the dust settles — so the ram check can
+ * read `won` and the catapult check can read the `before -> after` level delta off the very
+ * same path the player would drive. Units are seeded directly (bypassing recruitment), so the
+ * scenario does not depend on prices; the academy/barracks are set only so the dispatch gate
+ * (canAttack) passes. Pure / deterministic — no bot, no RNG.
+ */
+function resolveSiegeAttack(
+  seed: string,
+  level: number,
+  army: Record<UnitId, number>,
+): { won: boolean; before: number; after: number; sane: boolean; sanity?: string } {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.barracks = 1
+  v.buildings.academy = 1 // the siege gate (units seeded directly, but keep the scenario honest)
+  recomputeDerived(state)
+  v.resources = { wood: D(1e7), clay: D(1e7), iron: D(1e7) }
+  v.popCap = D(1e5)
+  v.raidTimer = 1e9 // freeze raids so the only report is this attack
+  for (const id of UNIT_IDS) v.units[id] = army[id] ?? 0
+
+  const target = targetOfLevel(state.world, level)
+  const before = target.level
+  const logBefore = state.battleLog.length
+  const dispatched = sendAttack(v, state.world, state.battleLog, target.id, army)
+  if (dispatched) simulate(state, SIEGE_HORIZON)
+
+  let sawAttack = false
+  let lastWon = false
+  for (const rep of state.battleLog.slice(logBefore)) {
+    if (rep.kind === 'attack') {
+      sawAttack = true
+      lastWon = rep.won
+    }
+  }
+
+  // State sanity AFTER the siege path ran (no NaN / negative loot, books balance, camp level in
+  // range): the siege code (ram reduction, catapult raze + clamp, loot haul) must never strand
+  // the state. Cheap to assert here so a regression surfaces on the siege-exercised state itself,
+  // not just the bot-driven main run (which never fields siege).
+  const sanity: string[] = []
+  for (const r of RESOURCE_IDS) {
+    const res = v.resources[r]
+    if (!isFiniteDecimal(res) || res.lt(0) || res.gt(v.storageCap)) sanity.push(`capital.${r}=${res.toString()}`)
+  }
+  if (!Number.isInteger(target.level) || target.level < 1 || target.level > MAX_TARGET_LEVEL) {
+    sanity.push(`camp level out of range: ${target.level}`)
+  }
+  const army0 = checkArmyConsistency(state)
+  if (!army0.ok) sanity.push(`army-consistency: ${army0.detail ?? 'failed'}`)
+
+  // target is the LIVE world object the engine mutates in place, so its level now reflects any
+  // catapult razing applied at resolution.
+  return {
+    won: dispatched && sawAttack && lastWon,
+    before,
+    after: target.level,
+    sane: sanity.length === 0,
+    sanity: sanity.length ? sanity.join('; ') : undefined,
+  }
+}
+
+/**
+ * TARAN cracks a wall (M5.3): an attack carrying rams beats a camp that the SAME army WITHOUT
+ * rams cannot, purely because the rams lower the camp's EFFECTIVE defence
+ * ({@link ramDefenseFactor}). Builds an axeman core sized so its attack power — even with the
+ * rams' own (small) attack ADDED — stays at or below the camp's FULL wall, so the only thing
+ * that can flip a loss into a win is the defence reduction, not the rams' attack. Then asserts,
+ * both as a pure deterministic {@link battleOutcome} comparison AND through the real engine:
+ *
+ *  - the ram factor genuinely lowers the wall (effDef < fullDef), AND
+ *  - the ramless core LOSES at full defence (battleOutcome attackerWins false), AND
+ *  - the ram column would STILL lose at full defence (isolation: its win is not its attack), AND
+ *  - the ram column WINS once the wall is reduced (battleOutcome attackerWins true), AND
+ *  - the engine resolves a WON attack for the ram column but a LOST one for the ramless core.
+ *
+ * Value-driven: the band is derived from the LIVE camp defence, so a Balance retune of the
+ * camp / ram curves still passes as long as a ram column genuinely cracks a wall the ramless
+ * army can't. Pure / deterministic — no bot, no RNG.
+ */
+export function checkRamCracks(seed: string): InvariantResult {
+  const issues: string[] = []
+
+  const ref = createInitialState(seed, 0)
+  const target = targetOfLevel(ref.world, RAM_CRACK_LEVEL)
+  const fullDef = barbarianTarget(target.level).defensePower
+  const axeAtk = UNITS.axeman.attack
+  const ramAtk = UNITS.ram.attack
+
+  // core·axeAtk + RAM_CRACK_RAMS·ramAtk <= fullDef  ⇒  even the ram stack loses at FULL defence,
+  // so a win can only come from the wall reduction. Math.max guards a (here-impossible) tiny camp.
+  const core = Math.max(1, Math.floor((fullDef - RAM_CRACK_RAMS * ramAtk) / axeAtk))
+  const ramArmy = zeroArmy()
+  ramArmy.axeman = core
+  ramArmy.ram = RAM_CRACK_RAMS
+  const coreArmy = zeroArmy()
+  coreArmy.axeman = core
+
+  const factor = ramDefenseFactor(ramArmy)
+  const effDef = fullDef * factor
+
+  // Pure deterministic effDef proof (RNG-free, mirrors the engine's resolution arithmetic).
+  const ramlessWinsFull = battleOutcome(armyAttackPower(coreArmy), fullDef).attackerWins
+  const ramWinsFull = battleOutcome(armyAttackPower(ramArmy), fullDef).attackerWins
+  const ramWinsReduced = battleOutcome(armyAttackPower(ramArmy), effDef).attackerWins
+  if (!(factor < 1 && effDef < fullDef)) {
+    issues.push(`ram factor did not lower the wall (effDef ${effDef} !< fullDef ${fullDef})`)
+  }
+  if (ramlessWinsFull) issues.push('ramless core unexpectedly beat the full wall')
+  if (ramWinsFull) issues.push('ram column would win at full defence too — win not attributable to the wall reduction')
+  if (!ramWinsReduced) issues.push('ram column did not crack the reduced wall')
+
+  // Engine proof: the SAME two armies, resolved through sendAttack + simulate.
+  const engineRam = resolveSiegeAttack(seed, RAM_CRACK_LEVEL, ramArmy)
+  const engineCore = resolveSiegeAttack(seed, RAM_CRACK_LEVEL, coreArmy)
+  if (!engineRam.won) issues.push('engine: ram column failed to take the camp')
+  if (engineCore.won) issues.push('engine: ramless core unexpectedly took the camp')
+  if (!engineRam.sane) issues.push(`ram-column state unsound: ${engineRam.sanity}`)
+  if (!engineCore.sane) issues.push(`ramless-core state unsound: ${engineCore.sanity}`)
+
+  return {
+    name: 'ram-cracks',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `${core} axemen + ${RAM_CRACK_RAMS} rams cracked tier-${target.level} (wall ${fullDef} -> ${Math.round(effDef)}); same army ramless loses`
+        : issues.join('; '),
+  }
+}
+
+/** Camp tier razed (well above 1 so before > after is unambiguous). */
+const CATA_RAZE_LEVEL = 10
+/** Catapults that raze the tier above: floor(10 / CATA_PER_LEVEL=5) = 2 levels (< the cap). */
+const CATA_RAZE_CATS = 10
+/** Low camp + an OVER-cap catapult column to drive the >= 1 clamp (raw damage would go below 1). */
+const CATA_CLAMP_LEVEL = 2
+/** floor(20 / 5) = 4 → capped at CATA_MAX_LEVELS = 3 → level 2 − 3 = −1 → clamped to 1. */
+const CATA_CLAMP_CATS = 20
+/** A winning core that beats every tier used here with room to spare (100·40 = 4000 attack). */
+const CATA_WIN_CORE = 100
+
+/**
+ * KATAPULTA razes a camp (M5.3): a WON attack carrying catapults PERMANENTLY lowers the live
+ * target's camp level by {@link catapultLevelDamage}, clamped to >= 1 (never razed out of
+ * existence), while a catapult-LESS win and a LOST attack leave the level untouched. Drives
+ * four real-engine scenarios through {@link resolveSiegeAttack} and asserts:
+ *
+ *  - RAZE:  a won catapult attack on a tier-{@link CATA_RAZE_LEVEL} camp drops its level by
+ *           exactly catapultLevelDamage(catapults) (before > after), AND
+ *  - CLAMP: an over-cap catapult column on a low camp lands the level at exactly 1 (never < 1)
+ *           even though the raw damage would push it below, AND
+ *  - CONTROL (no raze on a catapult-less win): an identical winning army with NO catapults
+ *           leaves the camp level unchanged, AND
+ *  - CONTROL (no raze on a loss): an attack that LOSES leaves the level unchanged (razing is
+ *           win-only).
+ *
+ * Value-driven (the expected drop is read from {@link catapultLevelDamage}, not hard-coded), so
+ * a Balance retune of CATA_PER_LEVEL / CATA_MAX_LEVELS still passes. Pure / deterministic.
+ */
+export function checkCatapultRazes(seed: string): InvariantResult {
+  const issues: string[] = []
+
+  const dmg = catapultLevelDamage({ ...zeroArmy(), catapult: CATA_RAZE_CATS })
+
+  // RAZE: a won catapult attack lowers the camp level by exactly `dmg`.
+  const razeArmy = zeroArmy()
+  razeArmy.axeman = CATA_WIN_CORE
+  razeArmy.catapult = CATA_RAZE_CATS
+  const raze = resolveSiegeAttack(seed, CATA_RAZE_LEVEL, razeArmy)
+  if (!raze.won) issues.push('catapult attack did not win (a loss cannot raze)')
+  if (!(raze.before > raze.after)) issues.push(`raze did not lower the level (${raze.before} -> ${raze.after})`)
+  if (raze.after !== raze.before - dmg) {
+    issues.push(`razed ${raze.before - raze.after} levels, expected ${dmg}`)
+  }
+
+  // CLAMP: an over-cap column on a low camp lands at exactly 1, never below.
+  const clampArmy = zeroArmy()
+  clampArmy.axeman = CATA_WIN_CORE
+  clampArmy.catapult = CATA_CLAMP_CATS
+  const clamp = resolveSiegeAttack(seed, CATA_CLAMP_LEVEL, clampArmy)
+  if (!clamp.won) issues.push('clamp scenario did not win')
+  if (clamp.after < 1) issues.push(`camp razed below 1 (level ${clamp.after}) — clamp failed`)
+  if (clamp.after !== 1) issues.push(`clamp expected level 1, got ${clamp.after}`)
+  if (!(clamp.before > clamp.after)) issues.push('clamp scenario did not lower the level')
+
+  // CONTROL: an identical WIN with no catapults must NOT raze.
+  const noCatArmy = zeroArmy()
+  noCatArmy.axeman = CATA_WIN_CORE
+  const noCat = resolveSiegeAttack(seed, CATA_RAZE_LEVEL, noCatArmy)
+  if (!noCat.won) issues.push('catapult-less control did not win')
+  if (noCat.after !== noCat.before) issues.push(`a catapult-less win changed the level (${noCat.before} -> ${noCat.after})`)
+
+  // CONTROL: a LOSS (catapults alone, far too weak) must NOT raze.
+  const lossArmy = zeroArmy()
+  lossArmy.catapult = CATA_RAZE_CATS
+  const loss = resolveSiegeAttack(seed, CATA_RAZE_LEVEL, lossArmy)
+  if (loss.won) issues.push('loss control unexpectedly won')
+  if (loss.after !== loss.before) issues.push(`a LOST attack razed the level (${loss.before} -> ${loss.after})`)
+
+  // No scenario may leave the state unsound (NaN / negative / over-cap loot, unbalanced army,
+  // or a camp level driven out of range by the raze/clamp).
+  for (const [label, res] of [
+    ['raze', raze],
+    ['clamp', clamp],
+    ['no-catapult', noCat],
+    ['loss', loss],
+  ] as const) {
+    if (!res.sane) issues.push(`${label} state unsound: ${res.sanity}`)
+  }
+
+  return {
+    name: 'catapult-razes',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `won attack razed tier ${raze.before} -> ${raze.after} (−${dmg}); clamp held at ${clamp.after}; catapult-less/lost attacks left the level intact`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Put a fresh state into the M5.3 siege offline-parity scenario: a barracks + academy standing,
+ * a mixed home garrison (so raids fire across the span), AND an in-flight SIEGE attack carrying
+ * BOTH rams and catapults at a mid-tier camp whose round trip fits the offline window — so the
+ * ram wall-crack at resolution AND the catapult level-raze cross the offline/online boundary.
+ * Applied identically to both branches of {@link checkM53Determinism}, so the only thing it can
+ * reveal is a genuine siege online-vs-offline split. Mirrors {@link seedM52}'s discipline.
+ */
+function seedM53(state: GameState): void {
+  const v = firstVillage(state)
+  v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  v.buildings.barracks = 1
+  v.buildings.academy = 1
+  recomputeDerived(state)
+  v.popCap = D(1000)
+  v.units.spearman = 20
+  v.units.axeman = 60
+  v.units.ram = 15
+  v.units.catapult = 10
+  // In-flight siege at the nearest mid-tier camp: rams crack its wall and catapults raze its
+  // level at resolution — both must replay identically whether the span is one step or many.
+  const army = zeroArmy()
+  army.axeman = 40
+  army.ram = 15
+  army.catapult = 10
+  sendAttack(v, state.world, state.battleLog, targetOfLevel(state.world, 5).id, army)
+}
+
+/**
+ * M5.3 offline/online parity: crediting a span as one big {@link simulate} (online catch-up)
+ * must be byte-identical to the chunked offline path ({@link applyOffline}) WITH a siege march
+ * (rams + catapults) in flight. Mirrors {@link checkM52Determinism} but seeds {@link seedM53},
+ * so the ram wall-reduction AND the catapult level-raze (a permanent world mutation) are
+ * exercised in BOTH branches and proven to replay identically — the determinism the brief
+ * requires for the new mechanics. `seconds` stays within
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller uses an hour, ample
+ * for the tier-5 round trip to resolve in both branches).
+ */
+export function checkM53Determinism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedM53(big)
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedM53(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const a = serialize(big)
+  const b = serialize(chunked)
+  const ok = a === b
+  return {
+    name: 'm53-determinism',
+    ok,
+    detail: ok
+      ? undefined
+      : 'chunked offline catch-up diverged from a single-step simulate WITH a siege march (rams + catapults) in flight',
   }
 }

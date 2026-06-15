@@ -155,7 +155,9 @@ function hasMarchTo(v: Village, id: string): boolean {
 
 /**
  * AUTO-ATTACK once: send the village's whole IDLE COMBAT army (everything at home
- * MINUS nobles — conquest stays manual — and scouts — recon-only, attack 0/no loot)
+ * MINUS nobles — conquest stays manual —, scouts — recon-only, attack 0/no loot — and
+ * siege units — ram/catapult are a manual, target-specific decision, excluded
+ * data-driven via {@link UnitDef.siege})
  * at the NEAREST barbarian it is WIN-SAFE
  * against and has no march already flying at. "Nearest" is Euclidean with the id
  * index as a deterministic tiebreaker ({@link targetsByDistance}); "win-safe" means
@@ -164,7 +166,7 @@ function hasMarchTo(v: Village, id: string): boolean {
  * floor, at least one unit survives to march home — so the routine never trades the
  * army for a victory it can't carry back. Returns true iff an attack was dispatched.
  *
- * NEVER sends nobles or scouts. Self-limiting: the dispatched army moves into `v.marches`, so
+ * NEVER sends nobles, scouts or siege. Self-limiting: the dispatched army moves into `v.marches`, so
  * {@link stationedUnits} no longer counts it and the target gets a march — the same
  * stack is never re-sent until it returns. A no-op (false) when there is no idle
  * combat army or no reachable beatable target.
@@ -175,12 +177,17 @@ export function autoAttackOnce(
   log: BattleReport[],
   mods: TechModifiers = NO_TECH_MODS,
 ): boolean {
-  // Idle combat army = units at home (roster − marches), nobles AND scouts zeroed
-  // out: nobles stay manual (conquest) and scouts are recon-only (attack 0, no loot,
-  // they must never be fed into a fight), so neither belongs in an auto-attack stack.
+  // Idle combat army = units at home (roster − marches), with nobles, scouts AND
+  // siege zeroed out: nobles stay manual (conquest), scouts are recon-only (attack 0,
+  // no loot, they must never be fed into a fight) and siege (ram/catapult) is a
+  // deliberate, target-specific play (a ram only earns its keep cracking a stronger
+  // camp's defence; a catapult is spent to permanently raze a camp's level), so none
+  // of them belongs in the idle auto-attack stack. Siege is excluded data-driven via
+  // UnitDef.siege, so any future siege unit auto-drops from auto-attack with no edit.
   const idle = stationedUnits(v)
   idle.noble = 0
   idle.scout = 0
+  for (const id of UNIT_IDS) if (UNITS[id].siege) idle[id] = 0
   let total = 0
   for (const id of UNIT_IDS) total += idle[id]
   if (total <= 0) return false

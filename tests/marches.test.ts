@@ -20,6 +20,8 @@ import {
   canScout,
 } from '../src/systems/marches'
 import { barbarianById } from '../src/systems/world'
+import { armyAttackPower, ramDefenseFactor } from '../src/systems/combat'
+import { barbarianTarget } from '../src/content/barbarians'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
 import { serialize } from '../src/engine/save'
@@ -31,8 +33,10 @@ function army(
   axeman = 0,
   noble = 0,
   scout = 0,
+  ram = 0,
+  catapult = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
 }
 
 /** A barbarian village descriptor at a chosen tier and map position (full loyalty, unscouted). */
@@ -475,5 +479,120 @@ describe('advanceMarches — scout cycle (M5.2)', () => {
     expect(v.marches.length).toBe(0)
     expect(v.units.scout).toBe(2) // all scouts safely home
     expect(s.battleLog.length).toBe(0)
+  })
+})
+
+describe('advanceMarches — ram role (M5.3 siege)', () => {
+  it('rams crack a camp an equal-power ramless army loses to (effective defence cut)', () => {
+    const L = 9 // a high wall the bare combat power cannot clear unaided
+    const D = barbarianTarget(L).defensePower
+    const ramless = army(0, 0, 6) // 6 axemen
+    const rammed = army(0, 0, 2, 0, 0, 20) // 2 axemen + 20 rams — SAME raw attack power
+    // The ONLY difference between the two stacks is the ram column, not the raw power.
+    expect(armyAttackPower(rammed)).toBe(armyAttackPower(ramless))
+    // Tuning guard: the shared power LOSES to the full wall but BEATS the ram-cut wall —
+    // so the verdict difference can only come from ramDefenseFactor.
+    expect(armyAttackPower(ramless)).toBeLessThan(D)
+    expect(armyAttackPower(rammed)).toBeGreaterThan(D * ramDefenseFactor(rammed))
+
+    // Ramless attack → loss (the camp's full wall stands).
+    const lose = armed('ram-lose')
+    const lv = lose.villages.v0
+    lose.world = { barbarians: [barb('b0', L, lv.x + 3, lv.y)] }
+    lv.units = ramless
+    sendAttack(lv, lose.world, lose.battleLog, 'b0', ramless)
+    advanceMarches(lv, lose.world, lose.battleLog, 1000)
+    expect(lose.battleLog[0]).toMatchObject({ kind: 'attack', won: false })
+
+    // Same-power attack WITH rams → win: the rams cut the wall below the army's power.
+    const win = armed('ram-win')
+    const wv = win.villages.v0
+    win.world = { barbarians: [barb('b0', L, wv.x + 3, wv.y)] }
+    wv.units = rammed
+    sendAttack(wv, win.world, win.battleLog, 'b0', rammed)
+    advanceMarches(wv, win.world, win.battleLog, 1000)
+    expect(win.battleLog[0]).toMatchObject({ kind: 'attack', won: true })
+    // Rams never raze: the cracked camp keeps its level (that is the catapult's job).
+    expect(barbarianById(win.world, 'b0')!.level).toBe(L)
+  })
+})
+
+describe('advanceMarches — catapult role (M5.3 siege)', () => {
+  it('a won attack with catapults permanently lowers the camp level (snapshot tier intact)', () => {
+    const L = 5
+    const s = armed('cata-win')
+    const v = s.villages.v0
+    s.world = { barbarians: [barb('b0', L, v.x + 3, v.y)] }
+    v.units = army(0, 0, 10, 0, 0, 0, 5) // 10 axemen (the win) + 5 catapults (one level razed)
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10, 0, 0, 0, 5))
+    advanceMarches(v, s.world, s.battleLog, 1000)
+    expect(s.battleLog[0]).toMatchObject({ kind: 'attack', won: true })
+    // 5 catapults → floor(5/5)=1 level razed: the LIVE camp drops 5 → 4.
+    expect(barbarianById(s.world, 'b0')!.level).toBe(L - 1)
+    // The SNAPSHOT tier (this battle's loot/losses) is untouched — the report still
+    // reads the tier captured at dispatch, not the just-lowered live level.
+    expect(s.battleLog[0]).toMatchObject({ targetLevel: L })
+  })
+
+  it('never razes a camp below level 1 (clamp)', () => {
+    const s = armed('cata-clamp') // b0 is a level-1 camp
+    const v = s.villages.v0
+    expect(barbarianById(s.world, 'b0')!.level).toBe(1)
+    v.units = army(0, 0, 10, 0, 0, 0, 15) // 15 catapults → 3 levels (capped), but level floors at 1
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10, 0, 0, 0, 15))
+    advanceMarches(v, s.world, s.battleLog, 1000)
+    expect(s.battleLog[0]).toMatchObject({ won: true })
+    expect(barbarianById(s.world, 'b0')!.level).toBe(1) // max(1, 1 - 3) = 1
+  })
+
+  it('an attack WITHOUT catapults leaves the camp level unchanged', () => {
+    const L = 5
+    const s = armed('cata-none')
+    const v = s.villages.v0
+    s.world = { barbarians: [barb('b0', L, v.x + 3, v.y)] }
+    v.units = army(0, 0, 10) // wins, but no siege → no razing
+    sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10))
+    advanceMarches(v, s.world, s.battleLog, 1000)
+    expect(s.battleLog[0]).toMatchObject({ won: true })
+    expect(barbarianById(s.world, 'b0')!.level).toBe(L)
+  })
+
+  it('a LOST attack with catapults does NOT lower the camp level', () => {
+    const L = 9
+    const s = armed('cata-loss')
+    const v = s.villages.v0
+    s.world = { barbarians: [barb('b0', L, v.x + 3, v.y)] }
+    v.units = army(1, 0, 0, 0, 0, 0, 5) // far too weak to win, even with the catapults
+    sendAttack(v, s.world, s.battleLog, 'b0', army(1, 0, 0, 0, 0, 0, 5))
+    advanceMarches(v, s.world, s.battleLog, 1000)
+    expect(s.battleLog[0]).toMatchObject({ won: false })
+    expect(barbarianById(s.world, 'b0')!.level).toBe(L) // razing only happens on a win
+  })
+})
+
+describe('determinism — a siege march replays identically (M5.3)', () => {
+  it('one big simulate() equals the chunked offline path with rams + catapults in flight', () => {
+    const withSiege = (seed: string): GameState => {
+      const s = armed(seed)
+      const v = s.villages.v0
+      s.world = { barbarians: [barb('b0', 5, v.x + 3, v.y)] }
+      v.units = army(0, 0, 10, 0, 0, 4, 5) // axemen + rams + catapults
+      sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10, 0, 0, 4, 5))
+      return s
+    }
+
+    const seconds = 300 // > full cycle (out 90 + return 90), < raid interval (900)
+    const big = withSiege('siege-det')
+    simulate(big, seconds)
+    big.lastSeen = seconds * 1000 // mirror applyOffline's bookkeeping
+
+    const chunked = withSiege('siege-det')
+    applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+    // The serialized state INCLUDES the world (barb.level), so byte-equality proves the
+    // catapult razing happened at the same deterministic moment online and offline.
+    expect(serialize(big)).toBe(serialize(chunked))
+    expect(big.world.barbarians.find((b) => b.id === 'b0')!.level).toBe(4) // 5 catapults → -1
+    expect(big.villages.v0.marches.length).toBe(0)
   })
 })

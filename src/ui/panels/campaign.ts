@@ -3,13 +3,21 @@ import { D } from '../../engine/decimal'
 import { formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
 import { barbarianTarget } from '../../content/barbarians'
-import { armyAttackPower, armyDefensePower, armyCarry, battleOutcome } from '../../systems/combat'
+import {
+  armyAttackPower,
+  armyDefensePower,
+  armyCarry,
+  battleOutcome,
+  ramDefenseFactor,
+  catapultLevelDamage,
+  CATA_PER_LEVEL,
+} from '../../systems/combat'
 import { villageDefenseMult } from '../../systems/buildings'
 import { stationedUnits, marchTime, canAttack, canScout } from '../../systems/marches'
 import { targetsByDistance, distance, barbarianById } from '../../systems/world'
 import { raidPower } from '../../systems/raids'
 import { barracksUnlocked, unitUnlocked } from '../../systems/recruitment'
-import { aggregateTechMods } from '../../systems/tech'
+import { effectiveMods } from '../../systems/prestige'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon } from '../dom'
 import { conquestHint } from '../conquestCopy'
@@ -72,6 +80,8 @@ interface TargetCard {
   lootMark: HTMLElement
   march: HTMLElement
   forecast: HTMLElement
+  /** Siege effects of the composed army in WORDS (M5.3); `hidden` when the army has none. */
+  siegeNote: HTMLElement
   button: HTMLButtonElement
   /** „Zwiad" dispatch (recon) — sends the shared scout count at this camp. */
   scoutBtn: HTMLButtonElement
@@ -355,6 +365,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       loyaltyWrap.appendChild(loyaltyLabel)
       loyaltyWrap.appendChild(loyaltyBar)
 
+      // Siege effects of the composed army (M5.3), conveyed in WORDS (never colour/glyph
+      // alone) so rams' defence cut and catapults' razing reach AT/colour-blind users.
+      // `hidden` (not just empty) when the army carries no siege, so it leaves the
+      // accessibility tree and the layout entirely; pokeTargets fills/toggles it.
+      const siegeNote = h('p', 'target-siege muted')
+      siegeNote.hidden = true
+
       const bottom = h('div', 'target-bottom')
       const forecast = h('span', 'target-forecast')
       // „Zwiad" (recon) button — dispatches the SHARED scout count at this camp (M5.2).
@@ -368,7 +385,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         const world = ctx.store.state.world
         const parsed = Math.floor(Number(scoutCountInput.value))
         const count = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
-        const verdict = canScout(cv, world, barb.id, count, aggregateTechMods(ctx.store.state.tech))
+        const verdict = canScout(cv, world, barb.id, count, effectiveMods(ctx.store.state))
         if (!verdict.ok) {
           scoutMsg.textContent = verdict.reason ?? 'Nie można wysłać zwiadu.'
           update()
@@ -410,10 +427,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
             return
           }
         } else {
-          const outcome = battleOutcome(
-            armyAttackPower(army, aggregateTechMods(ctx.store.state.tech)),
-            barbarianTarget(barb.level).defensePower,
-          )
+          // Mirror marches.advanceMarches exactly: the camp's base defence is scaled DOWN
+          // by any rams in this stack (ramDefenseFactor, ramless = ×1), and the fight uses
+          // the EFFECTIVE tech × prestige mods the tick resolves with (effectiveMods) — so
+          // this pre-send check can never disagree with the real outcome.
+          const mods = effectiveMods(ctx.store.state)
+          const effDef = barbarianTarget(barb.level).defensePower * ramDefenseFactor(army)
+          const outcome = battleOutcome(armyAttackPower(army, mods), effDef)
           // Guard against accidentally throwing the whole army at a camp it will lose to.
           if (
             !outcome.attackerWins &&
@@ -440,6 +460,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       row.appendChild(head)
       row.appendChild(statsLine)
       row.appendChild(loyaltyWrap)
+      row.appendChild(siegeNote)
       row.appendChild(bottom)
       targetList.appendChild(row)
       targetCards.push({
@@ -450,6 +471,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         lootMark,
         march,
         forecast,
+        siegeNote,
         button,
         scoutBtn,
         loyalty,
@@ -471,6 +493,18 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   ): void => {
     const carry = armyCarry(army)
     const atkPow = armyAttackPower(army, mods)
+    // Siege (M5.3), mirrored from marches.advanceMarches so the forecast can't disagree
+    // with the engine: rams scale the camp's defence DOWN for the fight (ramDefenseFactor;
+    // ramless = ×1), and catapults raze the camp's tier on a WIN (catapultLevelDamage
+    // levels). Both are army-wide (identical for every card), so they're computed once.
+    const ramFactor = ramDefenseFactor(army)
+    const razeLevels = catapultLevelDamage(army)
+    // Ram clause: army-global (the cut depends only on the composed rams), so computed once.
+    const ramPart =
+      ramFactor < 1
+        ? 'Tarany osłabią obronę obozu o ' + Math.round((1 - ramFactor) * 100) + '%.'
+        : ''
+    const hasCatapults = army.catapult > 0
     for (const card of targetCards) {
       const lvl = card.barb.level
       const scouted = card.barb.scouted
@@ -491,16 +525,28 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         card.forecast.textContent = 'zbadaj zwiadem'
         card.forecast.classList.remove('forecast-win', 'forecast-lose')
       } else {
-        card.defense.textContent = formatInt(barbarianTarget(lvl).defensePower)
+        // Show the EFFECTIVE defence after any ram cut (base → reduced) so the number lines
+        // up with the army's attack power and the win verdict below; an AT-only marker spells
+        // out the reduced value (the arrow is a visual shorthand).
+        const base = barbarianTarget(lvl).defensePower
+        if (ramFactor < 1) {
+          const eff = Math.round(base * ramFactor)
+          card.defense.textContent = formatInt(base) + ' → ' + formatInt(eff)
+          card.defenseMark.textContent = ' (po taranach: ' + formatInt(eff) + ')'
+        } else {
+          card.defense.textContent = formatInt(base)
+          card.defenseMark.textContent = ''
+        }
         card.defense.title = ''
-        card.defenseMark.textContent = ''
         const total = campTotalLoot(lvl)
         if (composed > 0) {
           // Haul = min(army carry, total camp loot) — the exact sum computeLoot lands.
           const cd = D(carry)
           const haul = cd.lt(total) ? cd : total
           card.loot.textContent = formatInt(haul)
-          const oc = battleOutcome(atkPow, barbarianTarget(lvl).defensePower)
+          // EFFECTIVE defence = base × ramDefenseFactor (engine mirror): a ram column can
+          // flip this verdict to a win and cut the loss estimate, so the player sees rams pay off.
+          const oc = battleOutcome(atkPow, barbarianTarget(lvl).defensePower * ramFactor)
           const pct = Math.round(oc.attackerLossFrac * 100)
           card.forecast.textContent = oc.attackerWins
             ? '✓ wygrana · straty ~' + pct + '%'
@@ -515,6 +561,32 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         card.loot.title = ''
         card.lootMark.textContent = ''
       }
+
+      // Siege summary (M5.3): army-side info (the camp's level is always known), so shown
+      // even under fog of war. The catapult clause is computed against THIS camp's real
+      // headroom — the clamp >= 1 (marches.ts) means a level-1 camp can't be razed, so it is
+      // told so rather than promised a non-existent drop (per-card accuracy).
+      const siegeParts: string[] = []
+      if (ramPart) siegeParts.push(ramPart)
+      if (hasCatapults) {
+        const actualDrop = razeLevels > 0 ? Math.min(razeLevels, lvl - 1) : 0
+        if (actualDrop > 0) {
+          siegeParts.push(
+            'Po wygranym ataku katapulty obniżą poziom obozu o ' +
+              actualDrop +
+              ' (mniejszy przyszły łup).',
+          )
+        } else if (razeLevels === 0) {
+          siegeParts.push(
+            'Za mało katapult, by obniżyć poziom obozu (potrzeba ' + CATA_PER_LEVEL + ' na poziom).',
+          )
+        } else {
+          siegeParts.push('Obóz jest na najniższym poziomie — katapulty go nie obniżą.')
+        }
+      }
+      const siegeText = siegeParts.join(' ')
+      card.siegeNote.textContent = siegeText
+      card.siegeNote.hidden = siegeText.length === 0
 
       const verdict = canAttack(v, card.barb, army)
       card.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
@@ -595,9 +667,11 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     const army = readArmy(v)
     const composed = armySize(army)
     const carry = armyCarry(army)
-    // Account-wide tech mods threaded into every power/time estimate shown here and in
-    // the per-target cards (pokeTargets), so the display matches what a dispatch does.
-    const mods = aggregateTechMods(ctx.store.state.tech)
+    // EFFECTIVE tech × prestige mods — the SAME bag the tick resolves marches/raids with
+    // (engine/tick.ts effectiveMods). Threaded into every power/time estimate shown here
+    // and in the per-target cards (pokeTargets), so the display (attack power, march time,
+    // the battle forecast, home defence) matches what a dispatch actually does.
+    const mods = effectiveMods(ctx.store.state)
     const atkPow = armyAttackPower(army, mods)
 
     // "W domu" counts EVERY unit at home (scouts included); the send-all gate below uses

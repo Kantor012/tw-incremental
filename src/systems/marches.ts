@@ -11,7 +11,14 @@ import {
 } from '../engine/state'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
-import { battleOutcome, armyAttackPower, armyCarry, applyLosses } from './combat'
+import {
+  battleOutcome,
+  armyAttackPower,
+  armyCarry,
+  applyLosses,
+  ramDefenseFactor,
+  catapultLevelDamage,
+} from './combat'
 import { barracksUnlocked } from './recruitment'
 import { distance, barbarianById } from './world'
 import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
@@ -372,7 +379,13 @@ function lootSum(loot: ResourceMap): string {
  * step):
  *
  *  - outbound completes  → resolve the battle (battleOutcome of the army's attack
- *    power vs the camp's defence). Casualties leave `v.units` immediately. On a
+ *    power vs the camp's EFFECTIVE defence — its base defence scaled down by any rams
+ *    in the dispatched stack, {@link ramDefenseFactor}, so a ram column can crack a
+ *    camp a same-size ramless army could not). Casualties leave `v.units` immediately.
+ *    On a win, catapults in the dispatched stack ({@link catapultLevelDamage} > 0)
+ *    PERMANENTLY raze the live target's tier (`barb.level`, clamped >= 1), shrinking
+ *    its future defence and loot; the snapshot `m.targetLevel` is left untouched so
+ *    THIS battle's loot/losses still resolve from the tier captured at dispatch. On a
  *    win with survivors: erode the target's loyalty by nobleCount(survivors) ×
  *    {@link LOYALTY_NOBLE_HIT} (queuing a {@link ConquestEvent} if it hits 0), stash
  *    carry-capped loot, flip to `returning` with a symmetric travel time, and log
@@ -439,9 +452,13 @@ export function advanceMarches(
         continue
       }
 
-      // ATTACK → resolve the engagement.
+      // ATTACK → resolve the engagement. Rams (M5.3) crack the wall: the camp's base
+      // defence is scaled down by ramDefenseFactor(m.units) (clamped, ramless = ×1) for
+      // THIS battle only, so a stack carrying rams can break a tier a same-size ramless
+      // army would lose to. Loot/losses still derive from the snapshotted tier.
       const target = barbarianTarget(m.targetLevel)
-      const outcome = battleOutcome(armyAttackPower(m.units, mods), target.defensePower)
+      const effDef = target.defensePower * ramDefenseFactor(m.units)
+      const outcome = battleOutcome(armyAttackPower(m.units, mods), effDef)
       const sent = m.units
 
       if (!outcome.attackerWins) {
@@ -462,6 +479,21 @@ export function advanceMarches(
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
       const losses = applyCasualties(v, sent, survivors)
       const loot = computeLoot(survivors, m.targetLevel, mods)
+
+      // Siege razing (M5.3): on a WON attack, catapults in the DISPATCHED stack
+      // permanently lower the live target's camp tier by catapultLevelDamage(m.units),
+      // clamped to >= 1 so a camp can never be razed out of existence. This shrinks the
+      // camp's FUTURE defence and loot (both derive from barbarianTarget(barb.level)),
+      // but deliberately does NOT touch the snapshot m.targetLevel — this battle's own
+      // loot/losses already resolved from the tier captured at dispatch. The target may
+      // already be gone (captured/edited away earlier this sub-step), in which case
+      // there is nothing to raze. Deterministic; uses the same id-snapshot discipline
+      // as the loyalty erosion below.
+      const razeLevels = catapultLevelDamage(m.units)
+      if (razeLevels > 0) {
+        const barb = barbarianById(world, m.targetId)
+        if (barb !== undefined) barb.level = Math.max(1, barb.level - razeLevels)
+      }
 
       // Conquest (M2.4): a won fight whose survivors still include a noble erodes
       // the LIVE target's loyalty in the world. Look it up by the snapshotted id —

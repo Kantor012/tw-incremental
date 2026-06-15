@@ -35,7 +35,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 11
+export const SAVE_VERSION = 12
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -381,6 +381,49 @@ export function migrate(raw: any): any {
       const world = isObject(s.world) ? { ...s.world, barbarians } : s.world
       return { ...s, villages, world, version: 11 }
     },
+    // v11 -> v12: siege engines — the ram + catapult units (M5.3). A v11 save predates
+    // the two new UNIT keys (both appended to UNIT_IDS after 'scout'), so backfill them
+    // to 0 WITHOUT disturbing the player's progress:
+    //  - every village's `units` gains ram:0 and catapult:0 by spreading INITIAL_UNITS
+    //    *first*, so the save's own counts win over the seed and existing progress is
+    //    preserved (exactly as the v2->v3 / v6->v7 / v10->v11 unit backfills did). Without
+    //    this, validateVillage — which iterates the now-longer UNIT_IDS — would reject the
+    //    save;
+    //  - every in-flight march gets the ram:0 / catapult:0 unit slots the same way (over
+    //    the zero full roster), so its dispatched subset has the M5.3 key order.
+    // M5.3 adds NO new building, march kind or barbarian field (siege is a per-unit role
+    // tag plus pure combat/march logic), so nothing else is touched — the barbarian level
+    // band is unchanged and the catapult only ever LOWERS a camp's level with a >= 1 clamp
+    // applied in marches.advanceMarches, so no persisted level can leave validateState's
+    // [1, MAX_TARGET_LEVEL] range. Malformed entries are left as-is so validateState rejects
+    // them loudly. Nothing is recomputed here; importSave's recomputeDerived pass runs
+    // afterwards exactly as for every other migration.
+    11: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        const marches = Array.isArray(v.marches)
+          ? v.marches.map((m: any) =>
+              isObject(m)
+                ? { ...m, units: { ...INITIAL_UNITS, ...(isObject(m.units) ? m.units : {}) } }
+                : m,
+            )
+          : v.marches
+        villages[id] = {
+          ...v,
+          units: { ...INITIAL_UNITS, ...(isObject(v.units) ? v.units : {}) },
+          marches,
+        }
+      }
+      return { ...s, villages, version: 12 }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -559,7 +602,9 @@ function validateVillage(v: unknown, id: string): void {
  * coordinate, a level in [1, MAX_TARGET_LEVEL], a `loyalty` in [0, 100] since M2.4 and
  * a boolean `scouted` since M5.2), every village's marches now also carry a `kind`
  * discriminant in {`attack`, `scout`} (M5.2) and the new `wall` building / `scout` unit
- * validate like any other roster entry (the lists simply grew), the GLOBAL battle log is validated (each report's `villageId`, plus the
+ * and the M5.3 siege units (`ram` / `catapult`, appended to UNIT_IDS) validate like any
+ * other roster entry (the lists simply grew — siege is a per-unit role tag plus pure
+ * combat/march logic, so it adds no new persisted field of its own), the GLOBAL battle log is validated (each report's `villageId`, plus the
  * M2.4 `conquer` variant alongside the existing `attack` / `raid`), and finally the
  * M3.1 `tech` map is checked (an object whose every present key is a known node id at
  * an integer level within that node's [0, maxLevel] band; unknown keys are rejected),

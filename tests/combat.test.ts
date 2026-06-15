@@ -5,6 +5,12 @@ import {
   armyDefensePower,
   armyCarry,
   applyLosses,
+  ramDefenseFactor,
+  catapultLevelDamage,
+  RAM_DEF_RED,
+  RAM_DEF_MIN,
+  CATA_PER_LEVEL,
+  CATA_MAX_LEVELS,
 } from '../src/systems/combat'
 import { NO_TECH_MODS, type TechModifiers } from '../src/engine/state'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
@@ -16,8 +22,10 @@ function army(
   axeman = 0,
   noble = 0,
   scout = 0,
+  ram = 0,
+  catapult = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
 }
 
 /** NO_TECH_MODS with selected fields overridden — a terse way to build a TechModifiers. */
@@ -164,5 +172,104 @@ describe('applyLosses', () => {
   it('lossFrac 0 keeps the army intact; lossFrac 1 wipes it', () => {
     expect(applyLosses(army(7, 4, 2), 0)).toEqual(army(7, 4, 2))
     expect(applyLosses(army(7, 4, 2), 1)).toEqual(army(0, 0, 0))
+  })
+
+  it('survives the siege roster: rams/catapults attrit per type like any unit', () => {
+    // army(spear, sword, axe, noble, scout, ram, catapult)
+    const out = applyLosses(army(0, 0, 0, 0, 0, 10, 6), 0.5)
+    expect(out.ram).toBe(5) // floor(10 * .5)
+    expect(out.catapult).toBe(3) // floor(6 * .5)
+    expect(Object.keys(out).sort()).toEqual([...UNIT_IDS].sort())
+  })
+})
+
+// --- ram role: ramDefenseFactor (M5.3) --------------------------------------------
+
+describe('ramDefenseFactor (M5.3)', () => {
+  it('is 1 (no change) with no rams, regardless of other units', () => {
+    expect(ramDefenseFactor(army())).toBe(1)
+    // A huge non-siege army still leaves the wall untouched.
+    expect(ramDefenseFactor(army(100, 100, 100, 5, 50))).toBe(1)
+  })
+
+  it('drops by RAM_DEF_RED per ram (the exact multiplicative cut)', () => {
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, 1))).toBeCloseTo(1 - RAM_DEF_RED)
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, 5))).toBeCloseTo(1 - 5 * RAM_DEF_RED)
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, 10))).toBeCloseTo(1 - 10 * RAM_DEF_RED)
+  })
+
+  it('decreases monotonically with more rams until it hits the floor', () => {
+    let prev = ramDefenseFactor(army(0, 0, 0, 0, 0, 1))
+    for (let rams = 2; rams <= 28; rams++) {
+      const f = ramDefenseFactor(army(0, 0, 0, 0, 0, rams))
+      expect(f).toBeLessThan(prev)
+      expect(f).toBeGreaterThanOrEqual(RAM_DEF_MIN)
+      prev = f
+    }
+  })
+
+  it('is clamped to RAM_DEF_MIN — even a vast siege train cannot cut more', () => {
+    // 1 - RAM_DEF_RED*ram <= RAM_DEF_MIN once ram >= (1-MIN)/RED; beyond that it pins.
+    const atFloor = Math.ceil((1 - RAM_DEF_MIN) / RAM_DEF_RED)
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, atFloor))).toBeCloseTo(RAM_DEF_MIN)
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, atFloor + 50))).toBe(RAM_DEF_MIN)
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, 100000))).toBe(RAM_DEF_MIN)
+    // Never below the floor.
+    expect(ramDefenseFactor(army(0, 0, 0, 0, 0, 1e9))).toBeGreaterThanOrEqual(RAM_DEF_MIN)
+  })
+
+  it('a ram column flips a verdict purely by cutting the wall (same attack power)', () => {
+    // The ram's cut is the ONLY difference: its own (puny) attack is already in `power`,
+    // so this isolates the defence reduction. Tuning-robust — reads the real functions.
+    const stack = army(0, 0, 2, 0, 0, 20) // 2 axemen + 20 rams
+    const power = armyAttackPower(stack)
+    const factor = ramDefenseFactor(stack)
+    expect(factor).toBeCloseTo(1 - 20 * RAM_DEF_RED)
+    // A wall strictly above the raw power → an unaided loss…
+    const wall = power + 1
+    expect(battleOutcome(power, wall).attackerWins).toBe(false)
+    // …yet the SAME power beats the ram-cut wall (effDef = wall * factor < power).
+    expect(wall * factor).toBeLessThan(power)
+    expect(battleOutcome(power, wall * factor).attackerWins).toBe(true)
+  })
+})
+
+// --- catapult role: catapultLevelDamage (M5.3) ------------------------------------
+
+describe('catapultLevelDamage (M5.3)', () => {
+  it('is 0 with no catapults (and ignores every other unit type)', () => {
+    expect(catapultLevelDamage(army())).toBe(0)
+    expect(catapultLevelDamage(army(100, 100, 100, 5, 50, 30))).toBe(0)
+  })
+
+  it('returns 0 below the CATA_PER_LEVEL threshold', () => {
+    for (let c = 1; c < CATA_PER_LEVEL; c++) {
+      expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, c))).toBe(0)
+    }
+  })
+
+  it('steps up by one level for every CATA_PER_LEVEL catapults (floor)', () => {
+    expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, CATA_PER_LEVEL))).toBe(1)
+    expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, CATA_PER_LEVEL + 1))).toBe(1)
+    expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, 2 * CATA_PER_LEVEL))).toBe(2)
+    expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, CATA_MAX_LEVELS * CATA_PER_LEVEL))).toBe(
+      CATA_MAX_LEVELS,
+    )
+  })
+
+  it('is capped at CATA_MAX_LEVELS no matter how many catapults', () => {
+    expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, (CATA_MAX_LEVELS + 5) * CATA_PER_LEVEL))).toBe(
+      CATA_MAX_LEVELS,
+    )
+    expect(catapultLevelDamage(army(0, 0, 0, 0, 0, 0, 100000))).toBe(CATA_MAX_LEVELS)
+  })
+
+  it('always returns a whole, non-negative number of levels', () => {
+    for (const c of [0, 1, 5, 7, 13, 99, 1000]) {
+      const dmg = catapultLevelDamage(army(0, 0, 0, 0, 0, 0, c))
+      expect(Number.isInteger(dmg)).toBe(true)
+      expect(dmg).toBeGreaterThanOrEqual(0)
+      expect(dmg).toBeLessThanOrEqual(CATA_MAX_LEVELS)
+    }
   })
 })

@@ -41,15 +41,17 @@ import { barbarianById } from '../src/systems/world'
  * combat retuning while still proving the loyalty arithmetic.
  */
 
-/** A full (all UnitId present) roster snapshot — `scout` last, matching UNIT_IDS. */
+/** A full (all UnitId present) roster snapshot — siege pair last, matching UNIT_IDS. */
 function army(
   spearman = 0,
   swordsman = 0,
   axeman = 0,
   noble = 0,
   scout = 0,
+  ram = 0,
+  catapult = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
 }
 
 /** A barbarian village descriptor at a chosen tier, position and loyalty (unscouted). */

@@ -320,7 +320,7 @@ describe('autoAttackOnce', () => {
         s.world,
         s.battleLog,
         nearest!.id,
-        { spearman: 0, swordsman: 0, axeman: 1, noble: 0, scout: 0 },
+        { spearman: 0, swordsman: 0, axeman: 1, noble: 0, scout: 0, ram: 0, catapult: 0 },
         NO_TECH_MODS,
       ),
     ).toBe(true)
@@ -355,6 +355,36 @@ describe('autoAttackOnce', () => {
     expect(m.units.noble).toBe(0)
     // The scouts (and only the scouts) remain at home, unharmed.
     expect(stationedUnits(v).scout).toBe(8)
+  })
+
+  it('NEVER sends siege: a siege-only garrison is treated as no combat army (M5.3)', () => {
+    const s = attackState()
+    const v = s.villages.v0
+    v.units.ram = 20
+    v.units.catapult = 20 // siege engines only: no idle COMBAT army to auto-dispatch
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(false)
+    expect(v.marches).toHaveLength(0)
+    // Every siege unit stayed home — auto-attack never spends them.
+    expect(stationedUnits(v).ram).toBe(20)
+    expect(stationedUnits(v).catapult).toBe(20)
+  })
+
+  it('leaves siege (ram/catapult) home when it dispatches the combat army (M5.3)', () => {
+    const s = attackState()
+    const v = s.villages.v0
+    v.units.axeman = 10 // a beatable combat army…
+    v.units.ram = 6 // …alongside siege the auto-attack must NOT sweep in (manual decision)
+    v.units.catapult = 6
+    expect(autoAttackOnce(v, s.world, s.battleLog, NO_TECH_MODS)).toBe(true)
+    expect(v.marches).toHaveLength(1)
+    const m = v.marches[0]
+    expect(m.units.axeman).toBe(10) // the whole combat army marched…
+    expect(m.units.ram).toBe(0) // …but no ram…
+    expect(m.units.catapult).toBe(0) // …and no catapult was dispatched
+    expect(m.units.noble).toBe(0)
+    // The siege engines (and only they, plus any nobles/scouts) stay home, unharmed.
+    expect(stationedUnits(v).ram).toBe(6)
+    expect(stationedUnits(v).catapult).toBe(6)
   })
 })
 

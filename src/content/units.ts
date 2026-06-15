@@ -18,14 +18,36 @@
 
 import type { BuildingId } from './buildings'
 
-export type UnitId = 'spearman' | 'swordsman' | 'axeman' | 'noble' | 'scout'
+export type UnitId = 'spearman' | 'swordsman' | 'axeman' | 'noble' | 'scout' | 'ram' | 'catapult'
+
+/**
+ * Siege role tag (M5.3) — DATA, not engine. A unit carrying `siege` fights with a
+ * special, role-driven effect that the battle/march engine reads off the def:
+ *  - `ram`      reduces the TARGET's effective defence in the fight it joins
+ *               (combat.ramDefenseFactor) — lets a chosen army crack a camp it
+ *               could not beat unaided.
+ *  - `catapult` permanently LOWERS a defeated camp's level on a won attack
+ *               (combat.catapultLevelDamage, applied in marches.advanceMarches),
+ *               shrinking its future defence and loot (scorched earth).
+ * Adding a new siege behaviour is: a new literal here + a branch in combat/marches.
+ */
+export type SiegeRole = 'ram' | 'catapult'
 
 /**
  * Stable iteration order for population roll-up, save validation and UI listing.
- * New units are APPENDED (here `scout`, after `noble`) so older saves' roster key
- * order is never disturbed, keeping migration and round-trip deterministic.
+ * New units are APPENDED (here the siege pair `ram`, `catapult`, after `scout`) so
+ * older saves' roster key order is never disturbed, keeping migration and
+ * round-trip deterministic.
  */
-export const UNIT_IDS: readonly UnitId[] = ['spearman', 'swordsman', 'axeman', 'noble', 'scout']
+export const UNIT_IDS: readonly UnitId[] = [
+  'spearman',
+  'swordsman',
+  'axeman',
+  'noble',
+  'scout',
+  'ram',
+  'catapult',
+]
 
 export interface UnitDef {
   id: UnitId
@@ -56,6 +78,14 @@ export interface UnitDef {
   carry: number
   /** Travel speed, minutes per field — lower is faster (expansion, M1.3). */
   speed: number
+  /**
+   * Siege role (M5.3) — DATA, not engine. Present only on siege engines; plain
+   * combat/recon units omit it (so `siege === undefined` means "ordinary unit").
+   * Both siege units gate behind the academy (`requires: 'academy'`). The engine
+   * dispatches on this field: rams in an army lower the target's effective defence
+   * for that battle, catapults raze a beaten camp's level. See {@link SiegeRole}.
+   */
+  siege?: SiegeRole
 }
 
 /**
@@ -156,5 +186,49 @@ export const UNITS: Record<UnitId, UnitDef> = {
     carry: 0,
     // Fastest unit (lowest min/field) — recon should outrun the standing army.
     speed: 9,
+  },
+  // The Taran (ram): a SIEGE engine, not a line soldier (M5.3). Sent with an
+  // attacking army it crushes the target camp's effective defence in that fight
+  // (combat.ramDefenseFactor), letting you crack a camp the same army could not
+  // beat unaided — at the price of a near-useless attack and no loot. Heavy,
+  // slow and gated behind the academy (Palac) like the noble. Auto-attack never
+  // fields it (siege is a manual decision), so the 17 balance goals are untouched.
+  // Numbers provisional; the Balance phase tunes them against the harness.
+  ram: {
+    id: 'ram',
+    name: 'Taran',
+    desc: 'Machina oblężnicza. Osłabia obronę atakowanego obozu w tej bitwie; sam słabo walczy i nie bierze łupu.',
+    cost: { wood: 300, clay: 200, iron: 150 },
+    pop: 5,
+    recruitSeconds: 240,
+    requires: 'academy',
+    attack: 8,
+    defInfantry: 10,
+    defCavalry: 10,
+    carry: 0,
+    // Heavy and slow — siege trains lag behind the standing army.
+    speed: 30,
+    siege: 'ram',
+  },
+  // The Katapulta (catapult): a SIEGE engine (M5.3). On a WON attack it permanently
+  // lowers the target camp's level (combat.catapultLevelDamage, applied in
+  // marches.advanceMarches), shrinking its future defence and loot — scorched earth,
+  // never a kill (the camp's level is clamped to >= 1). Like the ram it barely
+  // fights, hauls nothing, is heavy/slow and gated behind the academy; auto-attack
+  // never fields it, so the 17 balance goals stay intact. Numbers provisional.
+  catapult: {
+    id: 'catapult',
+    name: 'Katapulta',
+    desc: 'Machina oblężnicza. Po wygranym ataku trwale obniża poziom obozu (mniejsza przyszła obrona i łup); słabo walczy.',
+    cost: { wood: 320, clay: 400, iron: 100 },
+    pop: 8,
+    recruitSeconds: 360,
+    requires: 'academy',
+    attack: 5,
+    defInfantry: 10,
+    defCavalry: 10,
+    carry: 0,
+    speed: 30,
+    siege: 'catapult',
   },
 }

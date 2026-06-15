@@ -187,6 +187,28 @@ export function unitIcon(id: UnitId): SVGSVGElement {
       const pupil = svg('circle', { cx: '12', cy: '12', r: '1.5', fill: '#16202b' })
       return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [eye, iris, pupil])
     }
+    case 'ram': {
+      // The Taran is a siege engine, not a soldier — a suspended timber beam with an
+      // iron head reads as "batters the wall" (lowers the camp's defence) not combat.
+      const frameL = svg('path', { d: 'M8 5 6 20', stroke: '#6b431d', 'stroke-width': '1.6', fill: 'none' })
+      const frameR = svg('path', { d: 'M16 5 18 20', stroke: '#6b431d', 'stroke-width': '1.6', fill: 'none' })
+      const top = svg('path', { d: 'M7 5 17 5', stroke: '#6b431d', 'stroke-width': '1.6', fill: 'none' })
+      const beam = svg('rect', { x: '5', y: '11', width: '13', height: '3', rx: '1', fill: '#8a5a2b' })
+      const head = svg('path', { d: 'M2 12.5 5 10 5 15Z', fill: '#9aa3ad' })
+      const cap = svg('rect', { x: '5', y: '10.5', width: '2', height: '4', fill: '#c6cdd5' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [frameL, frameR, top, beam, head, cap])
+    }
+    case 'catapult': {
+      // The Katapulta razes a camp on a won attack (lowers its level) — a throwing
+      // arm over a wheeled base reads as "siege artillery", distinct from line troops.
+      const base = svg('path', { d: 'M4 17 20 17 18 20 6 20Z', fill: '#8a5a2b' })
+      const wheelL = svg('circle', { cx: '8', cy: '20', r: '1.8', fill: '#6b431d' })
+      const wheelR = svg('circle', { cx: '16', cy: '20', r: '1.8', fill: '#6b431d' })
+      const arm = svg('path', { d: 'M6 17 18 6', stroke: '#8a5a2b', 'stroke-width': '2', fill: 'none' })
+      const bucket = svg('circle', { cx: '18', cy: '6', r: '2.4', fill: '#9aa3ad' })
+      const stone = svg('circle', { cx: '18', cy: '6', r: '1.2', fill: '#6b7682' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [base, wheelL, wheelR, arm, bucket, stone])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla jednostki: ' + String(_exhaustive))

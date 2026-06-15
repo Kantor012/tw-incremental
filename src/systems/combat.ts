@@ -92,6 +92,53 @@ export function armyDefensePower(
   return power * mods.defenseMult
 }
 
+/**
+ * Siege tuning (M5.3) — the two siege roles expressed as exported constants so
+ * the march engine (marches.advanceMarches), the campaign forecast (campaign.ts)
+ * and the tests all read the SAME numbers. One source of truth keeps the battle
+ * the player is shown identical to the one the engine resolves.
+ */
+/** Effective-defence reduction one Taran contributes (multiplicative, per ram). */
+export const RAM_DEF_RED = 0.02
+/** Floor on the ram defence factor — rams can never cut more than (1 - this). */
+export const RAM_DEF_MIN = 0.4
+/** Catapults needed to raze ONE level off a beaten camp (step size). */
+export const CATA_PER_LEVEL = 5
+/** Hard cap on levels razed by a single won attack (upper limit). */
+export const CATA_MAX_LEVELS = 3
+
+/**
+ * Multiplicative factor applied to the TARGET's defence when this army fights
+ * (M5.3 ram role). Each Taran shaves {@link RAM_DEF_RED} off the camp's wall,
+ * clamped to the band [{@link RAM_DEF_MIN}, 1]: zero rams → 1 (no change), and
+ * even a huge siege train can never drop defence below RAM_DEF_MIN. The result is
+ * a pure multiplier (1 = full defence, 0.4 = -60%), so callers just do
+ * `defensePower * ramDefenseFactor(units)`. Deterministic — no clock, no RNG.
+ */
+export function ramDefenseFactor(units: Record<UnitId, number>): number {
+  const ramCount = units.ram ?? 0
+  const factor = 1 - ramCount * RAM_DEF_RED
+  if (factor < RAM_DEF_MIN) return RAM_DEF_MIN
+  if (factor > 1) return 1
+  return factor
+}
+
+/**
+ * Whole number of camp LEVELS a won attack's catapults raze (M5.3 catapult role).
+ * Steps up by one for every {@link CATA_PER_LEVEL} catapults — `floor(count /
+ * CATA_PER_LEVEL)` — and is capped at {@link CATA_MAX_LEVELS} so a single attack
+ * can never flatten a high camp in one blow. Returns 0 with no catapults. The
+ * caller (marches.advanceMarches) applies this only on a win and clamps the
+ * camp's level to >= 1 (a camp is never razed out of existence). Pure / integral.
+ */
+export function catapultLevelDamage(units: Record<UnitId, number>): number {
+  const catapultCount = units.catapult ?? 0
+  const levels = Math.floor(catapultCount / CATA_PER_LEVEL)
+  if (levels < 0) return 0
+  if (levels > CATA_MAX_LEVELS) return CATA_MAX_LEVELS
+  return levels
+}
+
 /** Total haul capacity of an army: Σ count * UnitDef.carry. */
 export function armyCarry(units: Record<UnitId, number>): number {
   let carry = 0
