@@ -1,4 +1,4 @@
-import { RESOURCE_IDS, type ResourceId } from '../../engine/state'
+import { RESOURCE_IDS, type ResourceId, type AutomationKind } from '../../engine/state'
 import { formatNumber } from '../../engine/format'
 import {
   TECH_NODES,
@@ -103,6 +103,13 @@ function isReduction(effect: TechEffect): boolean {
   )
 }
 
+/** PL name of an idle automation routine an `automation_unlock` gateway turns on. */
+const AUTOMATION_LABEL: Record<AutomationKind, string> = {
+  build: 'auto-budowa',
+  recruit: 'auto-rekrutacja',
+  attack: 'auto-atak',
+}
+
 /** What the node's effect *targets*, in PL (the subject of the per-level bonus). */
 function effectSubject(node: TechNode): string {
   const effect = node.effect
@@ -127,6 +134,10 @@ function effectSubject(node: TechNode): string {
       return 'siły obrony armii'
     case 'loot_mult':
       return 'wielkości łupu'
+    case 'automation_unlock':
+      // Binary unlock — no per-level subject; surfaced via the dedicated effectText
+      // branch, but the case keeps this switch exhaustive over TechEffect.
+      return 'automatyzacji: ' + AUTOMATION_LABEL[effect.target]
   }
 }
 
@@ -137,7 +148,12 @@ function effectSign(effect: TechEffect): string {
 
 /** Full "±X% <subject> / poziom" line for the detail card + node aria-label. */
 function effectText(node: TechNode): string {
-  return effectSign(node.effect) + pct(node.effect.perLevel) + ' ' + effectSubject(node) + ' / poziom'
+  const e = node.effect
+  // Binary gateway: it UNLOCKS a routine rather than scaling a stat per level.
+  if (e.kind === 'automation_unlock') {
+    return 'Odblokowuje automatyzację: ' + AUTOMATION_LABEL[e.target]
+  }
+  return effectSign(e) + pct(e.perLevel) + ' ' + effectSubject(node) + ' / poziom'
 }
 
 /**
@@ -235,9 +251,11 @@ export function createTechPanel(ctx: UiCtx): Panel {
       const node = TECH_NODES[id]
       if (!node) return ''
       const lvl = nodeLevel(ctx.store.state, id)
-      return lvl > 0
-        ? 'Obecny łączny bonus: ' + effectSign(node.effect) + pct(node.effect.perLevel * lvl)
-        : 'Jeszcze nie wykupiony.'
+      if (lvl <= 0) return 'Jeszcze nie wykupiony.'
+      const e = node.effect
+      // A bought binary gateway has no cumulative percent — it is simply active.
+      if (e.kind === 'automation_unlock') return 'Odblokowane.'
+      return 'Obecny łączny bonus: ' + effectSign(e) + pct(e.perLevel * lvl)
     },
     purchase: (id) => ctx.onPurchaseTech(id),
     // Route the engine's own rejection reason ('Poziom maksymalny' / 'Wymagania

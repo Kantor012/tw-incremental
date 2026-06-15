@@ -1,4 +1,4 @@
-import type { GameStore, VillageId } from '../engine/state'
+import type { AutomationSettings, GameStore, VillageId } from '../engine/state'
 import type { Signal } from '../engine/store'
 import type { GameBus } from '../engine/eventbus'
 import type { BuildingId } from '../content/buildings'
@@ -78,6 +78,15 @@ export interface UiCtx {
    * affordability cue — this callback is the commit, not the validation.
    */
   onPurchasePrestige: (nodeId: string) => boolean
+  /**
+   * Patch the idle automation toggles / policy (M5.1): merge `patch` into
+   * `store.state.automation`, then commit + persist (no recompute — the automation
+   * state is read directly by the tick, not folded into derived stats). The
+   * automation panel calls this when a switch is toggled or the auto-recruit
+   * unit/target changes; it reads `effectiveMods(state).automations` itself to drive
+   * the locked/disabled cue. A partial patch so a single control can update one field.
+   */
+  onSetAutomation: (patch: Partial<AutomationSettings>) => void
   /** Serialize the current run to a save code string. */
   onExport: () => string
   /** Load a save code; returns true when it parsed and was applied. */

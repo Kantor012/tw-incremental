@@ -273,6 +273,42 @@ export interface PrestigeState {
   nodes: Record<string, number>
 }
 
+/**
+ * The three routines the idle layer can run for the player (M5.1). Each is
+ * UNLOCKED via the tech tree (a binary `automation_unlock` gateway) and then TOGGLED
+ * on by the player; both must be true for the routine to fire in the deterministic
+ * sub-step. See {@link AutomationSettings} (the toggles + policy) and
+ * {@link TechModifiers.automations} (which routines are unlocked).
+ */
+export type AutomationKind = 'build' | 'recruit' | 'attack'
+
+/**
+ * The player's automation toggles + policy (M5.1), serialized on {@link GameState}.
+ *
+ * `build` / `recruit` / `attack` are the user ON/OFF switches (a routine only runs
+ * when its switch is on AND it is unlocked in the tree — see
+ * {@link TechModifiers.automations}). Default OFF, so a run with no automation is
+ * byte-identical to pre-M5.1 play (the 17 balance goals are untouched).
+ *
+ * AUTO-BUILD and AUTO-ATTACK have FIXED, deterministic policies (cheapest affordable
+ * building; nearest beatable barbarian, never nobles) and need no extra fields.
+ * AUTO-RECRUIT carries its policy here: keep `recruitUnit` topped up to `recruitTarget`
+ * units (counting both the standing roster and what is already in the recruit queue).
+ * `recruitUnit` is `null` until the player picks one (then nothing is recruited).
+ */
+export interface AutomationSettings {
+  /** User switch for auto-build (cheapest affordable building). */
+  build: boolean
+  /** User switch for auto-recruit (top up `recruitUnit` to `recruitTarget`). */
+  recruit: boolean
+  /** User switch for auto-attack (nearest beatable barbarian, never nobles). */
+  attack: boolean
+  /** Unit auto-recruit maintains; `null` = no unit chosen yet (nothing recruited). */
+  recruitUnit: UnitId | null
+  /** Target standing count for `recruitUnit`; finite integer >= 0. */
+  recruitTarget: number
+}
+
 export interface GameState {
   /** Save schema version — drives migrations. */
   version: number
@@ -320,6 +356,14 @@ export interface GameState {
    * {@link PrestigeState}.
    */
   prestige: PrestigeState
+  /**
+   * Idle automation toggles + policy (M5.1). The routines themselves are gated by
+   * the tech tree (see {@link TechModifiers.automations}); this is the player's
+   * ON/OFF state and the auto-recruit policy. All OFF by default, so a run with no
+   * automation reproduces pre-M5.1 play exactly. Read each sub-step by
+   * `runAutomation` (systems/automation.ts); not a derived field — it serializes.
+   */
+  automation: AutomationSettings
 }
 
 /**
@@ -355,6 +399,15 @@ export interface TechModifiers {
   defenseMult: number
   /** Loot haul multiplier, >= 1 (consumed by systems/marches.ts). */
   lootMult: number
+  /**
+   * Which idle automations are UNLOCKED (M5.1). Set by `aggregateTechMods` from any
+   * `automation_unlock` tech node at level >= 1, OR-combined across the tech and
+   * prestige bags by `combine` (systems/prestige.ts). A routine fires in the tick
+   * only when BOTH its flag here is true AND the player's switch
+   * ({@link GameState.automation}) is on. All `false` in {@link NO_TECH_MODS}, so with
+   * no tech nothing is unlocked. Booleans (a gate), unlike the numeric modifiers above.
+   */
+  automations: { build: boolean; recruit: boolean; attack: boolean }
 }
 
 /** Identity tech multipliers (no bonus): economy/combat factors 1, fractional
@@ -370,6 +423,7 @@ export const NO_TECH_MODS: TechModifiers = {
   attackMult: 1,
   defenseMult: 1,
   lootMult: 1,
+  automations: { build: false, recruit: false, attack: false },
 }
 
 /** Base storage cap before any warehouse levels. Storage scales with warehouse. */
@@ -519,6 +573,7 @@ export function createInitialState(seed: string, now: number): GameState {
     battleLog: [],
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
+    automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
   }
 }
 

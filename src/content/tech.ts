@@ -1,4 +1,4 @@
-import type { ResourceId } from '../engine/state'
+import type { AutomationKind, ResourceId } from '../engine/state'
 
 /**
  * Tech (passive) tree catalogue — PURE DATA (no engine logic lives here).
@@ -81,6 +81,14 @@ export type TechArchetype = 'minor' | 'notable' | 'gateway'
  * Each new kind is consumed by exactly one system (buildings / recruitment / marches /
  * combat), threaded there via {@link TechModifiers}; the economy kinds keep folding
  * through recomputeVillageDerived as before.
+ *
+ * M5.1 adds one BINARY kind with NO `perLevel`:
+ *  - automation_unlock: unlocks one idle automation routine (`target`). At level >= 1
+ *    it sets `TechModifiers.automations[target] = true` (aggregateTechMods); the routine
+ *    then runs only when the player's matching toggle is on. Sits on a maxLevel-1
+ *    `gateway` node, so it is a one-time unlock with no scaling. Because it carries no
+ *    `perLevel`, the "every node has a real effect" invariant (systems/tech.ts) MUST
+ *    treat this kind as a valid effect explicitly rather than testing `perLevel > 0`.
  */
 export type TechEffect =
   | { kind: 'production_mult'; resource?: ResourceId; perLevel: number }
@@ -92,6 +100,7 @@ export type TechEffect =
   | { kind: 'attack_mult'; perLevel: number }
   | { kind: 'defense_mult'; perLevel: number }
   | { kind: 'loot_mult'; perLevel: number }
+  | { kind: 'automation_unlock'; target: AutomationKind }
 
 export interface TechNode {
   /** Stable id (the key under {@link TECH_NODES}); what prerequisites point at. */
@@ -2577,6 +2586,59 @@ export const TECH_NODES: Record<string, TechNode> = {
     baseCost: { wood: 2100, clay: 2100, iron: 2100 },
     costFactor: 1.35,
     effect: { kind: 'recruit_speed', perLevel: 0.005 },
+  },
+
+  // =====================================================================
+  // AUTOMATION gateways — automation_unlock (M5.1)
+  // One BINARY gateway per idle routine (no perLevel), each sitting deep on its
+  // own arm behind that category's `*_deep` notable (reachable from the arm root,
+  // single-prereq like every other gateway). At level 1 it flips
+  // TechModifiers.automations[target] on (aggregateTechMods); the routine then
+  // runs only while the player's matching toggle is set (systems/automation.ts).
+  // Placed in the owning category/cluster so the radial layout keeps it on the
+  // same arm. Costs sit in the gateway band so they read as a one-time unlock.
+  //   construction -> build    (auto-build the cheapest affordable building)
+  //   training     -> recruit  (top up the chosen unit to a target count)
+  //   military     -> attack   (raid the nearest beatable barbarian, no nobles)
+  // =====================================================================
+  con_automation: {
+    id: 'con_automation',
+    name: 'Samosterowna budowa',
+    desc: 'Brama automatyzacji (droga, jednorazowa): odblokowuje automatyczną rozbudowę — po włączeniu każda wioska sama dobudowuje najtańszy dostępny budynek z własnych surowców. Trzeba ją ręcznie włączyć w zakładce Automatyzacja.',
+    category: 'construction',
+    cluster: 'con_deep',
+    archetype: 'gateway',
+    maxLevel: 1,
+    prerequisites: ['con_deep_n'],
+    baseCost: { wood: 8000, clay: 8000, iron: 8000 },
+    costFactor: 1.0,
+    effect: { kind: 'automation_unlock', target: 'build' },
+  },
+  tra_automation: {
+    id: 'tra_automation',
+    name: 'Stały zaciąg',
+    desc: 'Brama automatyzacji (droga, jednorazowa): odblokowuje automatyczną rekrutację — po włączeniu każda wioska sama uzupełnia wybraną jednostkę do zadanej liczby. Trzeba ją ręcznie włączyć w zakładce Automatyzacja.',
+    category: 'training',
+    cluster: 'tra_deep',
+    archetype: 'gateway',
+    maxLevel: 1,
+    prerequisites: ['tra_deep_n'],
+    baseCost: { wood: 8000, clay: 8000, iron: 8000 },
+    costFactor: 1.0,
+    effect: { kind: 'automation_unlock', target: 'recruit' },
+  },
+  mil_automation: {
+    id: 'mil_automation',
+    name: 'Stałe rozkazy bojowe',
+    desc: 'Brama automatyzacji (droga, jednorazowa): odblokowuje automatyczne najazdy — po włączeniu bezczynna armia rusza na najbliższego pokonywalnego barbarzyńcę (nigdy szlachcice). Trzeba ją ręcznie włączyć w zakładce Automatyzacja.',
+    category: 'military',
+    cluster: 'mil_deep',
+    archetype: 'gateway',
+    maxLevel: 1,
+    prerequisites: ['mil_deep_n'],
+    baseCost: { wood: 8000, clay: 8000, iron: 8000 },
+    costFactor: 1.0,
+    effect: { kind: 'automation_unlock', target: 'attack' },
   },
 }
 

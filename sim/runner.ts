@@ -8,6 +8,7 @@ import {
 import { simulate } from '../src/engine/tick'
 import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
+import { BUILDING_IDS } from '../src/content/buildings'
 import { recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { foundVillage } from '../src/systems/villages'
@@ -39,6 +40,8 @@ import {
   checkAscendValid,
   contentConsumed,
   totalResources,
+  seedAutomation,
+  checkAutomationDeterminism,
   type InvariantResult,
 } from './invariants'
 import {
@@ -59,6 +62,7 @@ import {
   type RunMetrics,
   type RunStats,
   type PrestigeRunStats,
+  type AutomationRunStats,
 } from './metrics'
 
 /**
@@ -108,6 +112,28 @@ const TECH_DECIDE_EVERY = 8
  * (continuous + determinism repeat + split-with-save) is a small add over the main run.
  */
 const PRESTIGE_TICKS = 6000
+
+/**
+ * Span (game-seconds) of the SEPARATE M5.1 automation coverage run. One hour is long enough
+ * for every idle routine to demonstrably fire (auto-build buys on the first sub-step,
+ * auto-recruit completes axemen within ~100s each, auto-attack reaches the nearby tier-1
+ * camps in ~110s round-trip and resolves repeatedly) yet stays well inside
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} so the offline-parity branch
+ * credits the whole span. Matches the offline-determinism check's hour for symmetry.
+ */
+const AUTOMATION_SECONDS = 3600
+
+/**
+ * Chunk size (game-seconds) the coverage run advances per observation. simulate() decomposes
+ * any span onto the same fixed TICK_RATE grid, so the chunk size never changes the result
+ * (the automation-determinism check proves chunked == one-big-step) — it only sets how often
+ * the run samples progress / invariants. 60s keeps the recruit-completion and attack-report
+ * deltas fine-grained while staying cheap (60 chunks over the hour).
+ */
+const AUTOMATION_CHUNK = 60
+
+/** Sample the hard invariants every N chunks of the coverage run (plus once at the end). */
+const AUTOMATION_SAMPLE_EVERY_CHUNKS = 10
 
 /** What one {@link step} did: building upgrades bought, units ordered, attacks sent, villages founded, tech levels bought. */
 interface StepResult {
@@ -531,6 +557,141 @@ function runPrestigeSplit(seed: string, ticks: number, dt: number): GameState {
   return state
 }
 
+// --- M5.1 automation (idle routines) coverage --------------------------------------------
+//
+// A SEPARATE run from the main economy/combat/tech/expansion/prestige measurement. It must
+// stay separate because it UNLOCKS and TURNS ON the three automation routines (auto build /
+// recruit / attack); the main run leaves automation OFF so the 17 balance goals are still
+// measured on the exact pre-M5.1 game path. Here NO bot acts — the deterministic
+// {@link import('./invariants').seedAutomation} scenario is advanced by plain {@link simulate}
+// and the idle routines (run inside subStep — tick.ts) do ALL the work, which is exactly what
+// proves the M5.1 integration: that the engine itself drives build/recruit/attack each
+// sub-step. The run measures that each routine demonstrably fires, samples the hard
+// invariants throughout (no NaN / negative / over-cap, army & world consistency, round-trip,
+// no-softlock), and the caller pairs it with {@link checkAutomationDeterminism} (online vs
+// chunked-offline byte-identical with automation ON).
+
+/** What the automation coverage run yields: sampled invariants + the progress tally. */
+interface AutomationRun {
+  invariants: InvariantResult[]
+  stats: AutomationRunStats
+}
+
+/** Σ building levels of the capital — auto-build only ever raises this, so end − start is its work. */
+function buildingLevelSum(state: GameState): number {
+  const v = state.villages[state.villageOrder[0]]
+  let n = 0
+  for (const id of BUILDING_IDS) n += v.buildings[id]
+  return n
+}
+
+/** Σ owned axemen across villages — rises ONLY on training completion (dispatch keeps them owned). */
+function axemanTotal(state: GameState): number {
+  let n = 0
+  for (const vid of state.villageOrder) n += state.villages[vid].units.axeman
+  return n
+}
+
+/**
+ * Advance the {@link seedAutomation} scenario for `seconds` in {@link AUTOMATION_CHUNK}-second
+ * chunks, letting the idle routines (in subStep) do everything, and MEASURE that each fired:
+ *
+ *  - BUILT:     end − start of {@link buildingLevelSum}. Auto-build only ever ADDS levels, so
+ *               a positive total is unambiguous proof it bought.
+ *  - RECRUITED: the cumulative POSITIVE deltas of {@link axemanTotal}. An axeman roster rises
+ *               only when training completes — a dispatch keeps the unit owned (stationedUnits
+ *               just subtracts it) and only casualties remove one — so summed increases are a
+ *               true lower bound on what auto-recruit trained, robust to the army being sent
+ *               out and chipped at by raids.
+ *  - ATTACKED:  resolved `attack` battle reports, recovered from the rolling (trimmed) log via
+ *               {@link newBattleReports} diffing each chunk — each one is a march auto-attack
+ *               dispatched and that resolved at a camp.
+ *
+ * Hard invariants are sampled every {@link AUTOMATION_SAMPLE_EVERY_CHUNKS} chunks and once at
+ * the end (tagged `auto`). checkTechState is intentionally NOT sampled: the scenario unlocks
+ * the gateways by level alone without their prerequisite chain (see seedAutomation), which is
+ * legal at the save layer but would trip the DAG check — that check is exercised by the main
+ * run. The three progress facts are returned as bare-named hard invariants so a stalled
+ * routine fails the run.
+ */
+function runAutomationCoverage(seed: string, seconds: number): AutomationRun {
+  const state = createInitialState(seed, 0)
+  seedAutomation(state)
+
+  const invariants: InvariantResult[] = []
+  const startBuild = buildingLevelSum(state)
+  let prevAxe = axemanTotal(state)
+  let recruited = 0
+  let attacked = 0
+  let prevLog: BattleReport[] = state.battleLog.slice()
+  let prevTotal = totalResources(state)
+  let actedInWindow = 0
+
+  const chunks = Math.ceil(seconds / AUTOMATION_CHUNK)
+  for (let i = 0; i < chunks; i++) {
+    const dt = Math.min(AUTOMATION_CHUNK, seconds - i * AUTOMATION_CHUNK)
+    const buildBefore = buildingLevelSum(state)
+    simulate(state, dt)
+
+    // Auto-recruit work: only-rising axeman roster, summed positive deltas.
+    const axe = axemanTotal(state)
+    if (axe > prevAxe) {
+      recruited += axe - prevAxe
+      actedInWindow += axe - prevAxe
+    }
+    prevAxe = axe
+
+    // Auto-attack work: resolved attack reports the chunk produced.
+    for (const r of newBattleReports(prevLog, state.battleLog)) {
+      if (r.kind === 'attack') {
+        attacked += 1
+        actedInWindow += 1
+      }
+    }
+    prevLog = state.battleLog.slice()
+
+    // Auto-build work this chunk (for the no-softlock progress signal).
+    if (buildingLevelSum(state) > buildBefore) actedInWindow += 1
+
+    const last = i === chunks - 1
+    if ((i + 1) % AUTOMATION_SAMPLE_EVERY_CHUNKS === 0 || last) {
+      const phase = `auto t${i + 1}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkLoyalty(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
+      prevTotal = totalResources(state)
+      actedInWindow = 0
+    }
+  }
+
+  const built = buildingLevelSum(state) - startBuild
+
+  // The three proof-of-mechanic facts as bare-named HARD invariants: with the deterministic
+  // seeded scenario each routine must do real work, so a regression that stops one firing is
+  // a genuine bug that fails the run (not a balance-curve warning).
+  invariants.push({
+    name: 'automation-built',
+    ok: built >= TARGETS.minAutomationBuilt,
+    detail: `auto-build added ${built} building level(s) (target >= ${TARGETS.minAutomationBuilt})`,
+  })
+  invariants.push({
+    name: 'automation-recruited',
+    ok: recruited >= TARGETS.minAutomationRecruited,
+    detail: `auto-recruit trained ${recruited} axeman/axemen (target >= ${TARGETS.minAutomationRecruited})`,
+  })
+  invariants.push({
+    name: 'automation-attacked',
+    ok: attacked >= TARGETS.minAutomationAttacked,
+    detail: `auto-attack resolved ${attacked} attack(s) (target >= ${TARGETS.minAutomationAttacked})`,
+  })
+
+  return { invariants, stats: { built, recruited, attacked } }
+}
+
 /**
  * Run a single seed for `ticks` steps and assemble all invariants:
  *  - periodic + final resource/army-consistency/world-consistency/round-trip/no-softlock samples,
@@ -615,7 +776,24 @@ export function runOne(seed: string, ticks: number): RunResult {
   // non-overlapping layout and well-formed edges. Asserted once per run (tagged 'prestige').
   invariants.push(...tag(checkPrestigeTree(), 'prestige'))
 
-  const metrics = collect(seed, ticks, ticks * dt, primary.state, primary.stats, prestige.stats)
+  // M5.1 automation (idle routines) — a SEPARATE coverage run with the three gateways
+  // unlocked and every toggle ON (the main run keeps automation OFF, so the targets above are
+  // untouched). Asserts each routine demonstrably fires (auto build/recruit/attack) and that
+  // the seeded scenario stays NaN/negative/over-cap/softlock-free throughout, then pairs it
+  // with the offline/online byte-identity proof — the determinism the brief requires.
+  const automation = runAutomationCoverage(seed, AUTOMATION_SECONDS)
+  invariants.push(...automation.invariants)
+  invariants.push(checkAutomationDeterminism(seed, AUTOMATION_SECONDS))
+
+  const metrics = collect(
+    seed,
+    ticks,
+    ticks * dt,
+    primary.state,
+    primary.stats,
+    prestige.stats,
+    automation.stats,
+  )
   const ok = invariants.every((r) => r.ok)
   return { metrics, invariants, ok }
 }

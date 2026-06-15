@@ -89,12 +89,15 @@ export function aggregateTechMods(tech: Record<string, number>): TechModifiers {
   let attackSum = 0
   let defenseSum = 0
   let lootSum = 0
+  const automations = { build: false, recruit: false, attack: false }
 
   for (const id of TECH_NODE_IDS) {
     const level = tech[id]
     if (!(typeof level === 'number') || !Number.isFinite(level) || level <= 0) continue
     const effect = TECH_NODES[id].effect
-    const amount = effect.perLevel * level
+    // `automation_unlock` is a BINARY effect with no `perLevel` — guard the numeric
+    // roll-up so accessing `effect.perLevel` is type-safe (it is unused for that kind).
+    const amount = effect.kind === 'automation_unlock' ? 0 : effect.perLevel * level
     switch (effect.kind) {
       case 'production_mult':
         if (effect.resource) {
@@ -129,6 +132,11 @@ export function aggregateTechMods(tech: Record<string, number>): TechModifiers {
       case 'loot_mult':
         lootSum += amount
         break
+      case 'automation_unlock':
+        // BINARY unlock: any owned level (>= 1, guaranteed by the level filter above)
+        // flips the routine's gate on. No scaling — `target` selects the routine.
+        automations[effect.target] = true
+        break
     }
   }
 
@@ -144,6 +152,7 @@ export function aggregateTechMods(tech: Record<string, number>): TechModifiers {
     attackMult: 1 + attackSum,
     defenseMult: 1 + defenseSum,
     lootMult: 1 + lootSum,
+    automations,
   }
 }
 
@@ -314,10 +323,16 @@ export function orphanNodes(): string[] {
 /**
  * Node ids with no real effect — a missing effect or `perLevel <= 0` (a "dead perk").
  * Empty means every node grants a bonus when levelled. Stable {@link TECH_NODE_IDS} order.
+ *
+ * `automation_unlock` is a BINARY effect (no `perLevel`) that DOES grant a real bonus
+ * (it unlocks an idle routine), so it is treated as valid explicitly rather than failing
+ * the `perLevel > 0` test (M5.1) — see the kind's note in src/content/tech.ts.
  */
 export function deadPerkNodes(): string[] {
   return TECH_NODE_IDS.filter((id) => {
     const effect = TECH_NODES[id].effect
-    return !effect || typeof effect.perLevel !== 'number' || effect.perLevel <= 0
+    if (!effect) return true
+    if (effect.kind === 'automation_unlock') return false
+    return typeof effect.perLevel !== 'number' || effect.perLevel <= 0
   })
 }

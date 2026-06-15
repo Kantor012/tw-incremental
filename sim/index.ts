@@ -1,4 +1,6 @@
-import { runMany, type RunResult } from './runner'
+import { spawn } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+import { runMany, runOne, type RunResult } from './runner'
 import { TARGETS } from './targets'
 import { D } from '../src/engine/decimal'
 import { BUILDING_IDS } from '../src/content/buildings'
@@ -19,6 +21,76 @@ import { UNIT_IDS } from '../src/content/units'
  * cost/effect curves drifted from the design goals. Node-safe: console + process.
  */
 const SEEDS = ['alpha', 'beta', 'gamma']
+
+/**
+ * Argv flag that flips this same entry file into WORKER mode: `… --worker <seed> <ticks>`
+ * runs exactly one seed and writes its {@link RunResult} as a single JSON blob to stdout
+ * (nothing else), so the parent can {@link JSON.parse} it back. {@link RunResult} is
+ * JSON-safe — metrics serialise every Decimal to its exact string, invariants are plain
+ * `{name, ok, detail}` — so a worker's result round-trips byte-exactly through the pipe.
+ */
+const WORKER_FLAG = '--worker'
+
+/**
+ * Run ONE seed in a child process and resolve its parsed {@link RunResult}. Each seed is a
+ * fully independent, deterministic run (its own fresh state, RNG seeded from the string), so
+ * fanning them across processes changes NOTHING about the output — it only spends the machine's
+ * cores instead of one. The child is launched the same way tsx launches this file
+ * (`node --import tsx <thisFile> --worker <seed> <ticks>`) so the worker loads TS identically;
+ * its stderr is inherited so any failure surfaces, and a non-zero exit / unparseable stdout
+ * rejects (handled by {@link runSeeds}' sequential fallback).
+ */
+function runSeedChild(seed: string, ticks: number): Promise<RunResult> {
+  return new Promise<RunResult>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx', fileURLToPath(import.meta.url), WORKER_FLAG, seed, String(ticks)],
+      { stdio: ['ignore', 'pipe', 'inherit'] },
+    )
+    let out = ''
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (d) => (out += d))
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`seed ${seed} worker exited with code ${code}`))
+        return
+      }
+      try {
+        resolve(JSON.parse(out) as RunResult)
+      } catch (e) {
+        reject(new Error(`seed ${seed} worker produced no parseable result (${String(e)})`))
+      }
+    })
+    process.stderr.write(`  [sim] spawned seed ${seed} (ticks=${ticks})\n`)
+  })
+}
+
+/**
+ * Run every seed, fanned out one-process-per-seed so the harness uses all cores (the seeds are
+ * independent + deterministic, so the parallel result equals the old sequential {@link runMany}
+ * exactly — same seeds, same order). Results are collected in SEED order regardless of which
+ * child finishes first, and a per-seed `done` line goes to stderr so a long run is visibly
+ * progressing instead of looking hung. If spawning fails for any seed (odd environment, no
+ * fork), it falls back to the in-process sequential path so the harness always produces a
+ * report.
+ */
+async function runSeeds(seeds: string[], ticks: number): Promise<RunResult[]> {
+  try {
+    return await Promise.all(
+      seeds.map(async (seed) => {
+        const r = await runSeedChild(seed, ticks)
+        process.stderr.write(`  [sim] seed ${seed} done (${r.ok ? 'ok' : 'FAIL'})\n`)
+        return r
+      }),
+    )
+  } catch (err) {
+    process.stderr.write(
+      `  [sim] parallel run failed (${String(err)}); falling back to sequential.\n`,
+    )
+    return runMany(seeds, ticks)
+  }
+}
 
 function failures(r: RunResult): RunResult['invariants'] {
   return r.invariants.filter((i) => !i.ok)
@@ -145,9 +217,10 @@ function evalTargets(r: RunResult): TargetCheck[] {
   ]
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const ticks = TARGETS.maxTicks
-  const results = runMany(SEEDS, ticks)
+  process.stderr.write(`  [sim] running ${SEEDS.length} seeds in parallel (ticks/run=${ticks})…\n`)
+  const results = await runSeeds(SEEDS, ticks)
 
   console.log('=== TW Incremental — sim harness ===')
   console.log(
@@ -269,6 +342,18 @@ function main(): void {
   }
   console.log('')
 
+  // --- Automation per seed (M5.1 idle routines; SEPARATE coverage run, automation ON) ---
+  console.log('--- Automation (idle routines, separate coverage run) ---')
+  console.log('seed     | auto-built (levels) | auto-recruited (units) | auto-attacked (resolved)')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.automationBuilt).padStart(19)} | ` +
+        `${String(m.automationRecruited).padStart(22)} | ${String(m.automationAttacked).padStart(24)}`,
+    )
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {
@@ -313,4 +398,19 @@ function main(): void {
   process.exit(0)
 }
 
-main()
+// Entry: WORKER mode runs a single seed and emits its RunResult as JSON for the parent to
+// collect; otherwise this is the PARENT, which fans the seeds out and prints the full report.
+const workerIdx = process.argv.indexOf(WORKER_FLAG)
+if (workerIdx !== -1) {
+  const seed = process.argv[workerIdx + 1]
+  const ticks = Number(process.argv[workerIdx + 2])
+  // Single JSON blob to stdout, nothing else — the parent JSON.parses exactly this.
+  process.stdout.write(JSON.stringify(runOne(seed, ticks)))
+} else {
+  // Surface async failures (a child rejection that escaped the fallback) with a non-zero exit
+  // rather than an unhandled-rejection warning, so CI / the pre-commit gate still blocks.
+  main().catch((err) => {
+    console.error(`RESULT: FAIL — sim harness crashed: ${String(err)}`)
+    process.exit(1)
+  })
+}

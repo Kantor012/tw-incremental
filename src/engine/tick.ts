@@ -1,4 +1,4 @@
-import type { GameState } from './state'
+import type { GameState, TechModifiers } from './state'
 import { RESOURCE_IDS } from './state'
 import { isFiniteDecimal } from './decimal'
 import { advanceRecruitment } from '../systems/recruitment'
@@ -6,6 +6,7 @@ import { advanceMarches } from '../systems/marches'
 import { advanceRaids } from '../systems/raids'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
 import { effectiveMods } from '../systems/prestige'
+import { runAutomation } from '../systems/automation'
 
 /**
  * Fixed simulation step shared by the live loop and offline catch-up: 20 ticks
@@ -50,21 +51,23 @@ export const TICK_RATE = 1 / 20
  * (Linear production summed over the grid still equals `rate*dt` exactly on Decimal —
  * the existing production tests hold.)
  */
-function subStep(state: GameState, dt: number): void {
+function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // Captures (a surviving noble drove a target's loyalty to 0) are gathered across the
   // whole village loop and applied AFTER it — never mid-iteration, where minting a new
   // player village would resize villageOrder under the loop. Typed off advanceMarches'
   // return so this stays decoupled from where ConquestEvent is declared.
   const conquests: ReturnType<typeof advanceMarches> = []
   // The EFFECTIVE modifiers (tech × prestige) are a pure function of the GLOBAL tech +
-  // prestige ledgers, so they are the same for every village this sub-step — aggregate
-  // ONCE here (not per village) to keep the hot loop cheap and the result byte-identical
-  // regardless of how many villages exist. Threaded into the combat advancers (marches/
-  // raids) where attack/defense/march-speed/loot multipliers apply; recruitment is
-  // intentionally NOT passed mods — it snapshots its per-unit duration (incl. the
-  // recruit-speed fraction) at queue time, so reading mods again mid-flight would
-  // double-apply.
-  const mods = effectiveMods(state)
+  // prestige ledgers, which NO sub-step mutates (production / recruitment / marches /
+  // raids / conquest / automation never touch state.tech or state.prestige.nodes), so
+  // they are constant for the whole `simulate` span. `mods` is therefore aggregated ONCE
+  // by the caller (simulate) and threaded in — same value every sub-step, byte-identical
+  // regardless of how `dt` is sliced, and the per-substep effectiveMods roll-up (a scan
+  // of all tech + prestige nodes) is kept off the hot loop. Threaded into the combat
+  // advancers (marches/raids) where attack/defense/march-speed/loot multipliers apply;
+  // recruitment is intentionally NOT passed mods — it snapshots its per-unit duration
+  // (incl. the recruit-speed fraction) at queue time, so reading mods again mid-flight
+  // would double-apply.
   for (const id of state.villageOrder) {
     const v = state.villages[id]
     for (const r of RESOURCE_IDS) {
@@ -92,6 +95,18 @@ function subStep(state: GameState, dt: number): void {
   // Loyalty regenerates exactly ONCE per sub-step (not per village), after captures so a
   // just-taken camp (already off world.barbarians) never regenerates.
   advanceWorldLoyalty(state.world, dt)
+  // Automation (M5.1) runs LAST, after the world has fully settled this sub-step
+  // (captures applied + barbarians removed by applyConquest, loyalty regenerated): so
+  // auto-attack never targets a camp that was floored-and-removed this very step, and
+  // every action reads a consistent world. It reuses the SAME `mods` aggregated once
+  // above — no second effectiveMods read — keeping the step a pure function of state, so
+  // online / offline / sim stay byte-identical with automation ON. Each per-village
+  // action is gated by mods.automations[kind] (the tech unlock) AND state.automation[kind]
+  // (the user toggle), and is self-limiting (resources / pop / a march already in flight),
+  // so there is no inner loop here. Auto-attack pushes onto v.marches, which advanceMarches
+  // resolves on FUTURE sub-steps — it deliberately does not feed into this step's already
+  // collected `conquests`, so it can't collide with the capture phase above.
+  runAutomation(state, mods, dt)
 }
 
 /**
@@ -111,8 +126,16 @@ export function simulate(state: GameState, dtSeconds: number): void {
   // so a NaN dt would silently wipe every resource — see offline boot path).
   if (!(dtSeconds > 0)) return
 
+  // Aggregate the effective tech × prestige modifiers ONCE for the whole span: the ledger
+  // they fold is immutable across sub-steps (see subStep), so every sub-step of this call
+  // sees the identical bag. This collapses the per-substep effectiveMods scan (all tech +
+  // prestige nodes) to one roll-up per simulate() call. The live loop / offline catch-up
+  // call simulate(TICK_RATE) (one sub-step) so they are unaffected; only big-`dt` callers
+  // (sim harness) shed the redundant scans — and because the value is identical either way,
+  // online (one big step) and offline (many TICK_RATE steps) stay byte-identical.
+  const mods = effectiveMods(state)
   const fullSteps = Math.floor(dtSeconds / TICK_RATE)
-  for (let i = 0; i < fullSteps; i++) subStep(state, TICK_RATE)
+  for (let i = 0; i < fullSteps; i++) subStep(state, TICK_RATE, mods)
   const remainder = dtSeconds - fullSteps * TICK_RATE
-  if (remainder > 0) subStep(state, remainder)
+  if (remainder > 0) subStep(state, remainder, mods)
 }

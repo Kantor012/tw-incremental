@@ -637,3 +637,101 @@ describe('save — v9 prestige round-trip', () => {
     }
   })
 })
+
+/** A fresh state whose automation toggles + policy are set to a non-default record. */
+function automationState(): GameState {
+  const s = createInitialState('save-v10-automation', 4242)
+  s.automation = {
+    build: true,
+    recruit: true,
+    attack: false,
+    recruitUnit: 'spearman',
+    recruitTarget: 30,
+  }
+  return s
+}
+
+describe('save — v10 automation round-trip', () => {
+  it('serialize/deserialize preserves the automation toggles + policy verbatim', () => {
+    const state = automationState()
+    const json = serialize(state)
+    const back = deserialize(json)
+
+    expect(back.version).toBe(SAVE_VERSION)
+    expect(back.automation).toEqual({
+      build: true,
+      recruit: true,
+      attack: false,
+      recruitUnit: 'spearman',
+      recruitTarget: 30,
+    })
+    // serialize is idempotent across the round-trip (stable key order).
+    expect(serialize(back)).toBe(json)
+  })
+
+  it('exportSave/importSave round-trips the automation record', () => {
+    const state = automationState()
+    const restored = importSave(exportSave(state))
+    expect(restored.automation).toEqual({
+      build: true,
+      recruit: true,
+      attack: false,
+      recruitUnit: 'spearman',
+      recruitTarget: 30,
+    })
+    // automation is not derived, so importSave's recompute leaves the save byte-identical.
+    expect(serialize(restored)).toBe(serialize(state))
+  })
+
+  it('validateState accepts the all-off default and a null recruitUnit', () => {
+    // The fresh-state default (everything off, no unit chosen, target 0) is always valid.
+    const fresh = createInitialState('save-v10-default', 1)
+    expect(validateState(fresh)).toBe(fresh)
+    expect(fresh.automation.recruitUnit).toBe(null)
+
+    // A null recruitUnit alongside enabled switches is also valid (nothing gets recruited).
+    const nullUnit = automationState()
+    nullUnit.automation.recruitUnit = null
+    expect(validateState(nullUnit)).toBe(nullUnit)
+  })
+
+  it('rejects a missing / non-object automation field', () => {
+    const missing = automationState()
+    delete (missing as { automation?: unknown }).automation
+    expect(() => validateState(missing)).toThrow()
+
+    for (const bad of ['nope', 5, null] as const) {
+      const wrong = automationState()
+      ;(wrong as { automation: unknown }).automation = bad
+      expect(() => validateState(wrong)).toThrow()
+    }
+  })
+
+  it('rejects a non-boolean build / recruit / attack switch', () => {
+    for (const key of ['build', 'recruit', 'attack'] as const) {
+      const bad = automationState()
+      ;(bad.automation as unknown as Record<string, unknown>)[key] = 'yes'
+      expect(() => validateState(bad)).toThrow()
+    }
+  })
+
+  it('rejects an unknown recruitUnit (a non-null, non-unit id)', () => {
+    const bad = automationState()
+    ;(bad.automation as { recruitUnit: unknown }).recruitUnit = 'dragon'
+    expect(() => validateState(bad)).toThrow()
+  })
+
+  it('rejects a negative / non-integer / non-finite recruitTarget', () => {
+    const neg = automationState()
+    neg.automation.recruitTarget = -1
+    expect(() => validateState(neg)).toThrow()
+
+    const frac = automationState()
+    frac.automation.recruitTarget = 2.5
+    expect(() => validateState(frac)).toThrow()
+
+    const nan = automationState()
+    nan.automation.recruitTarget = Number.NaN
+    expect(() => validateState(nan)).toThrow()
+  })
+})

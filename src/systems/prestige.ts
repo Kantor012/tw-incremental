@@ -140,6 +140,9 @@ export function aggregatePrestigeMods(nodes: Record<string, number>): TechModifi
     attackMult: 1 + attackSum,
     defenseMult: 1 + defenseSum,
     lootMult: 1 + lootSum,
+    // Prestige does NOT unlock idle automations in v1 (M5.1) — that gate lives only on
+    // the tech tree. Always false here; `combine` ORs it with the tech bag's flags.
+    automations: { build: false, recruit: false, attack: false },
   }
 }
 
@@ -166,6 +169,14 @@ function combine(tech: TechModifiers, prestige: TechModifiers): TechModifiers {
     attackMult: tech.attackMult * prestige.attackMult,
     defenseMult: tech.defenseMult * prestige.defenseMult,
     lootMult: tech.lootMult * prestige.lootMult,
+    // Automation unlocks are a GATE, not a magnitude: OR the two bags so a routine is
+    // unlocked when EITHER tree unlocks it (prestige is all-false in v1, so this is the
+    // tech bag today, but the OR keeps it correct if prestige ever grants an unlock).
+    automations: {
+      build: tech.automations.build || prestige.automations.build,
+      recruit: tech.automations.recruit || prestige.automations.recruit,
+      attack: tech.automations.attack || prestige.automations.attack,
+    },
   }
 }
 

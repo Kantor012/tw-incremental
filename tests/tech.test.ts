@@ -102,6 +102,10 @@ describe('tech catalogue (static topology invariants)', () => {
     }
     for (const id of TECH_NODE_IDS) {
       const node = TECH_NODES[id]
+      // M5.1: construction / training / military each also host ONE binary
+      // `automation_unlock` gateway — a deliberate exception to the one-kind-per-
+      // category rule (the gateway is a real effect, just not the category's economic one).
+      if (node.effect.kind === 'automation_unlock') continue
       const expected = categoryEffect[node.category]
       if (expected) expect(node.effect.kind).toBe(expected)
     }
@@ -118,8 +122,38 @@ describe('tech catalogue (static topology invariants)', () => {
   it('every node has a real effect (no dead perks, perLevel > 0)', () => {
     expect(deadPerkNodes()).toEqual([])
     for (const id of TECH_NODE_IDS) {
-      expect(TECH_NODES[id].effect.perLevel).toBeGreaterThan(0)
+      const effect = TECH_NODES[id].effect
+      // M5.1: `automation_unlock` is a BINARY effect (no `perLevel`) but still a REAL
+      // effect — deadPerkNodes() treats it as valid, so it must not fail the numeric
+      // perLevel check. Exclude it here exactly as the engine does.
+      if (effect.kind === 'automation_unlock') continue
+      expect(effect.perLevel).toBeGreaterThan(0)
     }
+  })
+
+  it('M5.1: hosts exactly the three automation_unlock gateways, none of them dead perks', () => {
+    // The three idle-routine gates (con/tra/mil), one per AutomationKind, each a
+    // maxLevel-1 `gateway` with a binary automation_unlock effect — and the catalogue
+    // has grown to 183 nodes (180 + these 3). deadPerkNodes MUST treat them as valid.
+    expect(TECH_NODE_IDS.length).toBe(183)
+    const autoNodes = TECH_NODE_IDS.filter(
+      (id) => TECH_NODES[id].effect.kind === 'automation_unlock',
+    )
+    expect(autoNodes).toEqual(['con_automation', 'tra_automation', 'mil_automation'])
+    const targets = autoNodes.map((id) => {
+      const e = TECH_NODES[id].effect
+      return e.kind === 'automation_unlock' ? e.target : null
+    })
+    expect(targets).toEqual(['build', 'recruit', 'attack'])
+    for (const id of autoNodes) {
+      expect(TECH_NODES[id].archetype).toBe('gateway')
+      expect(TECH_NODES[id].maxLevel).toBe(1)
+      // A real effect, never reported as a dead perk.
+      expect(deadPerkNodes()).not.toContain(id)
+    }
+    // The topology stays a healthy DAG with no orphans even with the new gateways.
+    expect(techHasCycle()).toBe(false)
+    expect(orphanNodes()).toEqual([])
   })
 
   it('every maxLevel is in 1..10 and matches its archetype band', () => {
@@ -366,6 +400,58 @@ describe('aggregateTechMods — M3.2 combat / logistics / cost fields', () => {
   })
 })
 
+describe('aggregateTechMods — M5.1 automation unlocks', () => {
+  it('reports all automations LOCKED for an empty tree', () => {
+    expect(aggregateTechMods({}).automations).toEqual({
+      build: false,
+      recruit: false,
+      attack: false,
+    })
+  })
+
+  it('flips exactly the matching gate for each automation_unlock node, others stay locked', () => {
+    expect(aggregateTechMods({ con_automation: 1 }).automations).toEqual({
+      build: true,
+      recruit: false,
+      attack: false,
+    })
+    expect(aggregateTechMods({ tra_automation: 1 }).automations).toEqual({
+      build: false,
+      recruit: true,
+      attack: false,
+    })
+    expect(aggregateTechMods({ mil_automation: 1 }).automations).toEqual({
+      build: false,
+      recruit: false,
+      attack: true,
+    })
+  })
+
+  it('unlocks all three when every gateway is owned', () => {
+    const mods = aggregateTechMods({
+      con_automation: 1,
+      tra_automation: 1,
+      mil_automation: 1,
+    })
+    expect(mods.automations).toEqual({ build: true, recruit: true, attack: true })
+  })
+
+  it('an automation_unlock contributes NOTHING to the numeric multipliers (binary effect only)', () => {
+    // Owning the gate flips its boolean but leaves every economy/combat/cost field at
+    // the identity — it has no perLevel, so the rest of the bag equals NO_TECH_MODS.
+    const mods = aggregateTechMods({ con_automation: 1 })
+    expect(mods.productionMult).toEqual({ wood: 1, clay: 1, iron: 1 })
+    expect(mods.storageMult).toBe(1)
+    expect(mods.popMult).toBe(1)
+    expect(mods.costReduction).toBe(0)
+    expect(mods.recruitSpeedFrac).toBe(0)
+    expect(mods.marchSpeedFrac).toBe(0)
+    expect(mods.attackMult).toBe(1)
+    expect(mods.defenseMult).toBe(1)
+    expect(mods.lootMult).toBe(1)
+  })
+})
+
 describe('globalResources', () => {
   it('sums each resource across every village', () => {
     const s = createInitialState('tech-pool', 0)
@@ -522,7 +608,11 @@ describe('purchaseTech', () => {
     expect(nodeLevel(s, 'mil_root')).toBe(1)
     // The stored tech map drives the combat multiplier (consumed by combat.ts).
     const mods = aggregateTechMods(s.tech)
-    expect(mods.attackMult).toBeCloseTo(1 + TECH_NODES.mil_root.effect.perLevel, 9)
+    // M5.1 widened TechEffect with the perLevel-less `automation_unlock`; narrow first
+    // (mil_root is an attack_mult node, so its perLevel is real).
+    const eff = TECH_NODES.mil_root.effect
+    const perLevel = eff.kind === 'automation_unlock' ? 0 : eff.perLevel
+    expect(mods.attackMult).toBeCloseTo(1 + perLevel, 9)
   })
 })
 

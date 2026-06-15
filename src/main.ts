@@ -167,7 +167,15 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.12.0',
+  onSetAutomation: (patch) => {
+    // Merge the partial toggle/policy patch into state.automation, then commit +
+    // persist. No recompute: the automation settings are read directly each sub-step
+    // by runAutomation (systems/automation.ts), not folded into derived stats.
+    Object.assign(store.state.automation, patch)
+    store.commit()
+    saveToLocal(store.state)
+  },
+  version: '0.13.0',
   offlineSeconds,
 })
 

@@ -123,6 +123,19 @@ export interface BalanceTargets {
    * confirmation the brief calls for that ascension makes future runs stronger.
    */
   requirePrestigeProductionUplift: boolean
+
+  // --- M5.1 automation (idle routines) goals (HARD — see runner.runAutomationCoverage) ---
+  // These are proof-of-mechanic floors for the SEPARATE automation coverage run (automation
+  // ON), NOT balance-curve warnings: with the deterministic seeded scenario each routine
+  // must do real work, so a regression that stops a routine firing is a genuine bug and
+  // fails the run. (The main run keeps automation OFF, so the 17 balance targets above stay
+  // measured on the pre-M5.1 path and are untouched by M5.1.)
+  /** Building levels AUTO-BUILD must add over the coverage run (>= 1 = the routine fired). */
+  minAutomationBuilt: number
+  /** Units AUTO-RECRUIT must train over the coverage run (>= 1 = the routine topped up). */
+  minAutomationRecruited: number
+  /** Attacks AUTO-ATTACK must dispatch-and-resolve over the coverage run (>= 1). */
+  minAutomationAttacked: number
 }
 
 export const TARGETS: BalanceTargets = {
@@ -191,6 +204,17 @@ export const TARGETS: BalanceTargets = {
   minAscensions: 1,
   minPrestigePurchases: 8,
   requirePrestigeProductionUplift: true,
+
+  // M5.1: automation online. With the three gateways unlocked and every toggle ON, the
+  // SEPARATE coverage run (automation OFF in the main run, so the goals above are untouched)
+  // must show each idle routine doing real work over a one-hour span: auto-build raises a
+  // building level, auto-recruit trains its chosen unit, and auto-attack dispatches a march
+  // at the nearest beatable barbarian. Floors sit at the contract proof-of-mechanic level
+  // (>= 1); a healthy run far exceeds them (the seeded capital auto-builds many levels, keeps
+  // an axeman stack topped up and raids the nearby tier-1 camps continuously).
+  minAutomationBuilt: 1,
+  minAutomationRecruited: 1,
+  minAutomationAttacked: 1,
 
   // M3.2: tech online, WIDENED to ~180 nodes across 9 categories (economy/storage/
   // settlement + the new military/fortification/logistics/plunder/construction/training

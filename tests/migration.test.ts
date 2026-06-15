@@ -62,7 +62,7 @@ describe('migration v1 -> current', () => {
   it('migrate() chains v1->...->v8: seeds buildings, popCap, units, queue, combat, coords + world, nobles + loyalty, the tech map and wraps into villages.v0', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(9)
+    expect(migrated.version).toBe(10)
     expect(migrated.version).toBe(SAVE_VERSION)
     // v4->v5: the lone economy is wrapped under villages.v0 with a bijective order.
     expect(migrated.villageOrder).toEqual(['v0'])
@@ -268,7 +268,7 @@ describe('migration v4 -> current', () => {
   it('wraps the lone village under villages.v0 (Stolica) and globalises the battle log', () => {
     const m = migrate(rawV4())
 
-    expect(m.version).toBe(9)
+    expect(m.version).toBe(10)
     expect(m.version).toBe(SAVE_VERSION)
     // Bijective single-village order: exactly one ordered id, exactly one village.
     expect(m.villageOrder).toEqual(['v0'])
@@ -431,7 +431,7 @@ describe('migration v5 -> v6', () => {
   it('pins the capital to WORLD_CENTER, generates the barbarian world, and upgrades the legacy march', () => {
     const m = migrate(rawV5())
 
-    expect(m.version).toBe(9)
+    expect(m.version).toBe(10)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -582,7 +582,7 @@ describe('migration v6 -> v7', () => {
   it('backfills the academy building, the noble unit (roster + marches) and full barbarian loyalty', () => {
     const m = migrate(rawV6())
 
-    expect(m.version).toBe(9)
+    expect(m.version).toBe(10)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -740,7 +740,7 @@ describe('migration v7 -> v8', () => {
   it('backfills the empty account-wide tech map and carries everything else through', () => {
     const m = migrate(rawV7())
 
-    expect(m.version).toBe(9)
+    expect(m.version).toBe(10)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: an empty passive-tree map (absent key = level 0).
     expect(m.tech).toEqual({})
@@ -883,7 +883,7 @@ describe('migration v8 -> v9', () => {
   it('backfills the zero permanent prestige record and carries everything else through', () => {
     const m = migrate(rawV8())
 
-    expect(m.version).toBe(9)
+    expect(m.version).toBe(10)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the zero permanent prestige (ascension) record.
     expect(m.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
@@ -961,6 +961,158 @@ describe('migration v8 -> v9', () => {
     // recomputeDerived ran on import (with empty prestige mods + the eco_root tech mod),
     // so production reflects sawmill lvl 2 (base 2) lifted by the +0.04 production
     // multiplier (eco_root level 2 → 1.04). The prestige bag is identity, so it adds nothing.
+    expect(Number(state.villages.v0.production.wood.toString())).toBeCloseTo(2.08, 6)
+  })
+})
+
+/**
+ * A raw v9 save: the multi-village + conquest + tech + prestige shape right before M5.1.
+ * It already carries everything through v8->v9 (a permanent `prestige` record) but
+ * predates the idle-automation toggles + policy: there is NO `automation` field at the
+ * top level. Exactly the one thing the v9->v10 migration must backfill —
+ * `automation: { build: false, recruit: false, attack: false, recruitUnit: null,
+ * recruitTarget: 0 }`, the all-off default (the routines are read straight from the
+ * state each sub-step, so nothing derived is stored/seeded) — without disturbing
+ * anything else. All-off means a migrated save plays EXACTLY like pre-M5.1.
+ */
+function rawV9() {
+  return {
+    version: 9,
+    seed: 'v9',
+    rngState: 777,
+    createdAt: 1000,
+    lastSeen: 2000,
+    villages: {
+      v0: {
+        id: 'v0',
+        name: 'Stolica',
+        x: WORLD_CENTER.x,
+        y: WORLD_CENTER.y,
+        resources: { wood: D(10), clay: D(20), iron: D(30) },
+        production: { wood: D(2), clay: D(0.8), iron: D(0.5) },
+        storageCap: D(4000),
+        popCap: D(22),
+        buildings: { hq: 1, sawmill: 2, clay_pit: 1, iron_mine: 1, warehouse: 1, farm: 1, barracks: 1, academy: 0 },
+        units: { spearman: 5, swordsman: 0, axeman: 3, noble: 0 },
+        recruitQueue: [],
+        marches: [],
+        raidTimer: 500,
+      },
+    },
+    villageOrder: ['v0'],
+    world: {
+      barbarians: [
+        { id: 'b0', x: 210, y: 198, level: 2, name: 'Obóz barbarzyńców (poz. 2)', loyalty: 100 },
+      ],
+    },
+    battleLog: [],
+    tech: { eco_root: 2 },
+    prestige: { points: 3, totalEarned: 5, ascensions: 1, nodes: {} },
+    // NB: no `automation` field yet — that is what v9->v10 backfills (all-off default).
+  }
+}
+
+describe('migration v9 -> v10', () => {
+  it('backfills the all-off automation record and carries everything else through', () => {
+    const m = migrate(rawV9())
+
+    expect(m.version).toBe(10)
+    expect(m.version).toBe(SAVE_VERSION)
+    // The single new top-level field: the all-off automation toggles + empty policy.
+    expect(m.automation).toEqual({
+      build: false,
+      recruit: false,
+      attack: false,
+      recruitUnit: null,
+      recruitTarget: 0,
+    })
+
+    // Everything the earlier migrations produced carries through verbatim (v9->v10
+    // touches nothing but `automation` and `version`).
+    expect(m.tech).toEqual({ eco_root: 2 })
+    expect(m.prestige).toEqual({ points: 3, totalEarned: 5, ascensions: 1, nodes: {} })
+    expect(m.villageOrder).toEqual(['v0'])
+    const v0 = m.villages.v0
+    expect(v0.name).toBe('Stolica')
+    expect(v0.buildings.barracks).toBe(1)
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.resources.wood.toString()).toBe('10')
+    expect(m.seed).toBe('v9')
+    expect(m.rngState).toBe(777)
+  })
+
+  it('a migrated v9 save passes validateState (the all-off default is always valid)', () => {
+    const v = validateState(migrate(rawV9()))
+    expect(v.version).toBe(SAVE_VERSION)
+    expect(v.automation).toEqual({
+      build: false,
+      recruit: false,
+      attack: false,
+      recruitUnit: null,
+      recruitTarget: 0,
+    })
+  })
+
+  it('preserves an automation record a forward-compat v9 save already carries', () => {
+    // A save that already has an OBJECT `automation` keeps it verbatim — the default only
+    // fills a missing/non-object one — so a hand-edited / newer save round-trips faithfully.
+    const raw = rawV9() as Record<string, unknown>
+    raw.automation = {
+      build: true,
+      recruit: true,
+      attack: false,
+      recruitUnit: 'spearman',
+      recruitTarget: 25,
+    }
+    const m = migrate(raw)
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.automation).toEqual({
+      build: true,
+      recruit: true,
+      attack: false,
+      recruitUnit: 'spearman',
+      recruitTarget: 25,
+    })
+    // A known unit id + an in-range integer target, so the carried record validates.
+    expect(validateState(m).version).toBe(SAVE_VERSION)
+  })
+
+  it('resets a non-object automation field to the all-off default', () => {
+    // A corrupt / wrongly-typed `automation` (string / number / null) is reset to the
+    // all-off default rather than carried through, so the migrated save always validates.
+    for (const bad of ['nope', 5, null] as const) {
+      const raw = rawV9() as Record<string, unknown>
+      raw.automation = bad
+      const m = migrate(raw)
+      expect(m.version).toBe(SAVE_VERSION)
+      expect(m.automation).toEqual({
+        build: false,
+        recruit: false,
+        attack: false,
+        recruitUnit: null,
+        recruitTarget: 0,
+      })
+      expect(validateState(m).version).toBe(SAVE_VERSION)
+    }
+  })
+
+  it('importSave of a v9 export backfills the default automation and re-derives stats', () => {
+    // Encode exactly as exportSave would (Decimals tagged); import migrates v9->v10.
+    const b64 = exportSave(rawV9() as never)
+    const state = importSave(b64)
+
+    expect(state.version).toBe(SAVE_VERSION)
+    expect(state.automation).toEqual({
+      build: false,
+      recruit: false,
+      attack: false,
+      recruitUnit: null,
+      recruitTarget: 0,
+    })
+    // The carried tech + prestige survived the migration too.
+    expect(state.tech).toEqual({ eco_root: 2 })
+    expect(state.prestige).toEqual({ points: 3, totalEarned: 5, ascensions: 1, nodes: {} })
+    // recomputeDerived ran on import (eco_root level 2 → +0.04 production on sawmill lvl 2).
     expect(Number(state.villages.v0.production.wood.toString())).toBeCloseTo(2.08, 6)
   })
 })

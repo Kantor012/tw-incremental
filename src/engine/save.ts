@@ -35,7 +35,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 9
+export const SAVE_VERSION = 10
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -308,6 +308,23 @@ export function migrate(raw: any): any {
         : { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
       version: 9,
     }),
+    // v9 -> v10: idle automation (M5.1). A v9 save predates the automation toggles +
+    // policy, so backfill the single new field — `automation`, the { build, recruit,
+    // attack, recruitUnit, recruitTarget } record — all OFF (no unit chosen, target 0).
+    // Defaulting everything off makes a migrated save behave EXACTLY like pre-M5.1 play
+    // (the routines only fire when both unlocked in the tree AND switched on), so no
+    // balance goal is disturbed. A forward-compat save that already carries an object
+    // `automation` keeps it verbatim; any non-object (corrupt/missing) is reset to the
+    // all-off default. Nothing is recomputed here (automation is read straight from the
+    // state by runAutomation each sub-step, not a derived field); importSave's
+    // recomputeDerived pass still runs afterwards exactly as for every other migration.
+    9: (s) => ({
+      ...s,
+      automation: isObject(s.automation)
+        ? s.automation
+        : { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
+      version: 10,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -483,7 +500,9 @@ function validateVillage(v: unknown, id: string): void {
  * an integer level within that node's [0, maxLevel] band; unknown keys are rejected),
  * and finally the M4.1 `prestige` record is checked (the PP counters `points` /
  * `totalEarned` / `ascensions` are finite, non-negative numbers, and its `nodes` map
- * follows the same known-id / [0, maxLevel] rule as `tech`).
+ * follows the same known-id / [0, maxLevel] rule as `tech`), and finally the M5.1
+ * `automation` record is checked (the three switches are booleans, `recruitUnit` is
+ * `null` or a known unit id, and `recruitTarget` is a non-negative integer).
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -677,6 +696,36 @@ export function validateState(s: unknown): GameState {
     if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
       throw new Error(`save: invalid prestige level ${nodeId}`)
     }
+  }
+
+  // Idle automation toggles + policy (M5.1) — the player's ON/OFF state, not a derived
+  // field (runAutomation reads it straight from the state each sub-step). The three
+  // switches are plain booleans; `recruitUnit` is the unit auto-recruit tops up — `null`
+  // (none chosen yet) or a KNOWN unit id, anything else would mis-target recruitment and
+  // then get autosaved; `recruitTarget` is the standing-count goal, a finite integer >= 0
+  // (a NaN/negative/fractional would loop or never settle the auto-recruit deficit). The
+  // v9->v10 migration guarantees the all-off default, so a migrated save always passes.
+  const { automation } = s
+  if (!isObject(automation)) throw new Error('save: missing automation')
+  for (const key of ['build', 'recruit', 'attack'] as const) {
+    if (typeof automation[key] !== 'boolean') {
+      throw new Error(`save: invalid automation ${key}`)
+    }
+  }
+  const recruitUnit = automation.recruitUnit
+  if (
+    recruitUnit !== null &&
+    (typeof recruitUnit !== 'string' || !(UNIT_IDS as readonly string[]).includes(recruitUnit))
+  ) {
+    throw new Error('save: invalid automation recruitUnit')
+  }
+  const recruitTarget = automation.recruitTarget
+  if (
+    typeof recruitTarget !== 'number' ||
+    !Number.isInteger(recruitTarget) ||
+    recruitTarget < 0
+  ) {
+    throw new Error('save: invalid automation recruitTarget')
   }
 
   return s as unknown as GameState

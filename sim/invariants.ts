@@ -1077,3 +1077,93 @@ export function checkRoundTrip(state: GameState): InvariantResult {
     detail: ok ? undefined : 'serialize(deserialize(serialize(s))) !== serialize(s)',
   }
 }
+
+/**
+ * Put a fresh state into the M5.1 idle-automation scenario: every routine UNLOCKED and
+ * TOGGLED ON, on a matured single capital that gives all three something to do from the
+ * very first sub-step. Used by both the automation-determinism check below and the
+ * separate progress coverage run (runner.runAutomationCoverage). Pure, Node-safe and
+ * deterministic — applied identically to every branch, so the only thing it can ever
+ * reveal is a genuine online/offline split or a stalled routine, never seeding noise.
+ *
+ * The three gateways are unlocked by setting their tech levels directly:
+ * {@link import('../src/systems/tech').aggregateTechMods} flips
+ * `TechModifiers.automations[*]` on at level >= 1 and reads ONLY the `automation_unlock`
+ * nodes' own levels (not their prerequisites) — and `automation_unlock` is a binary
+ * effect with no economic roll-up — so the three gates alone unlock the routines with
+ * zero side effect on production / cost / combat. (The unmet prerequisites are irrelevant
+ * here; the save layer validates node ids + level bounds, not the prerequisite DAG, so the
+ * state still serialises / round-trips cleanly — this coverage deliberately does not run
+ * checkTechState, whose DAG check is exercised by the main run instead.)
+ *
+ * Toggles all ON with an auto-recruit policy of `recruitTarget` axemen: the axeman is the
+ * offensive workhorse, so it doubles as the auto-attack stack — the recruit -> attack idle
+ * loop the routine is meant to drive. A standing axeman garrison is seeded so auto-attack
+ * has an idle army to dispatch immediately; nobles stay at 0 (the routine must never march
+ * them). Resources are filled to the freshly-derived storage cap so auto-build can buy on
+ * step one, capped EXACTLY at storageCap so the resources-within-cap invariant holds from
+ * the first sample.
+ */
+export function seedAutomation(state: GameState): void {
+  state.tech.con_automation = 1 // -> automations.build
+  state.tech.tra_automation = 1 // -> automations.recruit
+  state.tech.mil_automation = 1 // -> automations.attack
+
+  state.automation = {
+    build: true,
+    recruit: true,
+    attack: true,
+    recruitUnit: 'axeman',
+    recruitTarget: 80,
+  }
+
+  const v = firstVillage(state)
+  v.buildings.hq = 5
+  v.buildings.sawmill = 10
+  v.buildings.clay_pit = 10
+  v.buildings.iron_mine = 10
+  v.buildings.warehouse = 12 // cap = 1000 + 12·3000 = 37000 — ample build headroom
+  v.buildings.farm = 15 // popCap = 10 + 15·12 = 190 — ample recruit headroom
+  v.buildings.barracks = 5 // unlocks recruit/attack, speeds training
+  // Fold the new levels (with the economy-neutral automation tech) into production /
+  // storageCap / popCap exactly as the engine would, THEN top resources up to the cap.
+  recomputeDerived(state)
+  for (const r of RESOURCE_IDS) v.resources[r] = v.storageCap
+  v.units.axeman = 30
+}
+
+/**
+ * AUTOMATION offline/online parity (M5.1): the idle routines run inside the fixed-grid
+ * sub-step ({@link import('../src/engine/tick').simulate} → subStep → runAutomation), so
+ * crediting a span as one big {@link simulate} (online catch-up) must be byte-identical to
+ * the chunked offline path ({@link applyOffline}) WITH automation ON. Mirrors
+ * {@link checkOfflineDeterminism} but seeds the full automation scenario first, so the
+ * build / recruit / attack mutations the routine makes every sub-step are exercised in BOTH
+ * branches and proven to replay identically — the determinism guarantee the brief requires.
+ *
+ * Both branches start from the SAME {@link seedAutomation} state and credit the same span,
+ * so any divergence is a real automation/offline split, not seeding noise. `seconds` must
+ * stay within {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the callers use
+ * an hour, well inside the cap) so applyOffline credits the whole span.
+ */
+export function checkAutomationDeterminism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedAutomation(big)
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedAutomation(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const a = serialize(big)
+  const b = serialize(chunked)
+  const ok = a === b
+  return {
+    name: 'automation-determinism',
+    ok,
+    detail: ok
+      ? undefined
+      : 'chunked offline catch-up diverged from a single-step simulate WITH automation ON (auto build/recruit/attack)',
+  }
+}

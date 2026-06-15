@@ -161,6 +161,17 @@ export interface RunMetrics {
    * > 0 proves the start-resource bonus is live; 0 just means the bot bought no supply node.
    */
   prestigeStartResourceBonus: number
+
+  // --- M5.1 automation (idle routines) ---
+  // Measured by a SEPARATE coverage run (see runner.runAutomationCoverage) with the three
+  // automation gateways unlocked and every toggle ON — kept apart from the MAIN run, which
+  // leaves automation OFF so the 17 balance goals stay measured on the pre-M5.1 game path.
+  /** Building levels the AUTO-BUILD routine added over the coverage run (proof it fired). */
+  automationBuilt: number
+  /** Units the AUTO-RECRUIT routine trained over the coverage run (training completions). */
+  automationRecruited: number
+  /** Attacks the AUTO-ATTACK routine dispatched-and-resolved over the coverage run. */
+  automationAttacked: number
 }
 
 /** Per-run counters the runner threads into {@link collect}. */
@@ -206,6 +217,22 @@ export interface PrestigeRunStats {
   productionMult: number
   /** Per-resource start-resource head-start the surviving prestige nodes grant (bonus proof). */
   startResourceBonus: number
+}
+
+/**
+ * Automation (M5.1) counters from the SEPARATE coverage run (see
+ * runner.runAutomationCoverage). Kept apart from {@link RunStats} because it is produced by
+ * a different run (automation ON) than the main economy/combat metrics (automation OFF), so
+ * the 17 balance goals stay measured on the pre-M5.1 game path. {@link collect} folds these
+ * straight into the matching {@link RunMetrics} automation fields.
+ */
+export interface AutomationRunStats {
+  /** Building levels the auto-build routine added over the run. */
+  built: number
+  /** Units the auto-recruit routine trained over the run (training completions). */
+  recruited: number
+  /** Attacks the auto-attack routine dispatched-and-resolved over the run. */
+  attacked: number
 }
 
 /**
@@ -322,6 +349,7 @@ export function collect(
   state: GameState,
   stats: RunStats,
   prestige: PrestigeRunStats,
+  automation: AutomationRunStats,
 ): RunMetrics {
   const first = firstVillage(state)
 
@@ -431,5 +459,9 @@ export function collect(
     prestigeLevelsOwned: prestige.levelsOwned,
     prestigeProductionMult: prestige.productionMult,
     prestigeStartResourceBonus: prestige.startResourceBonus,
+
+    automationBuilt: automation.built,
+    automationRecruited: automation.recruited,
+    automationAttacked: automation.attacked,
   }
 }
