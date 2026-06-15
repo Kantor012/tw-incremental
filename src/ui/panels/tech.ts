@@ -1,98 +1,57 @@
-import { RESOURCE_IDS, type ResourceId, type GameState } from '../../engine/state'
+import { RESOURCE_IDS, type ResourceId } from '../../engine/state'
 import { formatNumber } from '../../engine/format'
 import {
   TECH_NODES,
   TECH_NODE_IDS,
-  TECH_ROOTS,
   type TechNode,
   type TechEffect,
-  type TechArchetype,
   type TechCategory,
 } from '../../content/tech'
 import {
   nodeLevel,
   prerequisitesMet,
-  canPurchaseTech,
   techCost,
   globalResources,
+  canPurchaseTech,
 } from '../../systems/tech'
-import { layoutTree, techEdges, type NodePos } from '../../systems/techLayout'
+import { layoutTree, techEdges } from '../../systems/techLayout'
 import type { UiCtx, Panel } from '../types'
-import { h, svg, SVG_NS, resourceIcon, RESOURCE_NAMES } from '../dom'
+import { h, resourceIcon, RESOURCE_NAMES } from '../dom'
+import { buildTreeView, type TreeViewConfig } from './treeView'
 
 /**
- * "Rozwój" panel (M3.1) — the global, account-wide PASSIVE TREE rendered as a
- * Path-of-Exile-style radial CONSTELLATION. It is the spatial twin of the tech
- * data in src/content/tech.ts: a pan/zoom SVG whose node positions come straight
- * from the deterministic radial layout ({@link layoutTree}) and whose links come
- * from the prerequisite topology ({@link techEdges}) — never hand-placed.
+ * "Rozwój" panel (M3.1 → M4.2) — the global, account-wide PASSIVE TREE rendered as a
+ * Path-of-Exile-style radial CONSTELLATION.
  *
- * Each node is drawn by ARCHETYPE (a small dot for a minor, a larger ringed dot
- * for a notable, a bigger diamond for a gateway) and coloured by STATE — locked
- * (prerequisites unmet, dimmed), available (unlocked, not yet bought, accent
- * outline), owned (level 1..max-1, gold) and maxed (bright, thick ring). State is
- * NEVER carried by colour alone (WCAG 1.4.1): shape/size differ by archetype, the
- * outline/fill differ by state, every node has an aria-label carrying its state +
- * level, and an on-screen legend explains the four states. Selecting an unlocked
- * node opens a detail card (name, effect-per-level, current/max level, the cost of
- * the next level from {@link techCost}, the GLOBAL resource pool) with a "Wykup"
- * button that commits through {@link UiCtx.onPurchaseTech}.
+ * As of M4.2 this is a THIN adapter over the generic constellation renderer
+ * {@link buildTreeView} (panels/treeView.ts): the camera (pan/zoom/wheel/pinch/fit/zoom
+ * buttons/ResizeObserver), keyboard navigation (arrow-key cone stepping, Enter/Space,
+ * roving tabindex), the legend, the category quick-jump bar, the selection ring and the
+ * detail card all live ONCE in the renderer. This module supplies only the TECH-SPECIFIC
+ * configuration — the node/edge topology + deterministic layout, the per-category labels
+ * and hues, the live state/affordability callbacks, the resource-cost breakdown, the
+ * effect text and the GLOBAL resource pool the tree is bought from. Before M4.2 this file
+ * carried its own full copy of the renderer; that copy is now deleted, so the tech tree
+ * and the prestige tree (panels/prestige.ts) cannot drift apart.
  *
- * Everything is built procedurally with `createElementNS` (the hard rules: zero
- * external assets, no innerHTML with data); the chrome (`.tech-wrap`, `.tech-svg`,
- * `.tech-node--*`, `.tech-edge`, the detail card, the legend) is styled from
- * design-system tokens in the stylesheet — this module owns only geometry and
- * behaviour.
+ * What the tech tree adds on top of the generic view:
+ *  - the GLOBAL resource pool header (the currency tech is paid in), supplied opaquely
+ *    via {@link TreeViewConfig.currencyEl} as a STABLE element the renderer mounts once;
+ *  - a PER-RESOURCE next-level cost breakdown ({@link TreeViewConfig.costItems}: one
+ *    icon+name+amount chip per resource, with a per-resource shortfall cue against the
+ *    pool) instead of a single cost string;
+ *  - affordability = the pool covers EVERY resource of the next level.
  *
- * Accessibility: the SVG is a real, keyboard-driven control surface. Every node is
- * a focusable button (role=button, Enter/Space to select, arrow keys to step to the
- * nearest node in that direction); a roving tabindex keeps exactly one node tabbable
- * so the Tab key reaches the detail card without walking all ~70 nodes.
+ * Performance: {@link globalResources} (a sum over every village × resource) is computed
+ * ONCE per update — inside {@link TreeViewConfig.currencyEl}, which the renderer calls
+ * first on every refresh — and cached, so the per-node affordability cue stays O(nodes)
+ * rather than O(nodes × villages).
  *
- * Reactivity (panel contract): the DOM is built ONCE and cached. {@link Panel.update}
- * never rebuilds the tree — it pokes the viewBox, per-node state classes/labels (only
- * when a node's state actually changes), the selection ring and the detail card.
- *
- * Determinism: a pure VIEW. Positions/edges are derived from the static topology and
- * the live `state.tech` levels; it owns no clock and no RNG (pan/zoom are ephemeral
- * camera state, never persisted).
- *
- * Scale note: at the M3.1 size (~70 nodes) every node is rendered up front. Beyond
- * roughly 500 nodes (M3.2+) this should switch to viewport culling — only build/keep
- * the nodes whose layout position falls inside the current viewBox (plus a margin)
- * and recycle the rest — so the constellation can grow in WIDTH without a render cost.
+ * Determinism: a pure VIEW. Positions/edges are derived from the static topology
+ * ({@link layoutTree} / {@link techEdges}) and the live `state.tech` levels; it owns no
+ * clock and no RNG. Reactivity follows the panel contract: build once, then `update()`
+ * pokes the renderer (which pokes the viewBox, per-node state and the detail card).
  */
-
-/** Default viewBox aspect (h/w) used before the element has been measured. */
-const DEFAULT_ASPECT = 0.62
-/** Multiplicative zoom per wheel notch / button press. */
-const ZOOM_STEP = 1.2
-/** Pixels of pointer travel that turn a click into a pan (so a tap still selects). */
-const PAN_THRESHOLD = 4
-/** Target on-screen diameter (px) for a node's transparent hit area (touch). */
-const HIT_TARGET_PX = 44
-
-/** The four mutually-exclusive node states (level + prerequisite derived). */
-type NodeState = 'locked' | 'available' | 'owned' | 'maxed'
-
-/** Cached handles for one rendered tech node. */
-interface NodeRefs {
-  g: SVGGElement
-  shape: SVGElement
-  hit: SVGCircleElement
-  node: TechNode
-  pos: NodePos
-  /** Visible radius in LAYOUT units (drives the hit floor + selection ring). */
-  radius: number
-  /** Signature of the last DOM-applied state, so update() only writes on change. */
-  lastKey: string
-}
-
-/** Cached handles for one rendered prerequisite link. */
-interface EdgeRefs {
-  line: SVGElement
-  from: string
-}
 
 /** PL display name per category (matches the constellation arms). */
 const CATEGORY_LABEL: Record<TechCategory, string> = {
@@ -108,12 +67,11 @@ const CATEGORY_LABEL: Record<TechCategory, string> = {
 }
 
 /**
- * Per-category HUE, as a reference to a design token defined in tokens.css (never a
- * raw hex here). Set on each node `g`, each `.tech-edge` and each arm label via the
- * `--cat` custom property, so an arm has a stable spatial IDENTITY (colour + named
- * label) independent of a node's STATE fill — at ~180 nodes across 9 arms this is the
- * primary navigational affordance of the PoE-style constellation (WCAG 1.4.1: colour
- * is a SECONDARY cue layered on top of shape/label/legend, never the only one).
+ * Per-category HUE, as a reference to a design token defined in tokens.css (never a raw
+ * hex here). The renderer sets it as the `--cat` custom property on each node, edge and
+ * arm label, so an arm has a stable spatial IDENTITY (colour + named label) independent
+ * of a node's STATE fill (WCAG 1.4.1: colour is a SECONDARY cue layered on top of shape,
+ * label and legend, never the only one).
  */
 const CATEGORY_HUE: Record<TechCategory, string> = {
   economy: 'var(--cat-economy)',
@@ -125,34 +83,6 @@ const CATEGORY_HUE: Record<TechCategory, string> = {
   plunder: 'var(--cat-plunder)',
   construction: 'var(--cat-construction)',
   training: 'var(--cat-training)',
-}
-
-/** Stable category order (declaration order) for the legend, jump bar and groups. */
-const CATEGORY_ORDER = Object.keys(CATEGORY_LABEL) as TechCategory[]
-
-/** PL display name per archetype (carried in the node aria-label + detail card). */
-const ARCHETYPE_LABEL: Record<TechArchetype, string> = {
-  minor: 'drobny węzeł',
-  notable: 'węzeł znaczący',
-  gateway: 'brama',
-}
-
-/** PL display name per state (aria-label + legend; the non-colour state cue in text). */
-const STATE_LABEL: Record<NodeState, string> = {
-  locked: 'zablokowany',
-  available: 'dostępny',
-  owned: 'wykupiony',
-  maxed: 'maksymalny',
-}
-
-/** Round to 2dp for compact, stable viewBox / geometry strings. */
-function fmt2(n: number): string {
-  return (Math.round(n * 100) / 100).toString()
-}
-
-/** Clamp a fraction to [0, 1] (used to map an on-screen rect into viewBox fractions). */
-function clamp01(n: number): number {
-  return n < 0 ? 0 : n > 1 ? 1 : n
 }
 
 /** A percentage label for a per-level fraction (0.03 -> "3%", 0.012 -> "1.2%"). */
@@ -205,170 +135,23 @@ function effectSign(effect: TechEffect): string {
   return isReduction(effect) ? '−' : '+'
 }
 
-/** Full "±X% <subject> / poziom" line for the detail card. */
+/** Full "±X% <subject> / poziom" line for the detail card + node aria-label. */
 function effectText(node: TechNode): string {
   return effectSign(node.effect) + pct(node.effect.perLevel) + ' ' + effectSubject(node) + ' / poziom'
 }
 
-/** Derive a node's visual state from the live `state.tech` levels + prerequisites. */
-function stateOf(state: GameState, node: TechNode): NodeState {
-  const lvl = nodeLevel(state, node.id)
-  if (lvl >= node.maxLevel) return 'maxed'
-  if (lvl > 0) return 'owned'
-  return prerequisitesMet(state, node.id) ? 'available' : 'locked'
-}
-
-/** Diamond polygon points (gateway glyph) centred on (cx, cy) with "radius" r. */
-function diamond(cx: number, cy: number, r: number): string {
-  return `${fmt2(cx)},${fmt2(cy - r)} ${fmt2(cx + r)},${fmt2(cy)} ${fmt2(cx)},${fmt2(cy + r)} ${fmt2(cx - r)},${fmt2(cy)}`
-}
-
 /**
- * Build the "Rozwój" constellation panel. Reads {@link UiCtx} for the live store and
- * the `onPurchaseTech` commit; every affordability/availability cue comes straight
- * from the shared engine helpers (canPurchaseTech / techCost / globalResources) so
- * what the card shows can never disagree with what a purchase actually does.
+ * Build the "Rozwój" constellation panel by feeding the TECH-SPECIFIC config into the
+ * generic {@link buildTreeView} renderer. Reads {@link UiCtx} for the live store and the
+ * `onPurchaseTech` commit; every affordability/availability cue comes straight from the
+ * shared engine helpers (prerequisitesMet / techCost / globalResources) so what the card
+ * shows can never disagree with what a purchase actually does.
  */
 export function createTechPanel(ctx: UiCtx): Panel {
-  const el = h('div', 'tech-panel')
-
-  // Narrow-viewport probe (mirrors the CSS breakpoint). Pure VIEW state — used to
-  // avoid auto-opening the detail sheet over a short mobile constellation.
-  const narrowMql =
-    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-      ? window.matchMedia('(max-width: 639.98px)')
-      : null
-  const isNarrow = (): boolean => (narrowMql ? narrowMql.matches : false)
-
-  // ---- Static topology (computed once; layout is deterministic) ------------
-  const positions = layoutTree()
-  const edges = techEdges()
-  // Ids that actually got a position (defensive: layout owns every id, but never
-  // crash the whole tab if one is missing — just skip it).
-  const placedIds = TECH_NODE_IDS.filter((id) => positions[id])
-
-  // Per-category ANCHOR node — the camera target for the quick-jump bar and the
-  // position of the on-canvas arm label. Prefer the arm's prereq-free root (a node in
-  // TECH_ROOTS); fall back to the first placed node of that category. Deterministic
-  // (stable TECH_ROOTS / TECH_NODE_IDS order); a category with no placed node is absent.
-  const categoryAnchor = {} as Record<TechCategory, string>
-  for (const id of TECH_ROOTS) {
-    const c = TECH_NODES[id].category
-    if (categoryAnchor[c] === undefined && positions[id]) categoryAnchor[c] = id
-  }
-  for (const id of placedIds) {
-    const c = TECH_NODES[id].category
-    if (categoryAnchor[c] === undefined) categoryAnchor[c] = id
-  }
-
-  // Bounding box of the constellation (for the initial frame + pan clamps).
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const id of placedIds) {
-    const p = positions[id]
-    if (p.x < minX) minX = p.x
-    if (p.x > maxX) maxX = p.x
-    if (p.y < minY) minY = p.y
-    if (p.y > maxY) maxY = p.y
-  }
-  if (!Number.isFinite(minX)) {
-    minX = 0
-    minY = 0
-    maxX = 0
-    maxY = 0
-  }
-  const contentW = Math.max(1e-6, maxX - minX)
-  const contentH = Math.max(1e-6, maxY - minY)
-  const centerX = (minX + maxX) / 2
-  const centerY = (minY + maxY) / 2
-
-  // Characteristic spacing = the tightest gap between any two nodes. Node radii are
-  // sized as a fraction of it so two adjacent nodes can never visually overlap
-  // (largest pair-sum 0.92·unit < unit), independent of the layout's coordinate scale.
-  let unit = Infinity
-  for (let i = 0; i < placedIds.length; i++) {
-    const a = positions[placedIds[i]]
-    for (let j = i + 1; j < placedIds.length; j++) {
-      const b = positions[placedIds[j]]
-      const d = Math.hypot(a.x - b.x, a.y - b.y)
-      if (d > 0 && d < unit) unit = d
-    }
-  }
-  if (!Number.isFinite(unit) || unit <= 0) {
-    unit = Math.max(contentW, contentH) / Math.max(1, placedIds.length) || 1
-  }
-
-  const radiusFor = (a: TechArchetype): number =>
-    a === 'gateway' ? unit * 0.46 : a === 'notable' ? unit * 0.36 : unit * 0.26
-  const maxRadius = unit * 0.46
-
-  // ---- Camera bounds (ephemeral; never persisted) -------------------------
-  const fitBase = Math.max(contentW, contentH) + maxRadius * 2 + unit
-  const MIN_VIEW_W = Math.max(unit * 2.5, fitBase / 60)
-  const MAX_VIEW_W = fitBase * 2.5
-  const PAD = Math.max(unit * 4, maxRadius * 3)
-  const clampViewW = (w: number): number => Math.max(MIN_VIEW_W, Math.min(MAX_VIEW_W, w))
-  const clampCx = (c: number): number => Math.max(minX - PAD, Math.min(maxX + PAD, c))
-  const clampCy = (c: number): number => Math.max(minY - PAD, Math.min(maxY + PAD, c))
-
-  let viewCx = centerX
-  let viewCy = centerY
-  let viewW = clampViewW(
-    Math.max(contentW + maxRadius * 2 + unit, (contentH + maxRadius * 2 + unit) / DEFAULT_ASPECT),
-  )
-  let viewH = viewW * DEFAULT_ASPECT
-
-  // ---- Intro note + state legend ------------------------------------------
-  const note = h(
-    'p',
-    'tech-note muted',
-    'Drzewo rozwoju (globalne, na całe konto). Przeciągnij, aby przesunąć, kółkiem lub ' +
-      'przyciskami przybliż. Kliknij węzeł, aby zobaczyć efekt i koszt; węzły kupujesz ze ' +
-      'WSPÓLNEJ puli surowców wszystkich wiosek. Strzałkami przechodzisz między węzłami, ' +
-      'Enter wybiera.',
-  )
-  note.setAttribute('role', 'note')
-  el.appendChild(note)
-
-  const legend = h('div', 'tech-legend')
-  legend.setAttribute('role', 'note')
-  const addLegend = (cls: string, label: string): void => {
-    const item = h('span', 'tech-legend-item')
-    const sw = h('span', 'tech-legend-swatch ' + cls)
-    sw.setAttribute('aria-hidden', 'true')
-    item.appendChild(sw)
-    item.appendChild(document.createTextNode(' ' + label))
-    legend.appendChild(item)
-  }
-  addLegend('is-locked', 'Zablokowany (brak wymagań)')
-  addLegend('is-available', 'Dostępny (można kupić)')
-  addLegend('is-owned', 'Wykupiony')
-  addLegend('is-maxed', 'Maksymalny')
-  // Archetype shape key (the in-canvas shape language: dot / ring / diamond).
-  addLegend('is-minor', 'Drobny węzeł (kropka)')
-  addLegend('is-notable', 'Węzeł znaczący (pierścień)')
-  addLegend('is-gateway', 'Brama (romb, większy)')
-  el.appendChild(legend)
-
-  // Category colour key — one swatch per arm, hue from the node's `--cat` token so
-  // the legend and the constellation agree (finding: the 9 arms need a colour key).
-  const catLegend = h('div', 'tech-legend tech-legend--cat')
-  catLegend.setAttribute('role', 'note')
-  catLegend.setAttribute('aria-label', 'Legenda kategorii (gałęzi) drzewa rozwoju')
-  for (const cat of CATEGORY_ORDER) {
-    const item = h('span', 'tech-legend-item')
-    const sw = h('span', 'tech-legend-swatch is-cat')
-    sw.style.setProperty('--cat', CATEGORY_HUE[cat])
-    sw.setAttribute('aria-hidden', 'true')
-    item.appendChild(sw)
-    item.appendChild(document.createTextNode(' ' + CATEGORY_LABEL[cat]))
-    catLegend.appendChild(item)
-  }
-  el.appendChild(catLegend)
-
-  // ---- Global resource pool (the currency tech is bought from) ------------
+  // ---- Global resource pool (the currency tech is bought from) -------------
+  // A STABLE element built once and kept up to date by refreshPool(); buildTreeView
+  // mounts it into its own currency bar and only re-swaps if a DIFFERENT element is
+  // returned (which never happens here), so this is the tree's resource-pool header.
   const pool = h('div', 'tech-pool')
   pool.setAttribute('role', 'note')
   pool.setAttribute('aria-label', 'Wspólna pula surowców wszystkich wiosek')
@@ -385,801 +168,99 @@ export function createTechPanel(ctx: UiCtx): Panel {
     pool.appendChild(item)
     poolVals[r] = val
   }
-  el.appendChild(pool)
 
-  // ---- Category quick-jump bar --------------------------------------------
-  // One button per arm: pans/zooms the camera to that arm's anchor (root) in a single
-  // action, so reaching a specific arm at ~180 nodes no longer needs many arrow-key
-  // steps or manual panning (Hick's-law / findability). Each button carries the arm's
-  // hue swatch + PL name, so it also reads as a colour key for the constellation.
-  const jumpBar = h('nav', 'tech-jump')
-  jumpBar.setAttribute('aria-label', 'Skok do gałęzi drzewa rozwoju')
-  for (const cat of CATEGORY_ORDER) {
-    const anchor = categoryAnchor[cat]
-    if (!anchor) continue
-    const btn = h('button', 'btn btn-ghost tech-jump-btn')
-    btn.type = 'button'
-    const sw = h('span', 'tech-jump-swatch')
-    sw.style.setProperty('--cat', CATEGORY_HUE[cat])
-    sw.setAttribute('aria-hidden', 'true')
-    btn.appendChild(sw)
-    btn.appendChild(document.createTextNode(CATEGORY_LABEL[cat]))
-    btn.setAttribute('aria-label', 'Przejdź do gałęzi: ' + CATEGORY_LABEL[cat])
-    btn.addEventListener('click', () => selectAndReveal(anchor, true))
-    jumpBar.appendChild(btn)
-  }
-  el.appendChild(jumpBar)
-
-  // ---- Constellation viewport (SVG) + overlay controls --------------------
-  const wrap = h('div', 'tech-wrap')
-
-  const svgEl = document.createElementNS(SVG_NS, 'svg') as SVGSVGElement
-  svgEl.setAttribute('class', 'tech-svg')
-  svgEl.setAttribute('width', '100%')
-  svgEl.setAttribute('height', '100%')
-  svgEl.setAttribute('preserveAspectRatio', 'xMidYMid meet')
-  svgEl.setAttribute('role', 'group')
-  svgEl.setAttribute(
-    'aria-label',
-    'Konstelacja drzewa rozwoju. Węzły są przyciskami: strzałki przechodzą między nimi, ' +
-      'Enter wybiera, a panel szczegółów pozwala je wykupić.',
-  )
-  wrap.appendChild(svgEl)
-
-  // Drawing layers, back-to-front: edges, nodes, arm labels, overlay (selection ring).
-  const edgesGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
-  edgesGroup.setAttribute('class', 'tech-edges')
-  edgesGroup.setAttribute('aria-hidden', 'true')
-  const nodesGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
-  nodesGroup.setAttribute('class', 'tech-nodes')
-  // Per-category SUBGROUPS (a11y): each arm is a role=group with its name, so a
-  // screen-reader user traversing the ~180 nodes always has arm context. Nodes are
-  // appended into their category's group below (stable CATEGORY_ORDER).
-  const catGroups = {} as Record<TechCategory, SVGGElement>
-  for (const cat of CATEGORY_ORDER) {
-    const cg = document.createElementNS(SVG_NS, 'g') as SVGGElement
-    cg.setAttribute('class', 'tech-cat-group')
-    cg.setAttribute('role', 'group')
-    cg.setAttribute('aria-label', 'Gałąź: ' + CATEGORY_LABEL[cat])
-    nodesGroup.appendChild(cg)
-    catGroups[cat] = cg
-  }
-  // On-canvas arm labels — one named, hue-tinted <text> per arm at its anchor, pushed
-  // radially outward from the hub so each sector is named on the constellation itself.
-  const labelsGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
-  labelsGroup.setAttribute('class', 'tech-arm-labels')
-  labelsGroup.setAttribute('aria-hidden', 'true')
-  for (const cat of CATEGORY_ORDER) {
-    const aid = categoryAnchor[cat]
-    if (!aid) continue
-    const p = positions[aid]
-    const dx = p.x - centerX
-    const dy = p.y - centerY
-    const len = Math.hypot(dx, dy) || 1
-    const off = unit * 1.6
-    const t = svg('text', {
-      x: fmt2(p.x + (dx / len) * off),
-      y: fmt2(p.y + (dy / len) * off),
-      class: 'tech-arm-label',
-    })
-    t.setAttribute('text-anchor', 'middle')
-    t.setAttribute('font-size', fmt2(Math.max(unit * 0.8, 1e-3)))
-    t.style.setProperty('--cat', CATEGORY_HUE[cat])
-    t.textContent = CATEGORY_LABEL[cat]
-    labelsGroup.appendChild(t)
-  }
-  const overlayGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
-  overlayGroup.setAttribute('class', 'tech-overlay')
-  overlayGroup.setAttribute('aria-hidden', 'true')
-
-  const selRing = svg('circle', { class: 'tech-sel-ring', r: '0', fill: 'none' })
-  selRing.setAttribute('vector-effect', 'non-scaling-stroke')
-  selRing.style.display = 'none'
-  overlayGroup.appendChild(selRing)
-
-  svgEl.appendChild(edgesGroup)
-  svgEl.appendChild(nodesGroup)
-  svgEl.appendChild(labelsGroup)
-  svgEl.appendChild(overlayGroup)
-
-  const controls = h('div', 'tech-controls')
-  const zoomOutBtn = h('button', 'btn btn-ghost tech-zoom-btn', '−')
-  zoomOutBtn.type = 'button'
-  zoomOutBtn.setAttribute('aria-label', 'Oddal drzewo')
-  const zoomInBtn = h('button', 'btn btn-ghost tech-zoom-btn', '+')
-  zoomInBtn.type = 'button'
-  zoomInBtn.setAttribute('aria-label', 'Przybliż drzewo')
-  const fitBtn = h('button', 'btn btn-ghost tech-fit-btn', 'Wycentruj')
-  fitBtn.type = 'button'
-  fitBtn.setAttribute('aria-label', 'Wycentruj i pokaż całe drzewo')
-  controls.appendChild(zoomOutBtn)
-  controls.appendChild(zoomInBtn)
-  controls.appendChild(fitBtn)
-  wrap.appendChild(controls)
-  el.appendChild(wrap)
-
-  // ---- Camera plumbing (mirrors the world map) ----------------------------
-  const currentAspect = (): number => {
-    const w = svgEl.clientWidth
-    const hh = svgEl.clientHeight
-    return w > 0 && hh > 0 ? hh / w : DEFAULT_ASPECT
-  }
-  const applyView = (): void => {
-    viewH = viewW * currentAspect()
-    const x = viewCx - viewW / 2
-    const y = viewCy - viewH / 2
-    svgEl.setAttribute('viewBox', `${fmt2(x)} ${fmt2(y)} ${fmt2(viewW)} ${fmt2(viewH)}`)
-  }
-  const zoomBy = (factor: number, fx: number, fy: number): void => {
-    const aspect = currentAspect()
-    const curH = viewW * aspect
-    const wpx = viewCx - viewW / 2 + fx * viewW
-    const wpy = viewCy - curH / 2 + fy * curH
-    const newW = clampViewW(viewW * factor)
-    const newH = newW * aspect
-    viewCx = clampCx(wpx + newW * (0.5 - fx))
-    viewCy = clampCy(wpy + newH * (0.5 - fy))
-    viewW = newW
-    applyView()
-    updateHitRadii()
-  }
-  /** Frame the whole tree (and reset the pan) — the "Wycentruj" action. */
-  const fitView = (): void => {
-    const aspect = currentAspect()
-    const padW = contentW + maxRadius * 2 + unit
-    const padH = contentH + maxRadius * 2 + unit
-    viewW = clampViewW(Math.max(padW, padH / aspect))
-    viewCx = clampCx(centerX)
-    viewCy = clampCy(centerY)
-    applyView()
-    updateHitRadii()
-  }
-
-  zoomInBtn.addEventListener('click', () => zoomBy(1 / ZOOM_STEP, 0.5, 0.5))
-  zoomOutBtn.addEventListener('click', () => zoomBy(ZOOM_STEP, 0.5, 0.5))
-  fitBtn.addEventListener('click', () => fitView())
-
-  svgEl.addEventListener(
-    'wheel',
-    (e: WheelEvent) => {
-      e.preventDefault()
-      const rect = svgEl.getBoundingClientRect()
-      if (rect.width <= 0 || rect.height <= 0) return
-      const fx = (e.clientX - rect.left) / rect.width
-      const fy = (e.clientY - rect.top) / rect.height
-      zoomBy(e.deltaY < 0 ? 1 / ZOOM_STEP : ZOOM_STEP, fx, fy)
-    },
-    { passive: false },
-  )
-
-  // Pointer gestures: one finger/button = pan (capture only past the threshold so a
-  // tap still selects), two fingers = pinch-zoom about their midpoint.
-  const pointers = new Map<number, { x: number; y: number }>()
-  let panActive = false
-  let suppressClick = false
-  let startClientX = 0
-  let startClientY = 0
-  let startCx = 0
-  let startCy = 0
-  let pinchActive = false
-  let pinchStartDist = 1
-  let pinchStartW = viewW
-
-  const pointerList = (): { x: number; y: number }[] => Array.from(pointers.values())
-  const fractionOf = (clientX: number, clientY: number): { fx: number; fy: number } => {
-    const rect = svgEl.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return { fx: 0.5, fy: 0.5 }
-    return { fx: (clientX - rect.left) / rect.width, fy: (clientY - rect.top) / rect.height }
-  }
-  const beginPanFrom = (clientX: number, clientY: number): void => {
-    panActive = false
-    startClientX = clientX
-    startClientY = clientY
-    startCx = viewCx
-    startCy = viewCy
-  }
-
-  svgEl.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return
-    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
-    if (pointers.size === 1) {
-      suppressClick = false
-      beginPanFrom(e.clientX, e.clientY)
-    } else if (pointers.size === 2) {
-      panActive = false
-      pinchActive = true
-      suppressClick = true
-      svgEl.classList.remove('is-panning')
-      const pts = pointerList()
-      pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1
-      pinchStartW = viewW
-      try {
-        svgEl.setPointerCapture(e.pointerId)
-      } catch {
-        /* capture unsupported */
-      }
-    }
-  })
-
-  svgEl.addEventListener('pointermove', (e: PointerEvent) => {
-    const p = pointers.get(e.pointerId)
-    if (!p) return
-    p.x = e.clientX
-    p.y = e.clientY
-
-    if (pinchActive && pointers.size >= 2) {
-      const pts = pointerList()
-      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1
-      const { fx, fy } = fractionOf((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2)
-      const desiredW = clampViewW(pinchStartW * (pinchStartDist / dist))
-      if (viewW !== 0) zoomBy(desiredW / viewW, fx, fy)
-      return
-    }
-
-    if (pointers.size !== 1) return
-    const dxpx = e.clientX - startClientX
-    const dypx = e.clientY - startClientY
-    if (!panActive) {
-      if (Math.hypot(dxpx, dypx) <= PAN_THRESHOLD) return
-      panActive = true
-      svgEl.classList.add('is-panning')
-      try {
-        svgEl.setPointerCapture(e.pointerId)
-      } catch {
-        /* capture unsupported — pan still works */
-      }
-    }
-    const rect = svgEl.getBoundingClientRect()
-    if (rect.width <= 0 || rect.height <= 0) return
-    viewCx = clampCx(startCx - (dxpx * viewW) / rect.width)
-    viewCy = clampCy(startCy - (dypx * viewH) / rect.height)
-    applyView()
-  })
-
-  const endPointer = (e: PointerEvent): void => {
-    if (!pointers.has(e.pointerId)) return
-    pointers.delete(e.pointerId)
-    try {
-      svgEl.releasePointerCapture(e.pointerId)
-    } catch {
-      /* nothing captured */
-    }
-    if (panActive) {
-      suppressClick = true
-      panActive = false
-      svgEl.classList.remove('is-panning')
-    }
-    if (pinchActive && pointers.size < 2) {
-      pinchActive = false
-      suppressClick = true
-      const rest = pointerList()[0]
-      if (rest) beginPanFrom(rest.x, rest.y)
-    }
-  }
-  svgEl.addEventListener('pointerup', endPointer)
-  svgEl.addEventListener('pointercancel', endPointer)
-
-  if (typeof ResizeObserver !== 'undefined') {
-    const ro = new ResizeObserver(() => {
-      applyView()
-      updateHitRadii()
-    })
-    ro.observe(svgEl)
-  }
-
-  // ---- Selection state -----------------------------------------------------
-  let selectedId: string | null = null
-  const select = (id: string): void => {
-    if (suppressClick) {
-      suppressClick = false
-      return
-    }
-    selectedId = id
-    update()
-  }
-
-  // ---- Edges ---------------------------------------------------------------
-  const edgeRefs: EdgeRefs[] = []
-  for (const e of edges) {
-    const a = positions[e.from]
-    const b = positions[e.to]
-    if (!a || !b) continue
-    const line = svg('line', {
-      x1: fmt2(a.x),
-      y1: fmt2(a.y),
-      x2: fmt2(b.x),
-      y2: fmt2(b.y),
-      class: 'tech-edge',
-    })
-    line.setAttribute('vector-effect', 'non-scaling-stroke')
-    // Tint the link by the arm it leads INTO (the dependent node's category), so the
-    // path colour matches the destination arm; the unlocked emphasis is brightness/width.
-    line.style.setProperty('--cat', CATEGORY_HUE[TECH_NODES[e.to].category])
-    edgesGroup.appendChild(line)
-    edgeRefs.push({ line, from: e.from })
-  }
-
-  // ---- Nodes ---------------------------------------------------------------
-  // NOTE (virtualization): at ~70 nodes we render all of them. Past ~500 (M3.2+)
-  // build only nodes whose `pos` is inside the viewBox (plus margin) and recycle the
-  // rest on pan/zoom — the topology already gives us positions to cull against.
-  const nodeRefs: NodeRefs[] = []
-  for (const id of placedIds) {
-    const node = TECH_NODES[id]
-    const p = positions[id]
-    const r = radiusFor(node.archetype)
-
-    const g = document.createElementNS(SVG_NS, 'g') as SVGGElement
-    g.setAttribute('class', 'tech-node tech-node--' + node.archetype)
-    g.setAttribute('role', 'button')
-    // Roving tabindex: only the selected / first node is tabbable (set in update()),
-    // so a keyboard user reaches the detail card without traversing every node.
-    g.setAttribute('tabindex', '-1')
-    // Arm IDENTITY: expose the category hue as `--cat` so the category ring/edge tint
-    // resolve from one place (the node's state fill stays untouched — colour is a
-    // secondary cue layered on top of shape + state).
-    g.style.setProperty('--cat', CATEGORY_HUE[node.category])
-
-    // Transparent, screen-sized hit circle FIRST (under the glyph) so taps meet the
-    // touch-target minimum without enlarging the visible glyph. Radius via updateHitRadii.
-    const hit = svg('circle', {
-      cx: fmt2(p.x),
-      cy: fmt2(p.y),
-      r: fmt2(r * 2),
-      class: 'tech-node-hit',
-    }) as SVGCircleElement
-    hit.style.fill = 'transparent'
-    hit.style.stroke = 'none'
-    hit.style.pointerEvents = 'all'
-    g.appendChild(hit)
-
-    // Outer CATEGORY ring (drawn under the state glyph, with a larger radius so its
-    // hue peeks out as a halo regardless of the state fill). Static; never re-styled.
-    const catRing = svg('circle', {
-      cx: fmt2(p.x),
-      cy: fmt2(p.y),
-      r: fmt2(r + unit * 0.12),
-      class: 'tech-node-cat',
-    })
-    catRing.setAttribute('vector-effect', 'non-scaling-stroke')
-    g.appendChild(catRing)
-
-    // Visible glyph: diamond for a gateway (shape cue), circle otherwise.
-    let shape: SVGElement
-    if (node.archetype === 'gateway') {
-      shape = svg('polygon', { points: diamond(p.x, p.y, r), class: 'tech-node-shape' })
-    } else {
-      shape = svg('circle', {
-        cx: fmt2(p.x),
-        cy: fmt2(p.y),
-        r: fmt2(r),
-        class: 'tech-node-shape',
-      })
-    }
-    shape.setAttribute('vector-effect', 'non-scaling-stroke')
-    g.appendChild(shape)
-
-    // A notable gets a hollow core (a ring), a second shape cue distinct from a minor.
-    if (node.archetype === 'notable') {
-      const core = svg('circle', {
-        cx: fmt2(p.x),
-        cy: fmt2(p.y),
-        r: fmt2(r * 0.42),
-        class: 'tech-node-core',
-      })
-      core.setAttribute('vector-effect', 'non-scaling-stroke')
-      g.appendChild(core)
-    }
-
-    const title = document.createElementNS(SVG_NS, 'title')
-    title.textContent = node.name
-    g.appendChild(title)
-
-    g.addEventListener('click', () => select(id))
-    g.addEventListener('keydown', (ev: KeyboardEvent) => {
-      if (ev.key === 'Enter' || ev.key === ' ' || ev.key === 'Spacebar') {
-        ev.preventDefault()
-        selectAndReveal(id, false)
-        return
-      }
-      let dx = 0
-      let dy = 0
-      switch (ev.key) {
-        case 'ArrowRight':
-          dx = 1
-          break
-        case 'ArrowLeft':
-          dx = -1
-          break
-        case 'ArrowUp':
-          dy = -1
-          break
-        case 'ArrowDown':
-          dy = 1
-          break
-        default:
-          return
-      }
-      ev.preventDefault()
-      const next = nearestInDirection(node.id, dx, dy)
-      if (next) selectAndReveal(next, true)
-    })
-
-    ;(catGroups[node.category] ?? nodesGroup).appendChild(g)
-    nodeRefs.push({ g, shape, hit, node, pos: p, radius: r, lastKey: '' })
-  }
-  const refById = new Map<string, NodeRefs>()
-  for (const ref of nodeRefs) refById.set(ref.node.id, ref)
-
-  /** Resize each node's transparent hit circle to stay ~HIT_TARGET_PX wide on screen. */
-  function updateHitRadii(): void {
-    const w = svgEl.clientWidth
-    if (w <= 0) return
-    const worldPerPx = viewW / w
-    const target = (HIT_TARGET_PX / 2) * worldPerPx
-    for (const ref of nodeRefs) {
-      ref.hit.setAttribute('r', fmt2(Math.max(ref.radius, Math.min(target, maxRadius * 6))))
-    }
-  }
-
-  /** Move keyboard focus to a node by id (roving tabindex keeps one tabbable). */
-  const focusNode = (id: string): void => {
-    const ref = refById.get(id)
-    if (ref) ref.g.focus()
-  }
-  /**
-   * Pan the minimum needed so `p` sits comfortably inside the viewBox AND clears the
-   * opaque detail card (WCAG 2.2 SC 2.4.11 — Focus Not Obscured). The card is anchored
-   * to one edge (bottom-left on desktop, a bottom sheet on mobile) and would otherwise
-   * hide a node — and its focus ring — that arrow-key navigation just selected. We read
-   * the card's on-screen rect, convert it to viewBox fractions, shrink the "comfortable"
-   * target window away from the covered edge(s), then place the node inside that window.
-   */
-  const ensureVisible = (p: NodePos): void => {
-    // Default comfortable window: the central 85% band (half-extent 0.425 around 0.5).
-    let fxLo = 0.075
-    let fxHi = 0.925
-    let fyLo = 0.075
-    let fyHi = 0.925
-
-    // Treat the detail card as an exclusion zone — but only when it is actually on screen
-    // (a selection is showing). Skip if rects are unmeasured (panel not yet laid out).
-    if (selectedId !== null) {
-      const svgRect = svgEl.getBoundingClientRect()
-      const cardRect = detail.getBoundingClientRect()
-      if (
-        svgRect.width > 0 &&
-        svgRect.height > 0 &&
-        cardRect.width > 0 &&
-        cardRect.height > 0
-      ) {
-        const m = 0.06 // fractional gap kept between the node and the card edge
-        const left = clamp01((cardRect.left - svgRect.left) / svgRect.width)
-        const right = clamp01((cardRect.right - svgRect.left) / svgRect.width)
-        const top = clamp01((cardRect.top - svgRect.top) / svgRect.height)
-        const bottom = clamp01((cardRect.bottom - svgRect.top) / svgRect.height)
-        // Vertical: bias away from whichever half the card occupies (it is bottom-anchored
-        // in both layouts, so this normally lifts the window above the card's top edge).
-        if ((top + bottom) / 2 >= 0.5) fyHi = Math.min(fyHi, top - m)
-        else fyLo = Math.max(fyLo, bottom + m)
-        // Horizontal: only for a corner card (NOT a full-width bottom sheet, which can't be
-        // cleared sideways) — on desktop this nudges the window toward the right.
-        if (right - left < 0.85) {
-          if ((left + right) / 2 < 0.5) fxLo = Math.max(fxLo, right + m)
-          else fxHi = Math.min(fxHi, left - m)
-        }
-        // Defensive: a card covering most of an axis would invert the window — collapse it
-        // to a sliver pinned to the clear edge so the node still pans fully into the open.
-        if (fyHi <= fyLo) {
-          fyLo = fyHi = clamp01(
-            (top + bottom) / 2 >= 0.5 ? Math.max(0.05, top - m) : Math.min(0.95, bottom + m),
-          )
-        }
-        if (fxHi <= fxLo) {
-          fxLo = fxHi = clamp01(
-            (left + right) / 2 < 0.5 ? Math.min(0.95, right + m) : Math.max(0.05, left - m),
-          )
-        }
-      }
-    }
-
-    // Current on-screen fraction of the node, then pan the minimum to land it inside the
-    // comfortable window (viewCx so that p hits fraction f is p.x + viewW*(0.5 - f)).
-    const fxCur = (p.x - viewCx) / viewW + 0.5
-    const fyCur = (p.y - viewCy) / viewH + 0.5
-    let moved = false
-    if (fxCur < fxLo) {
-      viewCx = clampCx(p.x + viewW * (0.5 - fxLo))
-      moved = true
-    } else if (fxCur > fxHi) {
-      viewCx = clampCx(p.x + viewW * (0.5 - fxHi))
-      moved = true
-    }
-    if (fyCur < fyLo) {
-      viewCy = clampCy(p.y + viewH * (0.5 - fyLo))
-      moved = true
-    } else if (fyCur > fyHi) {
-      viewCy = clampCy(p.y + viewH * (0.5 - fyHi))
-      moved = true
-    }
-    if (moved) applyView()
-  }
-  /** Select a node by id, keep it on screen, refresh; optionally move focus to it. */
-  const selectAndReveal = (id: string, focus: boolean): void => {
-    selectedId = id
-    const p = positions[id]
-    if (p) ensureVisible(p)
-    update()
-    if (focus) focusNode(id)
-  }
-  /** Nearest node from `fromId` inside a 90° cone toward screen direction (dx, dy). */
-  const nearestInDirection = (fromId: string, dx: number, dy: number): string | undefined => {
-    const from = positions[fromId]
-    if (!from) return undefined
-    let best: string | undefined
-    let bestD = Infinity
-    for (const ref of nodeRefs) {
-      if (ref.node.id === fromId) continue
-      const vx = ref.pos.x - from.x
-      const vy = ref.pos.y - from.y
-      if (dx !== 0) {
-        if (Math.sign(vx) !== dx || Math.abs(vx) < Math.abs(vy)) continue
-      } else {
-        if (Math.sign(vy) !== dy || Math.abs(vy) < Math.abs(vx)) continue
-      }
-      const d = vx * vx + vy * vy
-      if (d < bestD) {
-        bestD = d
-        best = ref.node.id
-      }
-    }
-    return best
-  }
-
-  // ---- Detail card ---------------------------------------------------------
-  const detail = h('div', 'tech-detail')
-  detail.setAttribute('role', 'region')
-  detail.setAttribute('aria-label', 'Szczegóły wybranego węzła rozwoju')
-
-  const detailHead = h('div', 'tech-detail-head')
-  const nameEl = h('h3', 'tech-detail-name')
-  const levelEl = h('span', 'tech-detail-level num')
-  detailHead.appendChild(nameEl)
-  detailHead.appendChild(levelEl)
-  detail.appendChild(detailHead)
-
-  const subEl = h('p', 'tech-detail-sub muted')
-  detail.appendChild(subEl)
-
-  const emptyEl = h(
-    'p',
-    'tech-detail-empty muted',
-    'Kliknij węzeł w konstelacji (lub przejdź do niego strzałkami i naciśnij Enter), aby ' +
-      'zobaczyć jego efekt, poziom i koszt następnego poziomu.',
-  )
-  detail.appendChild(emptyEl)
-
-  const bodyEl = h('div', 'tech-detail-body')
-
-  const descEl = h('p', 'tech-detail-desc')
-  bodyEl.appendChild(descEl)
-
-  const effectEl = h('p', 'tech-detail-effect')
-  bodyEl.appendChild(effectEl)
-
-  const bonusEl = h('p', 'tech-detail-bonus muted')
-  bodyEl.appendChild(bonusEl)
-
-  // Next-level cost: one icon+amount per resource; "is-short" flags a shortfall
-  // against the GLOBAL pool (colour PLUS the title carry it — never colour alone).
-  bodyEl.appendChild(h('h4', 'tech-detail-cost-title', 'Koszt następnego poziomu'))
-  const costRow = h('div', 'tech-cost')
-  const costRefs = {} as Record<ResourceId, { item: HTMLElement; val: HTMLElement }>
-  for (const r of RESOURCE_IDS) {
-    const item = h('span', 'tech-cost-item')
-    const iconWrap = h('span', 'res-icon-wrap')
-    iconWrap.appendChild(resourceIcon(r))
-    const val = h('span', 'num tech-cost-val')
-    item.appendChild(iconWrap)
-    item.appendChild(val)
-    costRow.appendChild(item)
-    costRefs[r] = { item, val }
-  }
-  bodyEl.appendChild(costRow)
-
-  const maxedEl = h('p', 'tech-detail-maxed', 'Osiągnięto poziom maksymalny.')
-  maxedEl.style.display = 'none'
-  bodyEl.appendChild(maxedEl)
-
-  const actions = h('div', 'tech-detail-actions')
-  const buyBtn = h('button', 'btn btn-primary tech-buy-btn', 'Wykup')
-  buyBtn.type = 'button'
-  actions.appendChild(buyBtn)
-  bodyEl.appendChild(actions)
-
-  const msg = h('p', 'recruit-msg muted')
-  msg.setAttribute('role', 'status')
-  msg.setAttribute('aria-live', 'polite')
-  bodyEl.appendChild(msg)
-
-  detail.appendChild(bodyEl)
-  // Anchor the floating/sheet card to the POSITIONED viewport (.tech-wrap is
-  // position:relative) so position:absolute resolves against the constellation.
-  wrap.appendChild(detail)
-
-  buyBtn.addEventListener('click', () => {
-    if (selectedId === null) return
-    const verdict = canPurchaseTech(ctx.store.state, selectedId)
-    if (!verdict.ok) {
-      msg.textContent = verdict.reason ?? 'Nie można wykupić tego węzła.'
-      update()
-      return
-    }
-    const node = TECH_NODES[selectedId]
-    const ok = ctx.onPurchaseTech(selectedId)
-    msg.textContent = ok
-      ? 'Wykupiono: ' + (node ? node.name : selectedId) + '.'
-      : 'Nie udało się wykupić węzła.'
-    update()
-  })
-
-  // ---- Reactivity ----------------------------------------------------------
-  const update = (): void => {
-    const state = ctx.store.state
-
-    // Global pool (drives both the header row and per-resource cost shortfalls).
-    const poolRes = globalResources(state)
+  // Cached GLOBAL pool, refreshed at the TOP of every renderer update() via currencyEl
+  // (buildTreeView calls currencyEl first on each refresh — build, every poke and the
+  // internal post-purchase update). Computing globalResources ONCE per update and caching
+  // it keeps the per-node affordability cue O(nodes), never O(nodes × villages): a node is
+  // affordable when its next-level cost is covered by this snapshot. The frequently
+  // changing pool drives both the header values and the per-resource cost shortfalls.
+  let poolRes = globalResources(ctx.store.state)
+  const refreshPool = (): void => {
+    poolRes = globalResources(ctx.store.state)
     for (const r of RESOURCE_IDS) poolVals[r].textContent = formatNumber(poolRes[r])
-
-    applyView()
-
-    // Edge emphasis: an edge whose prerequisite is owned (level >= 1) is "unlocked"
-    // (the path beyond it is reachable) — brighter than a still-locked link.
-    for (const ref of edgeRefs) {
-      ref.line.classList.toggle('is-unlocked', nodeLevel(state, ref.from) >= 1)
-    }
-
-    // Per-node state classes + aria — written only when a node's state/level changes.
-    for (const ref of nodeRefs) {
-      const st = stateOf(state, ref.node)
-      const lvl = nodeLevel(state, ref.node.id)
-      const key = st + ':' + lvl
-      if (key !== ref.lastKey) {
-        ref.lastKey = key
-        ref.g.classList.toggle('tech-node--locked', st === 'locked')
-        ref.g.classList.toggle('tech-node--available', st === 'available')
-        ref.g.classList.toggle('tech-node--owned', st === 'owned')
-        ref.g.classList.toggle('tech-node--maxed', st === 'maxed')
-        ref.g.setAttribute(
-          'aria-label',
-          ref.node.name +
-            ' — ' +
-            CATEGORY_LABEL[ref.node.category] +
-            ', ' +
-            ARCHETYPE_LABEL[ref.node.archetype] +
-            '. Stan: ' +
-            STATE_LABEL[st] +
-            ', poziom ' +
-            lvl +
-            ' z ' +
-            ref.node.maxLevel +
-            '. ' +
-            effectText(ref.node) +
-            '. Naciśnij Enter, aby wybrać.',
-        )
-      }
-      // Affordability is a frequently-changing, SECONDARY cue (resources accrue every
-      // tick). Compute it INLINE against the cached global pool (poolRes) rather than
-      // calling canPurchaseTech per node — that helper re-runs globalResources(state)
-      // (a sum over every village × 3 resources) for EACH of ~180 nodes every frame,
-      // which is O(nodes × villages) Decimal work against the perf budget. A node is
-      // affordable exactly when canPurchaseTech would say ok: it is buyable (state
-      // 'available' or 'owned' ⇒ prereqs met AND not maxed) AND the pool covers its
-      // next-level cost. The full canPurchaseTech is still used for the selected node
-      // and the buy action below.
-      let affordable = false
-      if (st === 'available' || st === 'owned') {
-        const cost = techCost(ref.node.id, lvl)
-        affordable =
-          !poolRes.wood.lt(cost.wood) && !poolRes.clay.lt(cost.clay) && !poolRes.iron.lt(cost.iron)
-      }
-      ref.g.classList.toggle('is-affordable', affordable)
-    }
-
-    // Drop a selection whose node somehow vanished (defensive — ids are static).
-    if (selectedId !== null && !refById.has(selectedId)) selectedId = null
-    // Auto-select an entry root on first open (desktop only) so the card is useful
-    // immediately; on narrow viewports the bottom sheet would cover the constellation.
-    if (selectedId === null && !isNarrow()) {
-      selectedId = TECH_ROOTS[0] ?? (placedIds[0] || null)
-    }
-
-    // Roving tabindex + selection highlight: exactly ONE node is tabbable.
-    const tabTarget = selectedId ?? (placedIds[0] || null)
-    for (const ref of nodeRefs) {
-      const isSel = ref.node.id === selectedId
-      ref.g.classList.toggle('is-selected', isSel)
-      ref.g.setAttribute('tabindex', ref.node.id === tabTarget ? '0' : '-1')
-    }
-
-    const selected = selectedId ? TECH_NODES[selectedId] : undefined
-    const selPos = selectedId ? positions[selectedId] : undefined
-    if (selected && selPos) {
-      selRing.setAttribute('cx', fmt2(selPos.x))
-      selRing.setAttribute('cy', fmt2(selPos.y))
-      selRing.setAttribute('r', fmt2(radiusFor(selected.archetype) + unit * 0.14))
-      selRing.style.display = ''
-    } else {
-      selRing.style.display = 'none'
-    }
-
-    // Detail card.
-    if (!selected) {
-      emptyEl.style.display = ''
-      bodyEl.style.display = 'none'
-      subEl.style.display = 'none'
-      nameEl.textContent = 'Brak wyboru'
-      levelEl.textContent = ''
-      return
-    }
-    emptyEl.style.display = 'none'
-    bodyEl.style.display = ''
-    subEl.style.display = ''
-
-    const lvl = nodeLevel(state, selected.id)
-    const st = stateOf(state, selected)
-    nameEl.textContent = selected.name
-    levelEl.textContent = 'poz. ' + lvl + ' / ' + selected.maxLevel
-    subEl.textContent =
-      CATEGORY_LABEL[selected.category] +
-      ' · ' +
-      ARCHETYPE_LABEL[selected.archetype] +
-      ' · ' +
-      STATE_LABEL[st]
-    descEl.textContent = selected.desc
-    effectEl.textContent = effectText(selected)
-    bonusEl.textContent =
-      lvl > 0
-        ? 'Obecny łączny bonus: ' +
-          effectSign(selected.effect) +
-          pct(selected.effect.perLevel * lvl)
-        : 'Jeszcze nie wykupiony.'
-
-    const verdict = canPurchaseTech(state, selected.id)
-    const maxed = lvl >= selected.maxLevel
-    if (maxed) {
-      costRow.style.display = 'none'
-      maxedEl.style.display = ''
-    } else {
-      costRow.style.display = ''
-      maxedEl.style.display = 'none'
-      const cost = techCost(selected.id, lvl)
-      for (const r of RESOURCE_IDS) {
-        costRefs[r].val.textContent = formatNumber(cost[r])
-        const short = poolRes[r].lt(cost[r])
-        costRefs[r].item.classList.toggle('is-short', short)
-        costRefs[r].item.title = short
-          ? 'Za mało: ' + RESOURCE_NAMES[r]
-          : RESOURCE_NAMES[r]
-      }
-    }
-
-    // aria-disabled (not `disabled`) keeps the button focusable so its reason reaches
-    // the user; the click handler is a guarded no-op when canPurchaseTech rejects.
-    buyBtn.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
-    buyBtn.title = verdict.ok ? '' : (verdict.reason ?? '')
-    buyBtn.textContent = maxed ? 'Maksymalny poziom' : 'Wykup poziom ' + (lvl + 1)
-    buyBtn.setAttribute(
-      'aria-label',
-      maxed
-        ? selected.name + ': poziom maksymalny'
-        : 'Wykup następny poziom: ' + selected.name + ' (poziom ' + (lvl + 1) + ')',
-    )
   }
 
-  // Frame the whole tree once the element is in the layout, then draw.
-  fitView()
-  update()
+  // ---- Tech-specific constellation config ---------------------------------
+  const config: TreeViewConfig = {
+    nodes: TECH_NODES,
+    nodeIds: TECH_NODE_IDS,
+    positions: layoutTree(),
+    edges: techEdges(),
+    categoryLabel: CATEGORY_LABEL,
+    categoryHue: CATEGORY_HUE,
+    // Tech-specific intro framing: this tree is GLOBAL (account-wide) and bought from the
+    // SHARED resource pool of every village — information the generic note omits.
+    noteText:
+      'Drzewo rozwoju (globalne, na całe konto). Przeciągnij, aby przesunąć, kółkiem lub ' +
+      'przyciskami przybliż. Kliknij węzeł, aby zobaczyć jego efekt i koszt — węzły kupujesz ' +
+      'ze WSPÓLNEJ puli surowców wszystkich wiosek. Strzałkami przechodzisz między węzłami, ' +
+      'Enter wybiera.',
+    level: (id) => nodeLevel(ctx.store.state, id),
+    // Available = prerequisites met (the renderer only consults this for a not-yet-owned,
+    // not-maxed node, so this matches the old stateOf 'available' vs 'locked' split 1:1).
+    available: (id) => prerequisitesMet(ctx.store.state, id),
+    // Affordable = the cached GLOBAL pool covers EVERY resource of the next level.
+    affordable: (id) => {
+      const cost = techCost(id, nodeLevel(ctx.store.state, id))
+      for (const r of RESOURCE_IDS) {
+        if (poolRes[r].lt(cost[r])) return false
+      }
+      return true
+    },
+    // Concise fallback (the per-resource costItems below always takes priority for tech).
+    costText: (id, level) => {
+      const cost = techCost(id, level)
+      return RESOURCE_IDS.map((r) => formatNumber(cost[r])).join(' / ')
+    },
+    // PER-RESOURCE next-level cost: one icon+name+amount chip per resource; `short` flags
+    // a shortfall against the cached pool (the renderer renders it as colour PLUS a text
+    // title — never colour alone). icon is an opaque Node the renderer just mounts.
+    costItems: (id, level) => {
+      const cost = techCost(id, level)
+      return RESOURCE_IDS.map((r) => ({
+        icon: resourceIcon(r),
+        label: RESOURCE_NAMES[r],
+        value: formatNumber(cost[r]),
+        short: poolRes[r].lt(cost[r]),
+      }))
+    },
+    effectText: (id) => {
+      const node = TECH_NODES[id]
+      return node ? effectText(node) : ''
+    },
+    // CURRENT cumulative bonus for the detail card: the per-level effect × owned level
+    // (e.g. "Obecny łączny bonus: +9%"), or a not-yet-bought note for an unowned node.
+    bonusText: (id) => {
+      const node = TECH_NODES[id]
+      if (!node) return ''
+      const lvl = nodeLevel(ctx.store.state, id)
+      return lvl > 0
+        ? 'Obecny łączny bonus: ' + effectSign(node.effect) + pct(node.effect.perLevel * lvl)
+        : 'Jeszcze nie wykupiony.'
+    },
+    purchase: (id) => ctx.onPurchaseTech(id),
+    // Route the engine's own rejection reason ('Poziom maksymalny' / 'Wymagania
+    // niespełnione' / 'Za mało surowców') to the buy-button tooltip + aria-live status, so
+    // what a screen-reader hears matches canPurchaseTech 1:1.
+    reason: (id) => canPurchaseTech(ctx.store.state, id).reason,
+    // Refresh the cached pool + header values, then hand back the STABLE element. The
+    // renderer calls this first on every update, so affordability/cost reads below always
+    // see the current pool regardless of whether the refresh was triggered by the host or
+    // by the renderer's own post-purchase update.
+    currencyEl: () => {
+      refreshPool()
+      return pool
+    },
+  }
 
-  return { el, update }
+  const tree = buildTreeView(config)
+
+  // Panel contract: build once (done above), then poke. tree.update() refreshes the pool
+  // (via currencyEl) and the whole constellation; the host calls this on each store rev.
+  const update = (): void => {
+    tree.update()
+  }
+
+  return { el: tree.el, update }
 }

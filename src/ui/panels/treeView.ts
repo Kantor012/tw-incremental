@@ -86,6 +86,13 @@ export interface TreeViewConfig {
   categoryLabel: Record<string, string>
   /** Hue token string per category key (e.g. 'var(--cat-might)'); falls back to muted. */
   categoryHue: Record<string, string>
+  /**
+   * Optional intro-note override (the muted paragraph above the legend). When omitted
+   * the generic constellation help text is used; a tree with currency-specific framing
+   * (e.g. the tech tree's "bought from the SHARED resource pool of all villages") passes
+   * its own string so that information is not lost.
+   */
+  noteText?: string
   /** Current purchased level of a node (0..maxLevel). */
   level: (id: string) => number
   /** True when a node's prerequisites are met (buyable if not maxed). */
@@ -94,10 +101,41 @@ export interface TreeViewConfig {
   affordable: (id: string) => boolean
   /** Human cost string for the NEXT level (currency-specific; e.g. "12 PP"). */
   costText: (id: string, level: number) => string
+  /**
+   * Optional PER-LINE cost breakdown for the NEXT level. When supplied, the detail
+   * card renders one entry per element (optional opaque `icon` Node + `label` text +
+   * `value`, with a shortfall cue when `short`) INSTEAD of the single {@link costText}
+   * line; when omitted the costText line is used unchanged (e.g. the prestige tree).
+   *
+   * `icon` is treated as an OPAQUE Node — the view never inspects it (it only mounts it
+   * inside the icon-sizing wrapper), so the renderer stays agnostic of resources /
+   * currency. `short` is a PRESENTATION cue only (it drives the `is-short` colour plus
+   * a text title, never colour alone); the single {@link affordable} bool still governs
+   * the node's `is-affordable` state and whether a purchase is allowed.
+   */
+  costItems?: (
+    id: string,
+    level: number,
+  ) => Array<{ icon?: Node; label: string; value: string; short: boolean }>
   /** Human effect string (per level), for the detail card + aria-label. */
   effectText: (id: string) => string
+  /**
+   * Optional CURRENT cumulative-bonus line for the detail card, shown right under the
+   * per-level effect (e.g. "Obecny łączny bonus: +9%" for an owned node, or a
+   * "not yet bought" note otherwise). When omitted the line is hidden, so a tree that
+   * does not need it (e.g. the prestige tree) is unchanged.
+   */
+  bonusText?: (id: string) => string
   /** Commit the purchase of a node's next level; returns true on success. */
   purchase: (id: string) => boolean
+  /**
+   * Optional rejection reason for a node whose next level cannot be bought right now,
+   * used VERBATIM for both the buy-button tooltip and the aria-live status when a buy
+   * is refused. When omitted the renderer's own generic wording is used (so the prestige
+   * tree is unchanged); the tech tree routes its `canPurchaseTech` reason through here so
+   * the announced/tooltip text matches the engine's reason 1:1.
+   */
+  reason?: (id: string) => string | undefined
   /** The currency header element (resource pool, prestige points …) shown atop the tree. */
   currencyEl: () => HTMLElement
 }
@@ -277,8 +315,9 @@ export function buildTreeView(config: TreeViewConfig): Panel {
   const note = h(
     'p',
     'tech-note muted',
-    'Konstelacja. Przeciągnij, aby przesunąć, kółkiem lub przyciskami przybliż. Kliknij ' +
-      'węzeł, aby zobaczyć efekt i koszt. Strzałkami przechodzisz między węzłami, Enter wybiera.',
+    config.noteText ??
+      'Konstelacja. Przeciągnij, aby przesunąć, kółkiem lub przyciskami przybliż. Kliknij ' +
+        'węzeł, aby zobaczyć efekt i koszt. Strzałkami przechodzisz między węzłami, Enter wybiera.',
   )
   note.setAttribute('role', 'note')
   el.appendChild(note)
@@ -900,15 +939,26 @@ export function buildTreeView(config: TreeViewConfig): Panel {
   const effectEl = h('p', 'tech-detail-effect')
   bodyEl.appendChild(effectEl)
 
-  // Next-level cost: a single text line (currency-specific, from config.costText).
-  // "is-short" flags an affordability shortfall (colour from the token PLUS the title
-  // text — never colour alone).
+  // CURRENT cumulative bonus (e.g. "Obecny łączny bonus: +9%"). Driven by the optional
+  // config.bonusText; hidden entirely when the caller supplies none (so prestige is
+  // unchanged), shown right under the per-level effect otherwise.
+  const bonusEl = h('p', 'tech-detail-bonus muted')
+  if (!config.bonusText) bonusEl.style.display = 'none'
+  bodyEl.appendChild(bonusEl)
+
+  // Next-level cost. Two mutually-exclusive shapes share the same `.tech-cost` row:
+  //  - default (no config.costItems): a SINGLE text line from config.costText.
+  //  - per-line (config.costItems supplied): one entry per cost component, (re)built
+  //    on update() — see below.
+  // In both, "is-short" flags an affordability shortfall (colour from the token PLUS a
+  // text title — never colour alone). The static single-line child is only mounted when
+  // the per-line breakdown is NOT in use, so the two paths never collide.
   bodyEl.appendChild(h('h4', 'tech-detail-cost-title', 'Koszt następnego poziomu'))
   const costRow = h('div', 'tech-cost')
   const costItem = h('span', 'tech-cost-item')
   const costVal = h('span', 'num tech-cost-val')
   costItem.appendChild(costVal)
-  costRow.appendChild(costItem)
+  if (!config.costItems) costRow.appendChild(costItem)
   bodyEl.appendChild(costRow)
 
   const maxedEl = h('p', 'tech-detail-maxed', 'Osiągnięto poziom maksymalny.')
@@ -949,18 +999,22 @@ export function buildTreeView(config: TreeViewConfig): Panel {
     if (!node) return
     const lvl = config.level(id)
     const st = stateOf(id)
+    // When the caller supplies a reason fn, its (engine) wording is announced verbatim so
+    // the live region matches the buy-button tooltip 1:1; otherwise the generic fallback.
+    const rejectMsg = (fallback: string): string =>
+      (config.reason ? config.reason(id) : undefined) ?? fallback
     if (lvl >= node.maxLevel) {
-      msg.textContent = 'Osiągnięto poziom maksymalny.'
+      msg.textContent = rejectMsg('Osiągnięto poziom maksymalny.')
       update()
       return
     }
     if (!isBuyable(st)) {
-      msg.textContent = 'Najpierw odblokuj wymagane węzły.'
+      msg.textContent = rejectMsg('Najpierw odblokuj wymagane węzły.')
       update()
       return
     }
     if (!config.affordable(id)) {
-      msg.textContent = 'Za mało, aby wykupić ten węzeł.'
+      msg.textContent = rejectMsg('Za mało, aby wykupić ten węzeł.')
       update()
       return
     }
@@ -1070,6 +1124,7 @@ export function buildTreeView(config: TreeViewConfig): Panel {
       STATE_LABEL[st]
     descEl.textContent = selected.desc
     effectEl.textContent = config.effectText(selectedId)
+    if (config.bonusText) bonusEl.textContent = config.bonusText(selectedId)
 
     const maxed = lvl >= selected.maxLevel
     if (maxed) {
@@ -1078,10 +1133,38 @@ export function buildTreeView(config: TreeViewConfig): Panel {
     } else {
       costRow.style.display = ''
       maxedEl.style.display = 'none'
-      costVal.textContent = config.costText(selectedId, lvl)
-      const short = isBuyable(st) && !config.affordable(selectedId)
-      costItem.classList.toggle('is-short', short)
-      costItem.title = short ? 'Nie stać Cię na ten węzeł' : ''
+      if (config.costItems) {
+        // Per-line cost: REBUILD the row from the caller's entries. Each `icon` is a
+        // fresh opaque Node per call, so the row is recreated (not poked) — bounded to
+        // the single selected node's few components, so this stays cheap. Each entry:
+        // optional icon (mounted in the icon-sizing wrapper) + label text + value. The
+        // per-entry shortfall is colour (`is-short`) PLUS a text title (WCAG 1.4.1 —
+        // never colour alone), mirroring the single-line path's title.
+        const items = config.costItems(selectedId, lvl)
+        costRow.replaceChildren()
+        for (const it of items) {
+          const item = h('span', 'tech-cost-item')
+          if (it.icon) {
+            const iconWrap = h('span', 'res-icon-wrap')
+            iconWrap.appendChild(it.icon)
+            item.appendChild(iconWrap)
+          }
+          if (it.label) item.appendChild(document.createTextNode(it.label))
+          item.appendChild(h('span', 'num tech-cost-val', it.value))
+          item.classList.toggle('is-short', it.short)
+          item.title = it.short ? (it.label ? 'Za mało: ' + it.label : 'Za mało') : it.label
+          // Shortfall as a VISIBLE, non-colour word (WCAG 1.4.1) — the red `.tech-cost-val`
+          // tint is only a secondary cue, so a colour-blind / AT user still sees which
+          // component is short. Mirrors the "(brak)" convention used by the other panels.
+          if (it.short) item.appendChild(document.createTextNode(' (brak)'))
+          costRow.appendChild(item)
+        }
+      } else {
+        costVal.textContent = config.costText(selectedId, lvl)
+        const short = isBuyable(st) && !config.affordable(selectedId)
+        costItem.classList.toggle('is-short', short)
+        costItem.title = short ? 'Nie stać Cię na ten węzeł' : ''
+      }
     }
 
     // aria-disabled (not `disabled`) keeps the button focusable so its reason reaches
@@ -1091,6 +1174,9 @@ export function buildTreeView(config: TreeViewConfig): Panel {
     if (maxed) reason = 'Poziom maksymalny'
     else if (!isBuyable(st)) reason = 'Najpierw odblokuj wymagane węzły'
     else if (!config.affordable(selectedId)) reason = 'Za mało, aby wykupić'
+    // Prefer the caller's (engine) reason verbatim when disabled, so the tooltip matches
+    // the aria-live announcement; the generic cascade above is the fallback (prestige).
+    if (!canBuy && config.reason) reason = config.reason(selectedId) ?? reason
     buyBtn.setAttribute('aria-disabled', canBuy ? 'false' : 'true')
     buyBtn.title = canBuy ? '' : reason
     buyBtn.textContent = maxed ? 'Maksymalny poziom' : 'Wykup poziom ' + (lvl + 1)
