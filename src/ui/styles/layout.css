@@ -1424,3 +1424,187 @@ html {
     transition: none;
   }
 }
+
+/* ============================================================================
+ * i) KODEKS (zakładka „Kodeks", src/ui/panels/codex.ts)
+ * --------------------------------------------------------------------------
+ * READ-ONLY encyklopedia gry: spis treści + osiem rozwijanych sekcji
+ * (<details>/<summary>) zbierających całą treść (surowce, budynki, jednostki,
+ * drzewa, osiągnięcia) i opisy mechanik. Panel jest CZYSTO DEKLARATYWNY —
+ * elementy dostają semantyczne klasy .codex-*, a CAŁY wygląd opisujemy TUTAJ
+ * (spójnie z sekcjami mapy „e" i drzewa „h"); panel nie ustawia stylów inline.
+ *
+ * Zasady spójne z resztą pliku:
+ *  - Wyłącznie tokeny z tokens.css; zero hardkodowanych kolorów.
+ *  - Stan rozwinięcia sekcji NIE jest niesiony samym kolorem (WCAG 1.4.1):
+ *    własny „chevron" obraca się przy [open] (natywny marker <summary> znika,
+ *    bo summary jest flexem) — kierunek strzałki to sygnał kształtu.
+ *  - Cele dotykowe summary i linków spisu treści mają min. 44px.
+ * ========================================================================== */
+
+/* Panel układa się w pionowy stos (notatka → spis treści → sekcje) z jednolitym
+ * odstępem; dzięki temu poszczególne elementy nie potrzebują własnych marginesów. */
+.codex-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Wprowadzenie nad spisem treści (zastępuje pożyczone wcześniej .tech-note). */
+.codex-note {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--muted);
+}
+
+/* Spis treści — focusowalne linki-kotwice (reużywają .btn .btn-ghost z 44px). */
+.codex-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* ---- Sekcja rozwijana (<details>) ------------------------------------- */
+.codex-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background-color: var(--panel-2);
+  padding: var(--space-2) var(--space-3);
+  /* Kotwica ze spisu treści ma lądować poniżej sticky HUD-a. */
+  scroll-margin-top: var(--hud-h);
+}
+
+/* Nagłówek-przełącznik. Flex (nie list-item) gubi natywny trójkąt <summary>,
+ * więc go ukrywamy i rysujemy własny chevron (patrz ::after niżej). */
+.codex-section-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.codex-section-summary::-webkit-details-marker {
+  display: none;
+}
+
+.codex-section-summary h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+/* Własny chevron przy prawej krawędzi (margin-left:auto parkuje go na końcu).
+ * Strzałka w dół przy zwiniętej sekcji; obrót przy [open] — sygnał KSZTAŁTU,
+ * niezależny od koloru. */
+.codex-section-summary::after {
+  content: '';
+  margin-left: auto;
+  width: 0.55em;
+  height: 0.55em;
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg);
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+.codex-section[open] .codex-section-summary::after {
+  transform: rotate(-135deg);
+}
+
+.codex-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+/* ---- Treść wewnątrz sekcji -------------------------------------------- */
+/* Krótki akapit wprowadzający sekcję (barwę przygaszoną niesie .muted). */
+.codex-intro {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* Reset listy dla siatek kart użytych jako <ul> (układ daje współdzielone
+ * .card-grid — sekcja c; tu tylko zdejmujemy domyślne punktory/wcięcie). */
+.codex-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Nagłówek karty (ikona + tytuł h4). */
+.codex-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.codex-card-head h4 {
+  margin: 0;
+}
+
+/* Akapit treści karty (opis / efekt / rola jednostki). */
+.codex-text {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* Lista par etykieta/wartość (statystyki budynku lub jednostki). */
+.codex-stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.codex-stats dt,
+.codex-stats dd {
+  margin: 0;
+}
+
+/* Spis kategorii (etykieta + licznik) dla drzewa / prestiżu / osiągnięć. */
+.codex-cat-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.codex-cat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: var(--space-1);
+}
+
+/* ---- Rozdziały mechanik (CODEX_MECHANICS) ----------------------------- */
+.codex-chapter-title {
+  margin: var(--space-2) 0 0;
+}
+
+.codex-topic-title {
+  margin: var(--space-2) 0 0;
+  font-family: var(--font-display);
+  font-size: var(--text-base);
+  color: var(--accent-2);
+}
+
+.codex-para {
+  margin: var(--space-1) 0 0;
+  font-size: var(--text-sm);
+}
+
+/* ---- Ograniczony ruch ------------------------------------------------- */
+/* Globalny wyłącznik w base.css już neutralizuje przejście chevrona; tu jawnie
+ * wg kontraktu (spójnie z sekcjami mapy/drzewa). */
+@media (prefers-reduced-motion: reduce) {
+  .codex-section-summary::after {
+    transition: none;
+  }
+}
