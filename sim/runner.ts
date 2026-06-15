@@ -44,6 +44,11 @@ import {
   checkPrestigeTree,
   checkPrestigeState,
   checkAscendValid,
+  checkStats,
+  checkAchievementsValid,
+  checkStatsAccumulated,
+  checkAchievementsUnlocked,
+  checkM54Determinism,
   contentConsumed,
   totalResources,
   seedAutomation,
@@ -340,6 +345,10 @@ function runContinuous(
       invariants.push(...tag([checkLoyalty(state)], phase))
       invariants.push(...tag([checkTechState(state)], phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
+      // M5.4: the lifetime counters stay well-formed and the unlock set stays settled
+      // (every satisfied condition stamped) at every sample, not just at the end.
+      invariants.push(...tag([checkStats(state)], phase))
+      invariants.push(...tag([checkAchievementsValid(state)], phase))
       invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
       windowCount += 1
@@ -361,6 +370,8 @@ function runContinuous(
     invariants.push(...tag([checkLoyalty(state)], 'final'))
     invariants.push(...tag([checkTechState(state)], 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
+    invariants.push(...tag([checkStats(state)], 'final'))
+    invariants.push(...tag([checkAchievementsValid(state)], 'final'))
     // Whole-run progress: any action ever taken, or resources above the start.
     invariants.push(
       ...tag([checkNoSoftlock(state, initialTotal, upgradesBought + totalRecruited > 0)], 'final'),
@@ -494,6 +505,10 @@ function runPrestige(seed: string, ticks: number, dt: number, withInvariants: bo
     invariants.push(...tag([checkWorldConsistency(state)], 'pfinal'))
     invariants.push(...tag([checkPrestigeState(state)], 'pfinal'))
     invariants.push(...tag([checkRoundTrip(state)], 'pfinal'))
+    // M5.4: lifetime stats survive every ascension (ascend leaves them untouched) and the
+    // unlock set is well-formed/settled on a heavily-ascended state (prestige achievements fire).
+    invariants.push(...tag([checkStats(state)], 'pfinal'))
+    invariants.push(...tag([checkAchievementsValid(state)], 'pfinal'))
     // Whole-run no-softlock (mirrors runContinuous's final check): the prestige run made
     // progress iff it ascended / bought at least once, so the run never stalled overall.
     invariants.push(
@@ -813,6 +828,49 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkRamCracks(seed))
   invariants.push(checkCatapultRazes(seed))
   invariants.push(checkM53Determinism(seed, OFFLINE_CHECK_SECONDS))
+
+  // M5.4 lifetime stats + achievements. The MAIN run's deterministic tick path bumps the
+  // counters (combat / founding / conquest) and runs checkAchievements every sub-step, so the
+  // final primary state already carries an accumulated, settled record. We assert it ACCUMULATED
+  // (the combat-loop-guaranteed counters > 0), that a SENSIBLE number of achievements unlocked,
+  // that the counters AGREE with the independently log-derived combat + ledger metrics (a strong
+  // correctness cross-check), and that the counters + unlocks are byte-identical online vs
+  // chunked-offline on a scenario that drives every path (incl. scout + siege the bot never
+  // fields). Per-window stats-valid / achievements-valid were already sampled in runContinuous;
+  // the cross-seed identity is covered by the whole-state determinism / save-load checks above.
+  invariants.push(checkStatsAccumulated(primary.state))
+  invariants.push(checkAchievementsUnlocked(primary.state, TARGETS.minAchievementsUnlocked))
+
+  // Cross-check: the deterministic lifetime counters must AGREE with the metrics measured
+  // independently (combat from the rolling battle log, expansion from the village ledger). The
+  // log diff can only ever UNDERcount (collapsing identical reports — see newBattleReports), so
+  // each lifetime combat counter must be >= its log-derived peer; founding/conquest are exact on
+  // both sides, so those must match exactly. A mismatch means the tick-path counters and the
+  // observable game disagree — a real M5.4 bug.
+  const st = primary.state.stats
+  const cb = primary.stats.combat
+  const ledgerConquered = Math.max(0, primary.state.villageOrder.length - 1 - primary.stats.villagesFounded)
+  const xc: string[] = []
+  if (st.attacksWon < cb.battlesWon) xc.push(`attacksWon ${st.attacksWon} < log wins ${cb.battlesWon}`)
+  if (st.attacksLost < cb.battlesLost) xc.push(`attacksLost ${st.attacksLost} < log losses ${cb.battlesLost}`)
+  if (st.raidsRepelled < cb.raidsSurvived) xc.push(`raidsRepelled ${st.raidsRepelled} < log repelled ${cb.raidsSurvived}`)
+  if (st.raidsLost < cb.raidsLost) xc.push(`raidsLost ${st.raidsLost} < log through ${cb.raidsLost}`)
+  if (st.villagesFounded !== primary.stats.villagesFounded) {
+    xc.push(`villagesFounded ${st.villagesFounded} != founded ${primary.stats.villagesFounded}`)
+  }
+  if (st.villagesConquered !== ledgerConquered) {
+    xc.push(`villagesConquered ${st.villagesConquered} != ledger ${ledgerConquered}`)
+  }
+  invariants.push({
+    name: 'stats-cross-check',
+    ok: xc.length === 0,
+    detail:
+      xc.length === 0
+        ? `lifetime counters agree with log+ledger (won ${st.attacksWon}>=${cb.battlesWon}, founded ${st.villagesFounded}, conquered ${st.villagesConquered})`
+        : xc.join('; '),
+  })
+
+  invariants.push(checkM54Determinism(seed, OFFLINE_CHECK_SECONDS))
 
   const metrics = collect(
     seed,

@@ -394,6 +394,42 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M5.4 lifetime stats + achievements (end of the MAIN run) ---
+  console.log('--- Lifetime stats & achievements (end) ---')
+  console.log(
+    'seed     | attacks (won/lost) | loot hauled | raids (rep/lost) | razed | scouts | founded/conq | achievements',
+  )
+  for (const r of results) {
+    const m = r.metrics
+    const lt = m.lifetime
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(lt.attacksWon)}/${lt.attacksLost} | ${lt.lootHauled} | ` +
+        `${lt.raidsRepelled}/${lt.raidsLost} | ${String(lt.campsRazed).padStart(5)} | ${String(lt.scoutsReturned).padStart(6)} | ` +
+        `${lt.villagesFounded}/${lt.villagesConquered} | ${m.achievementsUnlocked}/${m.achievementsTotal}`,
+    )
+  }
+  console.log('')
+
+  // --- M5.4 stats + achievements coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M5.4 stats + achievements (coverage) ---')
+  const m54Names = ['stats-accumulated', 'stats-cross-check', 'achievements-unlocked', 'm54-determinism']
+  for (const r of results) {
+    const line = m54Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing accumulation / determinism check is visible, not just the count.
+    for (const name of m54Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Balance targets (warnings only — do NOT affect the exit code) ---
   console.log('--- Balance targets (warnings) ---')
   for (const r of results) {

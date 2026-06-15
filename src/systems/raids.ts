@@ -7,6 +7,7 @@ import {
   type Village,
   type BattleReport,
   type TechModifiers,
+  type Stats,
 } from '../engine/state'
 import { BUILDING_IDS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
@@ -113,7 +114,12 @@ function raidsActive(v: Village): boolean {
  * {@link battleOutcome}, i.e. more raids repelled and smaller losses on the ones that
  * still land. A wall-less village has mult 1, so this is byte-identical to pre-M5.2.
  */
-function resolveRaid(v: Village, log: BattleReport[], mods: TechModifiers = NO_TECH_MODS): void {
+function resolveRaid(
+  v: Village,
+  log: BattleReport[],
+  mods: TechModifiers = NO_TECH_MODS,
+  stats?: Stats,
+): void {
   const power = raidPower(v)
   const home = stationedUnits(v)
   // attacker = the raid; defender = the home garrison hardened by tech (defenseMult)
@@ -122,9 +128,13 @@ function resolveRaid(v: Village, log: BattleReport[], mods: TechModifiers = NO_T
 
   if (!outcome.attackerWins) {
     // Repelled: no losses, nothing stolen (the raiders break on the wall).
+    if (stats !== undefined) stats.raidsRepelled += 1 // M5.4: lifetime counter
     pushBattleReport(log, { kind: 'raid', villageId: v.id, won: true, looted: '0', losses: 0 })
     return
   }
+
+  // The raid broke through (M5.4 lifetime counter).
+  if (stats !== undefined) stats.raidsLost += 1
 
   // Raid succeeds: the garrison takes losses and a slice of resources is hauled off.
   const survivors = applyLosses(home, outcome.defenderLossFrac)
@@ -168,12 +178,20 @@ function resolveRaid(v: Village, log: BattleReport[], mods: TechModifiers = NO_T
  * The tick computes them once per sub-step and passes them in; they default to
  * {@link NO_TECH_MODS} (1) so a caller without tech (or a pre-M3.2 call site)
  * resolves raids exactly as before.
+ *
+ * `stats` (M5.4, OPTIONAL) is the mutable lifetime-counter record threaded in by the
+ * tick (`state.stats`). Each resolved raid bumps it on this deterministic path —
+ * `raidsRepelled` when the garrison holds, `raidsLost` when it breaks — so the
+ * counters grow identically online / offline / sim and never from the UI. Callers
+ * that don't track stats (tests, the per-tier sim probe) leave it undefined and get
+ * the exact pre-M5.4 behaviour.
  */
 export function advanceRaids(
   v: Village,
   log: BattleReport[],
   dtSeconds: number,
   mods: TechModifiers = NO_TECH_MODS,
+  stats?: Stats,
 ): void {
   if (!(dtSeconds > 0)) return
   if (!raidsActive(v)) return
@@ -185,7 +203,7 @@ export function advanceRaids(
     }
     dt -= v.raidTimer
     v.raidTimer = 0
-    resolveRaid(v, log, mods)
+    resolveRaid(v, log, mods, stats)
     v.raidTimer = RAID_BASE_INTERVAL
   }
 }

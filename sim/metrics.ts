@@ -9,6 +9,7 @@ import {
 import { BUILDING_IDS } from '../src/content/buildings'
 import { UNIT_IDS, type UnitId } from '../src/content/units'
 import { TECH_NODE_IDS } from '../src/content/tech'
+import { ACHIEVEMENT_IDS } from '../src/content/achievements'
 import { usedPopulation } from '../src/systems/recruitment'
 import { aggregateTechMods, nodeLevel } from '../src/systems/tech'
 
@@ -172,6 +173,35 @@ export interface RunMetrics {
   automationRecruited: number
   /** Attacks the AUTO-ATTACK routine dispatched-and-resolved over the coverage run. */
   automationAttacked: number
+
+  // --- M5.4 lifetime stats + achievements ---
+  /**
+   * The permanent lifetime {@link import('../src/engine/state').Stats} counters at the END of the
+   * MAIN run, read straight off the final state — bumped only on the deterministic tick path, so
+   * identical online/offline/sim. `lootHauled` is the Decimal lifetime haul as its exact string.
+   */
+  lifetime: LifetimeStatsMetrics
+  /** Distinct achievements unlocked at the end of the MAIN run (Σ keys of state.achievements). */
+  achievementsUnlocked: number
+  /** Total achievements in the catalogue ({@link ACHIEVEMENT_IDS}.length) — the denominator. */
+  achievementsTotal: number
+}
+
+/**
+ * The lifetime {@link import('../src/engine/state').Stats} record flattened for the JSON report:
+ * the eight integer counters as-is plus the Decimal `lootHauled` serialised to its exact string.
+ */
+export interface LifetimeStatsMetrics {
+  attacksWon: number
+  attacksLost: number
+  /** Lifetime resources delivered home from marches — exact decimal string. */
+  lootHauled: string
+  raidsRepelled: number
+  raidsLost: number
+  campsRazed: number
+  scoutsReturned: number
+  villagesFounded: number
+  villagesConquered: number
 }
 
 /** Per-run counters the runner threads into {@link collect}. */
@@ -463,5 +493,21 @@ export function collect(
     automationBuilt: automation.built,
     automationRecruited: automation.recruited,
     automationAttacked: automation.attacked,
+
+    // M5.4: snapshot the final lifetime counters + the achievement unlock tally straight off
+    // the state (both bumped only on the deterministic tick path). lootHauled → exact string.
+    lifetime: {
+      attacksWon: state.stats.attacksWon,
+      attacksLost: state.stats.attacksLost,
+      lootHauled: state.stats.lootHauled.toString(),
+      raidsRepelled: state.stats.raidsRepelled,
+      raidsLost: state.stats.raidsLost,
+      campsRazed: state.stats.campsRazed,
+      scoutsReturned: state.stats.scoutsReturned,
+      villagesFounded: state.stats.villagesFounded,
+      villagesConquered: state.stats.villagesConquered,
+    },
+    achievementsUnlocked: Object.keys(state.achievements).length,
+    achievementsTotal: ACHIEVEMENT_IDS.length,
   }
 }

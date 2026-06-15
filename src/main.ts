@@ -194,7 +194,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.15.0',
+  version: '0.16.0',
   offlineSeconds,
 })
 

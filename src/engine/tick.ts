@@ -7,6 +7,7 @@ import { advanceRaids } from '../systems/raids'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
 import { effectiveMods } from '../systems/prestige'
 import { runAutomation } from '../systems/automation'
+import { checkAchievements } from '../systems/achievements'
 
 /**
  * Fixed simulation step shared by the live loop and offline catch-up: 20 ticks
@@ -84,8 +85,12 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
     // the global world is passed so marches resolve targets and erode loyalty. Marches
     // return any captures earned this step — deferred to after the loop.
     advanceRecruitment(v, dt)
-    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt, mods))
-    advanceRaids(v, state.battleLog, dt, mods)
+    // `state.stats` is threaded in (M5.4) so the combat advancers bump the lifetime
+    // counters on this exact deterministic path — identical online/offline/sim, never
+    // from the UI. They mutate it in place (attacks won/lost, loot hauled, camps razed,
+    // scouts returned / raids repelled-lost); see advanceMarches / advanceRaids.
+    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats))
+    advanceRaids(v, state.battleLog, dt, mods, state.stats)
   }
   // Apply captures once, in deterministic collection order. applyConquest no-ops on a
   // barbId already removed this sub-step (two armies both flooring the same target), so
@@ -107,6 +112,17 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // resolves on FUTURE sub-steps — it deliberately does not feed into this step's already
   // collected `conquests`, so it can't collide with the capture phase above.
   runAutomation(state, mods, dt)
+  // Achievements (M5.4) are evaluated LAST in the sub-step, after every subsystem has
+  // already bumped this step's lifetime counters (state.stats, threaded into the combat
+  // advancers above and into applyConquest / foundVillage) AND the world has fully settled
+  // (captures applied, loyalty regenerated, automation run). checkAchievements is a pure,
+  // deterministic pass over (state, state.stats) that stamps any newly satisfied
+  // achievement once and never clears it — so unlocks fire byte-identically online /
+  // offline / sim, exactly like the counters they read, and NEVER from the UI. In v1 an
+  // achievement is a pure distinction (no gameplay bonus), so this pass can't feed back
+  // into the economy and the 17 balance goals stay untouched. The returned list of newly
+  // unlocked ids is unused here (the UI reads state.achievements reactively after commit).
+  checkAchievements(state)
 }
 
 /**

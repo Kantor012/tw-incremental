@@ -136,6 +136,20 @@ export interface BalanceTargets {
   minAutomationRecruited: number
   /** Attacks AUTO-ATTACK must dispatch-and-resolve over the coverage run (>= 1). */
   minAutomationAttacked: number
+
+  // --- M5.4 achievements goal (HARD — see runner.checkAchievementsUnlocked) ---
+  /**
+   * Distinct achievements the MAIN run must UNLOCK over the budget — a proof-of-mechanic floor
+   * (like the automation floors), NOT one of the 17 balance goals: achievements grant no gameplay
+   * bonus in v1, so they cannot move the economy/combat/expansion/tree/prestige curves. Sized well
+   * below a healthy run's measured count (≈18–20 of the 30 unlock across the budget — the bot wins
+   * thousands of battles, hauls loot, expands and buys deep into the tech tree), so normal play
+   * passes but a broken achievement engine / catalogue (nothing unlocks) fails the run. The
+   * scout / siege / prestige achievements the bot never fields are exercised separately (the M5.4
+   * determinism scenario unlocks first_scout / first_razed; the prestige run unlocks the ascension
+   * ones), so this floor only measures the bot's own reachable set.
+   */
+  minAchievementsUnlocked: number
 }
 
 export const TARGETS: BalanceTargets = {
@@ -215,6 +229,12 @@ export const TARGETS: BalanceTargets = {
   minAutomationBuilt: 1,
   minAutomationRecruited: 1,
   minAutomationAttacked: 1,
+
+  // M5.4: achievements online. A mature run crosses many of the 30 thresholds (economy /
+  // militaria / expansion / tree). Floor sized at the proof-of-mechanic level — the 30k-tick
+  // smoke run already unlocks 14 and the full budget reaches ~18–20 — so normal play passes
+  // comfortably while a regression that stops anything unlocking trips the (hard) check.
+  minAchievementsUnlocked: 12,
 
   // M3.2: tech online, WIDENED to ~180 nodes across 9 categories (economy/storage/
   // settlement + the new military/fortification/logistics/plunder/construction/training

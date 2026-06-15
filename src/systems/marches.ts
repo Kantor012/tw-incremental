@@ -8,6 +8,7 @@ import {
   type BarbarianVillage,
   type World,
   type TechModifiers,
+  type Stats,
 } from '../engine/state'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
@@ -402,6 +403,16 @@ function lootSum(loot: ResourceMap): string {
  *
  * Every report is tagged with `villageId: v.id`. Iterates back-to-front so a
  * completed march can be spliced without disturbing the indices still to process.
+ *
+ * `stats` (M5.4, OPTIONAL) is the mutable lifetime-counter record. When threaded in
+ * (the tick passes `state.stats`), this function bumps it ON THE SAME DETERMINISTIC
+ * RESOLUTION PATH it already runs — so the counters grow byte-identically online /
+ * offline / sim and never from the UI: `attacksWon` / `attacksLost` on a battle
+ * resolving, `campsRazed` when catapults actually knock a target's tier down (>= 1
+ * level removed), `lootHauled` (Decimal) by the haul delivered on a successful attack
+ * return, and `scoutsReturned` when a scout march completes its return leg. Left
+ * undefined by callers that don't track stats (tests, the recon/forecast mirrors),
+ * who get the exact pre-M5.4 behaviour.
  */
 export function advanceMarches(
   v: Village,
@@ -409,6 +420,7 @@ export function advanceMarches(
   log: BattleReport[],
   dtSeconds: number,
   mods: TechModifiers = NO_TECH_MODS,
+  stats?: Stats,
 ): ConquestEvent[] {
   const events: ConquestEvent[] = []
   if (!(dtSeconds > 0)) return events
@@ -429,7 +441,18 @@ export function advanceMarches(
         // Attacks deliver their carry-capped haul; scouts carry nothing (and their
         // survivors were never removed from v.units), so a scout's return leg just
         // retires the march. Either way the march is done.
-        if (m.kind === 'attack') deliverLoot(v, m.loot)
+        if (m.kind === 'attack') {
+          deliverLoot(v, m.loot)
+          // M5.4: credit the lifetime haul (on Decimal) with the resources this march
+          // actually brought home. Done here, on the deterministic return path, so the
+          // lifetime total grows identically online / offline / sim.
+          if (stats !== undefined) {
+            for (const id of RESOURCE_IDS) stats.lootHauled = stats.lootHauled.add(m.loot[id])
+          }
+        } else if (stats !== undefined) {
+          // A scout completed its round trip and is home (M5.4).
+          stats.scoutsReturned += 1
+        }
         marches.splice(i, 1)
         break
       }
@@ -464,6 +487,7 @@ export function advanceMarches(
       if (!outcome.attackerWins) {
         const survivors = applyLosses(sent, 1) // total wipe
         const losses = applyCasualties(v, sent, survivors)
+        if (stats !== undefined) stats.attacksLost += 1 // M5.4: lifetime counter
         pushBattleReport(log, {
           kind: 'attack',
           villageId: v.id,
@@ -478,6 +502,7 @@ export function advanceMarches(
 
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
       const losses = applyCasualties(v, sent, survivors)
+      if (stats !== undefined) stats.attacksWon += 1 // M5.4: lifetime counter
       const loot = computeLoot(survivors, m.targetLevel, mods)
 
       // Siege razing (M5.3): on a WON attack, catapults in the DISPATCHED stack
@@ -492,7 +517,13 @@ export function advanceMarches(
       const razeLevels = catapultLevelDamage(m.units)
       if (razeLevels > 0) {
         const barb = barbarianById(world, m.targetId)
-        if (barb !== undefined) barb.level = Math.max(1, barb.level - razeLevels)
+        if (barb !== undefined) {
+          const beforeLevel = barb.level
+          barb.level = Math.max(1, barb.level - razeLevels)
+          // M5.4: count one razing only when the tier ACTUALLY dropped (a camp already
+          // at level 1 is clamped, so nothing was removed and it doesn't count).
+          if (stats !== undefined && barb.level < beforeLevel) stats.campsRazed += 1
+        }
       }
 
       // Conquest (M2.4): a won fight whose survivors still include a noble erodes

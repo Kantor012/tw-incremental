@@ -116,6 +116,10 @@ export function applyConquest(
   const village = createVillage(newVillageId, name, barb.x, barb.y)
   state.villages[newVillageId] = village
   state.villageOrder.push(newVillageId)
+  // M5.4: a barbarian village joined the empire. Bumped here — the single, idempotent
+  // capture point on the deterministic tick path (the guard above already no-op'd a
+  // stale/double event) — so the lifetime counter grows identically online/offline/sim.
+  state.stats.villagesConquered += 1
 
   const report: BattleReport = {
     kind: 'conquer',

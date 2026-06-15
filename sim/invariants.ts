@@ -8,6 +8,7 @@ import {
   RESOURCE_IDS,
   INITIAL_BUILDINGS,
   type GameState,
+  type Stats,
   type Village,
   type World,
   type BarbarianVillage,
@@ -22,6 +23,8 @@ import {
   PRESTIGE_ROOTS,
   type PrestigeArchetype,
 } from '../src/content/prestige'
+import { ACHIEVEMENT_IDS } from '../src/content/achievements'
+import { checkAchievements } from '../src/systems/achievements'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack, sendScout } from '../src/systems/marches'
 import {
@@ -1703,5 +1706,225 @@ export function checkM53Determinism(seed: string, seconds: number): InvariantRes
     detail: ok
       ? undefined
       : 'chunked offline catch-up diverged from a single-step simulate WITH a siege march (rams + catapults) in flight',
+  }
+}
+
+// --- M5.4 lifetime stats + achievements coverage -----------------------------------------
+//
+// The lifetime {@link Stats} counters and the {@link GameState.achievements} unlock map are
+// bumped / evaluated ONLY on the deterministic tick path (systems bump state.stats; tick.ts's
+// subStep runs checkAchievements last), never from the UI — so they grow byte-identically
+// online / offline / sim. These checks cover the M5.4 brief: (a) the counters actually
+// ACCUMULATE over a run and are well-formed (no NaN / negative / non-integer; lootHauled a
+// finite non-negative Decimal); (b) a sensible NUMBER of achievements unlock; (c) the
+// counters + unlocks are IDENTICAL online vs chunked-offline (and, via the existing whole-state
+// `determinism` / `save-load-continuation` checks run on three seeds, across seeds), with the
+// unlock set SETTLED (every satisfied condition already stamped). Achievements grant no gameplay
+// bonus in v1, so none of this can move the 17 balance goals — the bot's main run is untouched.
+
+/**
+ * The eight INTEGER lifetime counters of {@link Stats} (everything except the Decimal
+ * `lootHauled`). Listed once so {@link checkStats} and {@link statsSnapshot} agree on exactly
+ * which fields are plain non-negative-integer counters. `lootHauled` is validated / snapshotted
+ * separately because it is a big-number Decimal.
+ */
+const STAT_COUNTER_KEYS = [
+  'attacksWon',
+  'attacksLost',
+  'raidsRepelled',
+  'raidsLost',
+  'campsRazed',
+  'scoutsReturned',
+  'villagesFounded',
+  'villagesConquered',
+] as const satisfies readonly (keyof Stats)[]
+
+/**
+ * Lifetime {@link Stats} are WELL-FORMED (M5.4): every integer counter is a finite,
+ * non-negative integer and `lootHauled` is a finite, non-negative Decimal. A FAIL means a
+ * counter went NaN / negative / fractional (e.g. a bad decrement, or a Decimal haul that
+ * overflowed to Infinity) — the lifetime record must never be corrupt, since achievements read
+ * it. Sampled like {@link checkRoundTrip} throughout the run and at the end.
+ */
+export function checkStats(state: GameState): InvariantResult {
+  const issues: string[] = []
+  const s = state.stats
+  for (const k of STAT_COUNTER_KEYS) {
+    const n = s[k]
+    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) issues.push(`${k}=${n}`)
+  }
+  if (!isFiniteDecimal(s.lootHauled) || s.lootHauled.lt(0)) {
+    issues.push(`lootHauled=${s.lootHauled.toString()}`)
+  }
+  return {
+    name: 'stats-valid',
+    ok: issues.length === 0,
+    detail: issues.length ? `invalid lifetime stat(s): ${issues.join(', ')}` : undefined,
+  }
+}
+
+/**
+ * The {@link GameState.achievements} map is WELL-FORMED and SETTLED (M5.4):
+ *  - every KEY is a known {@link ACHIEVEMENT_IDS} id (an unknown id means something other than
+ *    checkAchievements wrote the map — the save validator rejects these too);
+ *  - every VALUE is a finite positive integer (the deterministic 1-based unlock ordinal);
+ *  - SETTLED: re-running {@link checkAchievements} on a CLONE (via the save round-trip, so the
+ *    real state is never mutated) unlocks NOTHING new — i.e. every achievement whose pure
+ *    condition holds for the final (state, stats) is ALREADY stamped. This proves the tick path
+ *    keeps the unlock set in lock-step with the conditions (no satisfied-but-unlocked gap), and
+ *    that the conditions are total (none threw) on a real, mature state.
+ */
+export function checkAchievementsValid(state: GameState): InvariantResult {
+  const issues: string[] = []
+  const known = new Set<string>(ACHIEVEMENT_IDS)
+  for (const id of Object.keys(state.achievements)) {
+    if (!known.has(id)) issues.push(`unknown id "${id}"`)
+    const marker = state.achievements[id]
+    if (!Number.isFinite(marker) || !Number.isInteger(marker) || marker < 1) {
+      issues.push(`${id} marker=${marker}`)
+    }
+  }
+  // SETTLED: a satisfied condition must already be unlocked. Clone first so this stays a pure
+  // read of `state` (checkAchievements mutates the achievements map it is given).
+  const late = checkAchievements(deserialize(serialize(state)))
+  if (late.length > 0) issues.push(`unsettled (condition holds but not unlocked): ${late.join(', ')}`)
+  return {
+    name: 'achievements-valid',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Lifetime counters ACTUALLY ACCUMULATED over a run (M5.4): the self-propelling combat loop
+ * GUARANTEES the bot wins attacks (a loot source), hauls resources home, and weathers raids, so
+ * a finished MAIN run must show attacksWon > 0, lootHauled > 0 and at least one raid resolved.
+ * A FAIL means the deterministic stat path never fired — the counters are not being bumped on
+ * the tick path (or the loop stopped producing combat), which the brief flags as a regression.
+ * Only the loop-guaranteed counters are asserted hard here; scout / siege / expansion counters
+ * are exercised by {@link checkM54Determinism} (siege+scout) and the cross-check in the runner
+ * (founding / conquest), since the bot does not field scouts or siege.
+ */
+export function checkStatsAccumulated(state: GameState): InvariantResult {
+  const s = state.stats
+  const raidsResolved = s.raidsRepelled + s.raidsLost
+  const issues: string[] = []
+  if (!(s.attacksWon > 0)) issues.push('attacksWon == 0')
+  if (!s.lootHauled.gt(0)) issues.push('lootHauled == 0')
+  if (!(raidsResolved > 0)) issues.push('no raids resolved')
+  return {
+    name: 'stats-accumulated',
+    ok: issues.length === 0,
+    detail: issues.length
+      ? `lifetime counters did not accumulate over the run: ${issues.join(', ')}`
+      : `attacksWon=${s.attacksWon} lootHauled=${s.lootHauled.toString()} raidsResolved=${raidsResolved}`,
+  }
+}
+
+/**
+ * A SENSIBLE number of achievements unlocked over a run (M5.4): a mature MAIN run builds deep,
+ * wins many battles, hauls loot, expands and buys far into the tech tree, so it must cross at
+ * least `min` of the 30 thresholds. A proof-of-mechanic floor (like the automation floors), set
+ * well below a healthy run's measured count, so normal play passes but a broken achievement
+ * engine / catalogue (nothing unlocks) fails the run.
+ */
+export function checkAchievementsUnlocked(state: GameState, min: number): InvariantResult {
+  const n = Object.keys(state.achievements).length
+  return {
+    name: 'achievements-unlocked',
+    ok: n >= min,
+    detail: `unlocked ${n}/${ACHIEVEMENT_IDS.length} achievement(s) (target >= ${min})`,
+  }
+}
+
+/**
+ * Put a fresh capital into a deterministic scenario that drives EVERY lifetime-stat path the
+ * bot's own run does not — used by {@link checkM54Determinism}. One catapult-bearing attack at a
+ * winnable mid-tier camp (a WON fight that hauls loot AND razes a level → attacksWon + lootHauled
+ * + campsRazed), one scout round-trip (scoutsReturned), and — because units are present — active
+ * raids (raidsRepelled / raidsLost). Units / resources are seeded directly (price-independent);
+ * barracks+academy are set only so the dispatch gates pass. Pure, Node-safe, deterministic; applied
+ * identically to both branches so the only thing it can reveal is a genuine online/offline split.
+ */
+function seedM54(state: GameState): void {
+  const v = firstVillage(state)
+  v.resources = { wood: D(1e7), clay: D(1e7), iron: D(1e7) }
+  v.buildings.barracks = 1
+  v.buildings.academy = 1 // siege gate (units seeded directly, but keep the scenario honest)
+  recomputeDerived(state)
+  v.popCap = D(1e5)
+  v.units.axeman = 150
+  v.units.catapult = 12
+  v.units.scout = 6
+  // Catapult column at a winnable tier-6 camp: a clean WIN that delivers loot on return and
+  // permanently razes a level off the camp — attacksWon, lootHauled and campsRazed all bump.
+  const army = zeroArmy()
+  army.axeman = 120
+  army.catapult = 12
+  sendAttack(v, state.world, state.battleLog, targetOfLevel(state.world, 6).id, army)
+  // A scout round-trip at a nearer low camp → scoutsReturned (no fight, no loot, no losses).
+  sendScout(v, state.world, state.battleLog, targetOfLevel(state.world, 3).id, 6)
+}
+
+/**
+ * A stable, JSON string of JUST the lifetime stats + achievements of `state` — the Decimal
+ * `lootHauled` as its exact string, the integer counters in {@link STAT_COUNTER_KEYS} order, and
+ * the achievements map with its keys sorted (so iteration order can never make two equal maps
+ * compare unequal). {@link checkM54Determinism} compares this across the online and offline
+ * branches to isolate a stats/achievements divergence specifically.
+ */
+function statsSnapshot(state: GameState): string {
+  const s = state.stats
+  const stats: Record<string, string | number> = { lootHauled: s.lootHauled.toString() }
+  for (const k of STAT_COUNTER_KEYS) stats[k] = s[k]
+  const ach: Record<string, number> = {}
+  for (const id of Object.keys(state.achievements).sort()) ach[id] = state.achievements[id]
+  return JSON.stringify({ stats, ach })
+}
+
+/**
+ * M5.4 offline/online parity for the lifetime stats + achievements: the counters are bumped in
+ * the systems and the unlock pass runs in subStep, so crediting a span as one big {@link simulate}
+ * (online catch-up) must leave the SAME counters and the SAME unlock set as the chunked offline
+ * path ({@link applyOffline}). Both branches start from the identical {@link seedM54} scenario, so
+ * any divergence is a real online/offline split. The check ALSO asserts NON-VACUITY — the scenario
+ * must have driven every stat path (a win + loot + a raze + a scout + a resolved raid + >= 1
+ * unlock) — so "identical" can never pass by both branches doing nothing. `seconds` stays within
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller uses an hour, ample for
+ * both the attack and the scout to complete their round trips in either branch).
+ */
+export function checkM54Determinism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedM54(big)
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedM54(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const equal = statsSnapshot(big) === statsSnapshot(chunked)
+
+  // Non-vacuity: the scenario must actually have moved every path, else equality is meaningless.
+  // Asserted on the big-step branch (== chunked once equality holds).
+  const s = big.stats
+  const unlocked = Object.keys(big.achievements).length
+  const drove =
+    s.attacksWon > 0 &&
+    s.lootHauled.gt(0) &&
+    s.campsRazed > 0 &&
+    s.scoutsReturned > 0 &&
+    s.raidsRepelled + s.raidsLost > 0 &&
+    unlocked > 0
+
+  const ok = equal && drove
+  return {
+    name: 'm54-determinism',
+    ok,
+    detail: ok
+      ? `stats+achievements identical online vs chunked-offline (won ${s.attacksWon}, loot ${s.lootHauled.toString()}, razed ${s.campsRazed}, scouts ${s.scoutsReturned}, raids ${s.raidsRepelled + s.raidsLost}, ${unlocked} achievement(s))`
+      : !equal
+        ? 'lifetime stats / achievements diverged between a single-step simulate and chunked offline catch-up'
+        : 'M5.4 scenario failed to drive every stat path (vacuous determinism check)',
   }
 }

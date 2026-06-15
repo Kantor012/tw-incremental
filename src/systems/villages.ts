@@ -206,6 +206,11 @@ export function foundVillage(
   const v = createVillage(id, 'Wioska ' + (count + 1), x, y)
   state.villages[id] = v
   state.villageOrder.push(id)
+  // M5.4: bump the lifetime founding counter exactly once, at the single mutation point
+  // (after canFound passed and the village is registered). Founding is a one-shot state
+  // mutation — whether triggered from the UI or the sim's expansion bot — so counting it
+  // here (not in a UI handler) keeps the counter consistent across every call path.
+  state.stats.villagesFounded += 1
   // Reconcile derived fields ACROSS the empire so the freshly-planted village
   // inherits the current global tech multipliers (createVillage rolls it up with
   // NO_TECH_MODS only).

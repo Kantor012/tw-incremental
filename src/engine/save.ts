@@ -1,11 +1,18 @@
 import { Decimal, isFiniteDecimal } from './decimal'
 import type { GameState } from './state'
-import { recomputeDerived, INITIAL_BUILDINGS, INITIAL_UNITS, RAID_BASE_INTERVAL } from './state'
+import {
+  recomputeDerived,
+  INITIAL_BUILDINGS,
+  INITIAL_UNITS,
+  RAID_BASE_INTERVAL,
+  createInitialStats,
+} from './state'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
+import { ACHIEVEMENT_IDS } from '../content/achievements'
 import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
 /**
@@ -29,13 +36,16 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  *   validation) and the prestige catalogue (`PRESTIGE_NODES` / `PRESTIGE_NODE_IDS`,
  *   content/prestige.ts, used by the v9 validation) are PURE DATA that import only the
  *   erased `ResourceId` type from state.ts, so they add no runtime edge and can never
- *   form an initialisation cycle.
+ *   form an initialisation cycle. The achievements id list (`ACHIEVEMENT_IDS`,
+ *   content/achievements.ts, used by the v13 validation) is the same: that module imports
+ *   ONLY erased types (`GameState` / `Stats` from state.ts, `BuildingId` from
+ *   buildings.ts), so it too adds no runtime edge.
  * - Everything here must run headless (Node + browser): localStorage access is
  *   always feature-detected and wrapped in try/catch.
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 12
+export const SAVE_VERSION = 13
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -424,6 +434,27 @@ export function migrate(raw: any): any {
       }
       return { ...s, villages, version: 12 }
     },
+    // v12 -> v13: lifetime stats + achievements (M5.4). A v12 save predates the two new
+    // account-wide fields, so backfill them WITHOUT disturbing the player's progress:
+    //  - `stats` — the permanent career counters ({ attacksWon, attacksLost, lootHauled,
+    //    raidsRepelled, raidsLost, campsRazed, scoutsReturned, villagesFounded,
+    //    villagesConquered }) — seeded to the all-zero record (createInitialStats(), with
+    //    lootHauled a Decimal zero). They are EVENT counters that leave no standing trace,
+    //    so an old save genuinely has no value to recover: zero is the honest career start.
+    //  - `achievements` — the sparse `{ id: unlock-marker }` map — seeded EMPTY ({}); the
+    //    first tick after load re-evaluates every condition over the migrated state and
+    //    unlocks any whose threshold the carried-over progress already meets (a pure DATA
+    //    distinction with no gameplay bonus, so the 17 balance goals stay untouched).
+    // A forward-compat save that already carries an object for either field keeps it
+    // verbatim (validateState then vets it); any non-object (corrupt/missing) is reset to
+    // its default. Nothing is recomputed here; importSave's recomputeDerived pass runs
+    // afterwards exactly as for every other migration.
+    12: (s) => ({
+      ...s,
+      stats: isObject(s.stats) ? s.stats : createInitialStats(),
+      achievements: isObject(s.achievements) ? s.achievements : {},
+      version: 13,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -612,7 +643,10 @@ function validateVillage(v: unknown, id: string): void {
  * `totalEarned` / `ascensions` are finite, non-negative numbers, and its `nodes` map
  * follows the same known-id / [0, maxLevel] rule as `tech`), and finally the M5.1
  * `automation` record is checked (the three switches are booleans, `recruitUnit` is
- * `null` or a known unit id, and `recruitTarget` is a non-negative integer).
+ * `null` or a known unit id, and `recruitTarget` is a non-negative integer), and finally
+ * the M5.4 lifetime `stats` record (eight non-negative integer event counters plus the
+ * Decimal `lootHauled`, finite + non-negative) and the M5.4 `achievements` map (every
+ * present key a known ACHIEVEMENT_ID, every value a finite, non-negative unlock marker).
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -843,6 +877,57 @@ export function validateState(s: unknown): GameState {
     recruitTarget < 0
   ) {
     throw new Error('save: invalid automation recruitTarget')
+  }
+
+  // PERMANENT lifetime stats (M5.4) — the account-wide career counters that survive
+  // every ascension. Eight of the nine are plain non-negative, finite INTEGERS (event
+  // tallies — battles won/lost, raids, camps razed, scouts, villages founded/conquered);
+  // a NaN/Infinity/negative/fractional would corrupt the career record and then get
+  // autosaved (CLAUDE.md hard rule #3). `lootHauled` is the one Decimal (the economy
+  // rule — the lifetime haul grows past 2^53), value-checked finite + non-negative
+  // exactly like a resource pool, and round-trips via the `{ $d }` wire shape. The
+  // v12->v13 migration guarantees the all-zero default, so a migrated save always passes.
+  const { stats } = s
+  if (!isObject(stats)) throw new Error('save: missing stats')
+  for (const key of [
+    'attacksWon',
+    'attacksLost',
+    'raidsRepelled',
+    'raidsLost',
+    'campsRazed',
+    'scoutsReturned',
+    'villagesFounded',
+    'villagesConquered',
+  ] as const) {
+    const n = stats[key]
+    if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+      throw new Error(`save: invalid stats ${key}`)
+    }
+  }
+  const lootHauled = stats.lootHauled
+  if (!(lootHauled instanceof Decimal) || !isFiniteDecimal(lootHauled) || lootHauled.lt(0)) {
+    throw new Error('save: invalid stats lootHauled')
+  }
+
+  // Unlocked ACHIEVEMENTS (M5.4) — a sparse `{ achievementId: marker }` map (absent key
+  // = still locked). The marker is a DETERMINISTIC unlock tag written once by
+  // checkAchievements (never a clock — no Date), so every PRESENT value must be a finite,
+  // non-negative number. Every PRESENT key must be a KNOWN achievement id; unknown keys
+  // are REJECTED for the same reason as the tech/prestige maps — `achievements` is written
+  // ONLY by checkAchievements (known ids), so a key outside ACHIEVEMENT_IDS means a
+  // corrupt/tampered/forward-version save (downgrade is best-effort, like the rest of
+  // forward-compat). An empty `{}` always passes, which the v12->v13 migration guarantees.
+  const { achievements } = s
+  if (!isObject(achievements)) throw new Error('save: missing achievements')
+  const knownAchievementIds = ACHIEVEMENT_IDS as readonly string[]
+  for (const id of Object.keys(achievements)) {
+    if (!knownAchievementIds.includes(id)) {
+      throw new Error(`save: unknown achievement ${id}`)
+    }
+    const marker = achievements[id]
+    if (typeof marker !== 'number' || !Number.isFinite(marker) || marker < 0) {
+      throw new Error(`save: invalid achievement marker ${id}`)
+    }
   }
 
   return s as unknown as GameState

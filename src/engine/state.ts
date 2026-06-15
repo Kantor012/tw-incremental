@@ -336,6 +336,42 @@ export interface AutomationSettings {
   recruitTarget: number
 }
 
+/**
+ * Permanent, account-wide LIFETIME counters (M5.4). These accumulate over the whole
+ * run's life and are NEVER reset (an ascension preserves them — `ascend` leaves
+ * `stats`/`achievements` untouched), so they read as a true career record.
+ *
+ * They hold ONLY the quantities that cannot be re-derived from the rest of the
+ * state at any later moment (a battle won, loot delivered, a camp razed are EVENTS
+ * that leave no standing trace). Everything else an achievement might test —
+ * current village count, summed building/tech levels, `prestige.ascensions` /
+ * `totalEarned`, etc. — is computed on the fly from {@link GameState} and is NOT
+ * mirrored here. They are bumped ONLY on the DETERMINISTIC tick/systems path (never
+ * from the UI/eventbus), so they grow byte-identically online, offline and in the
+ * sim. `lootHauled` is on Decimal (the economy rule) because the lifetime haul grows
+ * far past 2^53; every other counter is a plain non-negative integer.
+ */
+export interface Stats {
+  /** Attacks that resolved as a player WIN (bumped on battle resolution). */
+  attacksWon: number
+  /** Attacks that resolved as a player LOSS. */
+  attacksLost: number
+  /** Lifetime resources actually DELIVERED home from marches (summed on return). On Decimal. */
+  lootHauled: Decimal
+  /** Incoming barbarian raids REPELLED (defence held). */
+  raidsRepelled: number
+  /** Incoming barbarian raids that broke through (defence lost). */
+  raidsLost: number
+  /** Barbarian camp levels knocked down by catapults (>= 1 level removed counts one). */
+  campsRazed: number
+  /** Scout marches that completed and returned home. */
+  scoutsReturned: number
+  /** New villages FOUNDED by the player. */
+  villagesFounded: number
+  /** Barbarian villages CONQUERED into the empire. */
+  villagesConquered: number
+}
+
 export interface GameState {
   /** Save schema version — drives migrations. */
   version: number
@@ -391,6 +427,23 @@ export interface GameState {
    * `runAutomation` (systems/automation.ts); not a derived field — it serializes.
    */
   automation: AutomationSettings
+  /**
+   * Permanent LIFETIME counters (M5.4) — the cumulative career record that survives
+   * every ascension. Bumped ONLY on the deterministic tick/systems path so it is
+   * identical online/offline/sim. Holds only what cannot be re-derived from the rest
+   * of the state (won/lost battles, delivered loot, razed camps, …). See {@link Stats}.
+   */
+  stats: Stats
+  /**
+   * Unlocked ACHIEVEMENTS (M5.4): a sparse map `achievementId -> unlock marker` (absent
+   * key = still locked). The marker is a DETERMINISTIC integer (never a clock — no Date),
+   * written once by `checkAchievements` (systems/achievements.ts) on the tick path when
+   * an achievement's pure condition over ({@link GameState}, {@link Stats}) first holds,
+   * and never cleared. Achievements are a pure DISTINCTION in v1 (no gameplay bonus), so
+   * none of the 17 balance goals move. Keys are drawn from `ACHIEVEMENT_IDS`
+   * (content/achievements.ts).
+   */
+  achievements: Record<string, number>
 }
 
 /**
@@ -585,6 +638,25 @@ export function createVillage(id: VillageId, name: string, x = 0, y = 0): Villag
   return v
 }
 
+/**
+ * A fresh lifetime-stats record: every counter zero, `lootHauled` a Decimal zero
+ * (the economy rule). Used by {@link createInitialState} and reused by the save
+ * migration to backfill the field on a pre-M5.4 save.
+ */
+export function createInitialStats(): Stats {
+  return {
+    attacksWon: 0,
+    attacksLost: 0,
+    lootHauled: D(0),
+    raidsRepelled: 0,
+    raidsLost: 0,
+    campsRazed: 0,
+    scoutsReturned: 0,
+    villagesFounded: 0,
+    villagesConquered: 0,
+  }
+}
+
 export function createInitialState(seed: string, now: number): GameState {
   // Capital starts at the world centre; the barbarian world is generated from the
   // same seed on its OWN RNG stream (see generateWorld), so it never perturbs the
@@ -603,6 +675,8 @@ export function createInitialState(seed: string, now: number): GameState {
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
     automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
+    stats: createInitialStats(),
+    achievements: {},
   }
 }
 
