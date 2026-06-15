@@ -130,6 +130,37 @@ export interface RunMetrics {
    * (1 when no tech is owned). > 1 confirms the tree's multipliers are live.
    */
   techProductionMult: number
+
+  // --- M4.1 prestige (ascension meta-layer) ---
+  // Measured by a SEPARATE, ascension-driving run (see runner.runPrestigeContinuous) so
+  // the economy/combat/tech/expansion metrics above stay measured on an un-reset run.
+  /** Ascensions the bot performed over the prestige run (the prestige loop fired N times). */
+  ascensions: number
+  /** First tick at which the bot ascended in the prestige run, or null if it never did. */
+  firstAscendTick: number | null
+  /** Prestige points still banked at the end of the prestige run. */
+  prestigePointsBanked: number
+  /** Lifetime prestige points earned across every ascension (PERMANENT total). */
+  prestigeTotalEarned: number
+  /** Successful prestige-node level purchases over the prestige run (one per choosePrestige). */
+  prestigePurchases: number
+  /** Distinct prestige nodes owned at level >= 1 at the end of the prestige run. */
+  prestigeNodesOwned: number
+  /** Σ owned prestige-node levels at the end of the prestige run. */
+  prestigeLevelsOwned: number
+  /**
+   * BONUS CONFIRMATION: production uplift the SURVIVING prestige nodes give a fresh run —
+   * totalProduction(fresh capital + final prestige nodes, re-derived) / totalProduction(a
+   * no-prestige fresh capital). > 1 proves the permanent prestige multipliers actually fold
+   * into recomputeDerived (the economy), i.e. an ascension makes every future run stronger.
+   */
+  prestigeProductionMult: number
+  /**
+   * BONUS CONFIRMATION (the other prestige-only kind): the per-resource head-start the
+   * surviving prestige nodes grant a fresh capital at ascension (Σ start_resources·level).
+   * > 0 proves the start-resource bonus is live; 0 just means the bot bought no supply node.
+   */
+  prestigeStartResourceBonus: number
 }
 
 /** Per-run counters the runner threads into {@link collect}. */
@@ -147,6 +178,34 @@ export interface RunStats {
   combat: CombatStats
   /** Successful tech-node level purchases over the run (M3.1). */
   techPurchases: number
+}
+
+/**
+ * Prestige (M4.1) counters from the SEPARATE ascension-driving run (see
+ * runner.runPrestigeContinuous). Kept apart from {@link RunStats} because it is produced
+ * by a different run than the economy/combat metrics — the main run never ascends, so its
+ * targets stay measured on an un-reset economy. {@link collect} folds these straight into
+ * the matching {@link RunMetrics} prestige fields.
+ */
+export interface PrestigeRunStats {
+  /** Ascensions performed over the prestige run. */
+  ascensions: number
+  /** First tick the bot ascended, or null. */
+  firstAscendTick: number | null
+  /** Prestige points still banked at run end. */
+  pointsBanked: number
+  /** Lifetime prestige points earned (permanent total). */
+  totalEarned: number
+  /** Successful prestige-node level purchases over the run. */
+  purchases: number
+  /** Distinct prestige nodes owned at level >= 1 at run end. */
+  nodesOwned: number
+  /** Σ owned prestige-node levels at run end. */
+  levelsOwned: number
+  /** Production uplift the surviving prestige nodes give a fresh re-derived run (bonus proof). */
+  productionMult: number
+  /** Per-resource start-resource head-start the surviving prestige nodes grant (bonus proof). */
+  startResourceBonus: number
 }
 
 /**
@@ -262,6 +321,7 @@ export function collect(
   simSeconds: number,
   state: GameState,
   stats: RunStats,
+  prestige: PrestigeRunStats,
 ): RunMetrics {
   const first = firstVillage(state)
 
@@ -361,5 +421,15 @@ export function collect(
     techLevelsOwned,
     productionBaseNoTech: prodBase.toString(),
     techProductionMult,
+
+    ascensions: prestige.ascensions,
+    firstAscendTick: prestige.firstAscendTick,
+    prestigePointsBanked: prestige.pointsBanked,
+    prestigeTotalEarned: prestige.totalEarned,
+    prestigePurchases: prestige.purchases,
+    prestigeNodesOwned: prestige.nodesOwned,
+    prestigeLevelsOwned: prestige.levelsOwned,
+    prestigeProductionMult: prestige.productionMult,
+    prestigeStartResourceBonus: prestige.startResourceBonus,
   }
 }

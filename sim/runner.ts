@@ -1,5 +1,6 @@
 import {
   createInitialState,
+  recomputeDerived,
   INITIAL_UNITS,
   type GameState,
   type BattleReport,
@@ -10,7 +11,15 @@ import { build } from '../src/systems/buildings'
 import { recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { foundVillage } from '../src/systems/villages'
-import { purchaseTech, aggregateTechMods } from '../src/systems/tech'
+import { purchaseTech } from '../src/systems/tech'
+import {
+  effectiveMods,
+  ascend,
+  purchasePrestige,
+  startResourceBonus,
+  prestigeNodeLevel,
+} from '../src/systems/prestige'
+import { PRESTIGE_NODE_IDS } from '../src/content/prestige'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
@@ -25,19 +34,31 @@ import {
   checkMarchesTerminate,
   checkTechTree,
   checkTechState,
+  checkPrestigeTree,
+  checkPrestigeState,
+  checkAscendValid,
   contentConsumed,
   totalResources,
   type InvariantResult,
 } from './invariants'
-import { chooseAction, chooseFounding, chooseConquest, chooseTech } from './bot'
+import {
+  chooseAction,
+  chooseFounding,
+  chooseConquest,
+  chooseTech,
+  chooseAscend,
+  choosePrestige,
+} from './bot'
 import {
   collect,
   emptyCombatStats,
   newBattleReports,
   applyReport,
+  totalProduction,
   type CombatStats,
   type RunMetrics,
   type RunStats,
+  type PrestigeRunStats,
 } from './metrics'
 
 /**
@@ -76,6 +97,17 @@ const MAX_ACTIONS_PER_STEP = 8
  * save-load-continuation invariants are unaffected.
  */
 const TECH_DECIDE_EVERY = 8
+
+/**
+ * Step budget for the SEPARATE prestige (ascension) run (M4.1). Kept far shorter than the
+ * main budget on purpose: the prestige run only needs to drive the bot to its
+ * {@link import('./bot').BOT_MAX_ASCENSIONS} ascensions and buy the resulting points, which
+ * the sim measures completing well inside this window (every seed reaches all ascensions by
+ * tick ~4600). Short because (a) the resetting loop self-limits via the ascension cap, and
+ * (b) keeping it small bounds the harness runtime — three passes of this per seed
+ * (continuous + determinism repeat + split-with-save) is a small add over the main run.
+ */
+const PRESTIGE_TICKS = 6000
 
 /** What one {@link step} did: building upgrades bought, units ordered, attacks sent, villages founded, tech levels bought. */
 interface StepResult {
@@ -123,14 +155,19 @@ function step(
   let actions = 0
   const v = state.villages[state.villageOrder[0]]
 
-  // M3.2: roll up the account-wide tech bonuses ONCE for this step and thread the SAME
-  // bag into every live mutation (build cost / recruit time / march power-loot-speed) AND
-  // into the bot's matching decision (chooseAction). state.tech only changes at the END of
-  // the step (purchaseTech below), so the build/recruit/attack actions correctly use the
-  // pre-purchase bonuses; simulate() re-derives its own mods from state.tech afterward, so
-  // a node bought this step lands on the next. mods is a pure function of state.tech →
+  // M3.2/M4.1: roll up the account-wide EFFECTIVE bonuses ONCE for this step and thread the
+  // SAME bag into every live mutation (build cost / recruit time / march power-loot-speed)
+  // AND into the bot's matching decision (chooseAction). effectiveMods folds the tech ledger
+  // WITH the permanent prestige tree, exactly as the engine's tick does (tick.ts subStep) —
+  // so a build re-derives the capital with prestige's production multiplier instead of
+  // stripping it back to tech-only. For a prestige-empty state effectiveMods === the tech
+  // bag byte-for-byte (combine with the identity prestige bag is exact), so the M1–M3 runs
+  // are unchanged; the prestige run gets the correct combined economy. state.tech /
+  // state.prestige.nodes only change at the END of the step (purchaseTech below; ascend /
+  // purchasePrestige happen in the prestige driver), so this step's actions use the
+  // pre-purchase bonuses and simulate() re-derives afterward. Pure function of state →
   // deterministic, identical across the continuous / split / repeat runs.
-  const mods = aggregateTechMods(state.tech)
+  const mods = effectiveMods(state)
 
   // M2.4 conquest pipeline FIRST, so the noble strike force gets first claim on the
   // reserved population and on resources before the per-village economy spends them.
@@ -333,6 +370,167 @@ function runSplit(seed: string, ticks: number, dt: number): GameState {
   return state
 }
 
+// --- M4.1 prestige (ascension) run ------------------------------------------------------
+//
+// A SEPARATE run from the economy/combat/tech/expansion measurement above. It must stay
+// separate because ascend() RESETS the run (villages -> one capital, tech {}, world
+// regenerated, battle log cleared) — folding it into the primary run would zero out the
+// cumulative M1–M3 progression the existing targets measure. Here the bot plays normally
+// via the same {@link step}, then once a reset would bank a worthwhile amount it ASCENDS
+// and spends the points on the prestige tree, repeating up to the ascension cap. The
+// PERMANENT prestige account (points / totals / node levels) survives every reset, so the
+// bonuses compound — which is exactly what {@link checkAscendValid} / {@link checkPrestigeState}
+// and the prestige balance targets verify.
+
+/**
+ * The prestige loop for ONE step's worth of decision, AFTER {@link step} has advanced the
+ * economy/combat: if {@link chooseAscend} says it's worthwhile, ascend (banking the pending
+ * points and resetting the run) then spend the banked points greedily on the prestige tree
+ * via {@link choosePrestige} until nothing affordable remains. Returns the number of
+ * prestige-node levels bought this step (0 when no ascension happened). Pure-ish — it only
+ * mutates `state` through the engine's own {@link ascend} / {@link purchasePrestige}, so two
+ * identical runs ascend and buy identically (the determinism / save-load invariants hold).
+ */
+function prestigeDrive(state: GameState): { ascended: boolean; purchases: number } {
+  if (!chooseAscend(state)) return { ascended: false, purchases: 0 }
+  ascend(state)
+  let purchases = 0
+  let id: string | null
+  while ((id = choosePrestige(state)) !== null) {
+    if (!purchasePrestige(state, id)) break
+    purchases += 1
+  }
+  return { ascended: true, purchases }
+}
+
+/** What a prestige run yields: the final state, sampled invariants, and the prestige tally. */
+interface PrestigeRun {
+  state: GameState
+  invariants: InvariantResult[]
+  stats: PrestigeRunStats
+}
+
+/**
+ * Run a fresh state forward for `ticks` steps WITH the prestige loop active. Each step
+ * plays normally ({@link step}) then consults {@link prestigeDrive}; after every ascension,
+ * when `withInvariants`, the post-reset state is asserted valid and playable (resource /
+ * army / world / placement / loyalty / tech-state / prestige-state / round-trip /
+ * no-softlock / ascend-valid). At the end the surviving prestige nodes are re-derived onto a
+ * fresh capital to MEASURE the permanent bonus (production uplift + start-resource head-start)
+ * — the proof that an ascension makes every future run stronger.
+ */
+function runPrestige(seed: string, ticks: number, dt: number, withInvariants: boolean): PrestigeRun {
+  const state = createInitialState(seed, 0)
+  const scratch = emptyUnitCounts()
+  const invariants: InvariantResult[] = []
+  let purchases = 0
+  let firstAscendTick: number | null = null
+
+  for (let i = 0; i < ticks; i++) {
+    step(state, dt, scratch, i)
+    const { ascended, purchases: bought } = prestigeDrive(state)
+    if (!ascended) continue
+    purchases += bought
+    if (firstAscendTick === null) firstAscendTick = i
+
+    if (withInvariants) {
+      // Assert the RESET ITSELF left a valid, playable single-capital state. We do NOT sample
+      // no-softlock at this instant: a just-reset capital has accrued nothing this tick, and
+      // checkNoSoftlock deliberately ignores the production signal, so a fresh 0-resource
+      // capital would read as a (false) stall even though the very next tick accrues and
+      // unlocks an action — a post-ascend capital is structurally a fresh createInitialState
+      // start, which runContinuous already proves playable. checkAscendValid covers the
+      // structural post-reset playability (world non-empty, ledger consistent, finite
+      // non-negative resources); the run REACHING the next ascension proves it progresses,
+      // and a whole-run no-softlock is asserted at pfinal below.
+      const phase = `asc${state.prestige.ascensions}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkLoyalty(state)], phase))
+      invariants.push(...tag([checkTechState(state)], phase))
+      invariants.push(...tag([checkPrestigeState(state)], phase))
+      invariants.push(...tag([checkAscendValid(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+    }
+  }
+
+  if (withInvariants) {
+    invariants.push(...tag(runInvariants(state), 'pfinal'))
+    invariants.push(...tag([checkArmyConsistency(state)], 'pfinal'))
+    invariants.push(...tag([checkWorldConsistency(state)], 'pfinal'))
+    invariants.push(...tag([checkPrestigeState(state)], 'pfinal'))
+    invariants.push(...tag([checkRoundTrip(state)], 'pfinal'))
+    // Whole-run no-softlock (mirrors runContinuous's final check): the prestige run made
+    // progress iff it ascended / bought at least once, so the run never stalled overall.
+    invariants.push(
+      ...tag([checkNoSoftlock(state, totalResources(state), purchases > 0 || firstAscendTick !== null)], 'pfinal'),
+    )
+  }
+
+  // Bonus confirmation: re-derive the surviving prestige nodes onto a fresh capital and
+  // compare production to a no-prestige fresh capital. > 1 proves the permanent prestige
+  // multipliers fold into the economy (recomputeDerived). startResourceBonus is the other,
+  // additive prestige-only kind. Both are pure of the final prestige ledger.
+  const base = createInitialState(seed, 0)
+  const baseProd = totalProduction(base)
+  const boosted = createInitialState(seed, 0)
+  boosted.prestige.nodes = { ...state.prestige.nodes }
+  recomputeDerived(boosted)
+  const boostedProd = totalProduction(boosted)
+  const productionMult = baseProd.gt(0) ? boostedProd.div(baseProd).toNumber() : 1
+
+  let nodesOwned = 0
+  let levelsOwned = 0
+  for (const id of PRESTIGE_NODE_IDS) {
+    const lvl = prestigeNodeLevel(state, id)
+    if (lvl > 0) {
+      nodesOwned += 1
+      levelsOwned += lvl
+    }
+  }
+
+  return {
+    state,
+    invariants,
+    stats: {
+      ascensions: state.prestige.ascensions,
+      firstAscendTick,
+      pointsBanked: state.prestige.points,
+      totalEarned: state.prestige.totalEarned,
+      purchases,
+      nodesOwned,
+      levelsOwned,
+      productionMult,
+      startResourceBonus: startResourceBonus(state),
+    },
+  }
+}
+
+/**
+ * Prestige run to the halfway point, persisted via the real export/import (base64) path —
+ * crossing at least one ascension (the first lands well before the half mark) — then
+ * continued. The total step count matches the continuous prestige run, so any divergence
+ * is a save/load fault: this is the proof the PERMANENT prestige account (banked points +
+ * purchased node levels) survives a save/load byte-identically (prestige is in the v9 save).
+ */
+function runPrestigeSplit(seed: string, ticks: number, dt: number): GameState {
+  const half = Math.floor(ticks / 2)
+  const scratch = emptyUnitCounts()
+  let state = createInitialState(seed, 0)
+  for (let i = 0; i < half; i++) {
+    step(state, dt, scratch, i)
+    prestigeDrive(state)
+  }
+  state = importSave(exportSave(state))
+  for (let i = half; i < ticks; i++) {
+    step(state, dt, scratch, i)
+    prestigeDrive(state)
+  }
+  return state
+}
+
 /**
  * Run a single seed for `ticks` steps and assemble all invariants:
  *  - periodic + final resource/army-consistency/world-consistency/round-trip/no-softlock samples,
@@ -382,7 +580,42 @@ export function runOne(seed: string, ticks: number): RunResult {
   // layout and well-formed edges. Asserted once per run (tagged 'tech').
   invariants.push(...tag(checkTechTree(), 'tech'))
 
-  const metrics = collect(seed, ticks, ticks * dt, primary.state, primary.stats)
+  // M4.1 prestige (ascension) — a SEPARATE run so the M1–M3 targets stay measured on an
+  // un-reset economy (ascend resets the run). Drives the bot through its ascensions, banks
+  // and spends PP, and asserts the reset stays valid/playable, the prestige account survives
+  // save/load, and the prestige loop is deterministic.
+  const prestige = runPrestige(seed, PRESTIGE_TICKS, dt, true)
+  invariants.push(...prestige.invariants)
+  const presSerA = serialize(prestige.state)
+
+  // Determinism: a second identical prestige run (ascensions + buys) must be byte-equal.
+  const prestigeRepeat = runPrestige(seed, PRESTIGE_TICKS, dt, false)
+  const presSerB = serialize(prestigeRepeat.state)
+  invariants.push({
+    name: 'prestige-determinism',
+    ok: presSerA === presSerB,
+    detail: presSerA === presSerB ? undefined : 'two identical prestige runs of the same seed diverged',
+  })
+
+  // Save-load continuation ACROSS an ascension: a mid-run export/import must not change the
+  // outcome — the proof the permanent prestige account is carried losslessly by the v9 save.
+  const prestigeSplit = runPrestigeSplit(seed, PRESTIGE_TICKS, dt)
+  const presSerC = serialize(prestigeSplit)
+  invariants.push({
+    name: 'prestige-save-load-continuation',
+    ok: presSerA === presSerC,
+    detail:
+      presSerA === presSerC
+        ? undefined
+        : 'split prestige run with mid save/load diverged from the continuous prestige run',
+  })
+
+  // M4.1 static prestige-tree invariants (catalogue + layout, state-independent), mirroring
+  // checkTechTree: a DAG with no orphans / dead perks, archetype-banded maxLevels, a complete
+  // non-overlapping layout and well-formed edges. Asserted once per run (tagged 'prestige').
+  invariants.push(...tag(checkPrestigeTree(), 'prestige'))
+
+  const metrics = collect(seed, ticks, ticks * dt, primary.state, primary.stats, prestige.stats)
   const ok = invariants.every((r) => r.ok)
   return { metrics, invariants, ok }
 }

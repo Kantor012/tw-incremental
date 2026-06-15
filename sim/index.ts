@@ -121,6 +121,27 @@ function evalTargets(r: RunResult): TargetCheck[] {
           ? 'no tech bought — uplift n/a'
           : `production x${m.techProductionMult.toFixed(3)} over no-tech base (${m.productionBaseNoTech} -> ${m.productionEnd})`,
     },
+    {
+      // M4.1: the bot must ascend at least minAscensions times in the separate prestige run.
+      name: 'ascensions',
+      ok: m.ascensions >= TARGETS.minAscensions,
+      detail: `ascended ${m.ascensions}x (first ~tick ${m.firstAscendTick ?? 'n/a'}, target >= ${TARGETS.minAscensions})`,
+    },
+    {
+      // M4.1: the bot must buy at least minPrestigePurchases prestige-node levels from PP.
+      name: 'prestige-nodes-purchased',
+      ok: m.prestigePurchases >= TARGETS.minPrestigePurchases,
+      detail: `bought ${m.prestigePurchases} prestige levels (${m.prestigeNodesOwned} nodes, ${m.prestigeLevelsOwned} levels; target >= ${TARGETS.minPrestigePurchases})`,
+    },
+    {
+      // M4.1: confirms the permanent prestige multipliers fold into a fresh run's economy.
+      name: 'prestige-production-uplift',
+      ok: !TARGETS.requirePrestigeProductionUplift || m.prestigeProductionMult > 1,
+      detail:
+        m.prestigeNodesOwned === 0
+          ? 'no prestige nodes owned — uplift n/a'
+          : `production x${m.prestigeProductionMult.toFixed(3)} over no-prestige base (+${m.prestigeStartResourceBonus}/res start bonus)`,
+    },
   ]
 }
 
@@ -229,6 +250,21 @@ function main(): void {
     console.log(
       `${m.seed.padEnd(8)} | ${String(m.techPurchases).padStart(13)} | ${String(m.techNodesOwned).padStart(11)} | ` +
         `${String(m.techLevelsOwned).padStart(12)} | ${uplift}`,
+    )
+  }
+  console.log('')
+
+  // --- Prestige per seed (M4.1 ascension meta-layer; separate ascension-driving run) ---
+  console.log('--- Prestige (end) ---')
+  console.log(
+    'seed     | ascensions (first tick) | PP banked / earned | levels bought | nodes owned | production uplift | start bonus',
+  )
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.ascensions).padStart(10)} (${m.firstAscendTick ?? 'n/a'}) | ` +
+        `${m.prestigePointsBanked} / ${m.prestigeTotalEarned} | ${String(m.prestigePurchases).padStart(13)} | ` +
+        `${String(m.prestigeNodesOwned).padStart(11)} | x${m.prestigeProductionMult.toFixed(3)} | +${m.prestigeStartResourceBonus}/res`,
     )
   }
   console.log('')

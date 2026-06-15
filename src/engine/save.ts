@@ -5,6 +5,7 @@ import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
+import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
 import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
 /**
@@ -25,14 +26,16 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  *   (content/barbarians.ts); those too are read ONLY inside `migrate`, so the wider
  *   value cycle (save → world → barbarians → state → save) stays benign. The tech
  *   catalogue (`TECH_NODES` / `TECH_NODE_IDS`, content/tech.ts, used by the v8
- *   validation) is PURE DATA that imports only the erased `ResourceId` type from
- *   state.ts, so it adds no runtime edge and can never form an initialisation cycle.
+ *   validation) and the prestige catalogue (`PRESTIGE_NODES` / `PRESTIGE_NODE_IDS`,
+ *   content/prestige.ts, used by the v9 validation) are PURE DATA that import only the
+ *   erased `ResourceId` type from state.ts, so they add no runtime edge and can never
+ *   form an initialisation cycle.
  * - Everything here must run headless (Node + browser): localStorage access is
  *   always feature-detected and wrapped in try/catch.
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 8
+export const SAVE_VERSION = 9
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -288,6 +291,23 @@ export function migrate(raw: any): any {
     // here; importSave's recomputeDerived pass runs afterwards exactly as for every
     // other migration (and now also folds in the — empty — tech mods).
     7: (s) => ({ ...s, tech: isObject(s.tech) ? s.tech : {}, version: 8 }),
+    // v8 -> v9: prestige / ascension (M4.1). A v8 save predates the permanent,
+    // account-wide prestige tree, so backfill the single new field — `prestige`, the
+    // persistent { points, totalEarned, ascensions, nodes } record (current PP balance,
+    // lifetime PP earned, ascension count and a sparse { nodeId: level } map). The
+    // prestige multipliers it drives are TRANSIENT (folded by aggregatePrestigeMods inside
+    // effectiveMods in recomputeDerived), so nothing else is stored or seeded here. A
+    // forward-compat save that already carries an object `prestige` keeps it verbatim; any
+    // non-object (corrupt/missing) is reset to the zero state. Nothing is recomputed here;
+    // importSave's recomputeDerived pass runs afterwards exactly as for every other
+    // migration (and now also folds in the — empty — prestige mods).
+    8: (s) => ({
+      ...s,
+      prestige: isObject(s.prestige)
+        ? s.prestige
+        : { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
+      version: 9,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -460,7 +480,10 @@ function validateVillage(v: unknown, id: string): void {
  * [0, 100]), the GLOBAL battle log is validated (each report's `villageId`, plus the
  * M2.4 `conquer` variant alongside the existing `attack` / `raid`), and finally the
  * M3.1 `tech` map is checked (an object whose every present key is a known node id at
- * an integer level within that node's [0, maxLevel] band; unknown keys are rejected).
+ * an integer level within that node's [0, maxLevel] band; unknown keys are rejected),
+ * and finally the M4.1 `prestige` record is checked (the PP counters `points` /
+ * `totalEarned` / `ascensions` are finite, non-negative numbers, and its `nodes` map
+ * follows the same known-id / [0, maxLevel] rule as `tech`).
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -617,6 +640,42 @@ export function validateState(s: unknown): GameState {
       level > maxLevel
     ) {
       throw new Error(`save: invalid tech level ${nodeId}`)
+    }
+  }
+
+  // PERMANENT prestige / ascension record (M4.1) — the ONLY account-wide state that
+  // survives an ascension reset. `points` (current PP balance), `totalEarned` (lifetime
+  // PP earned) and `ascensions` (reset count) are finite, non-negative numbers; a
+  // NaN/Infinity/negative would poison the PP economy and the ascension maths and then
+  // get autosaved (CLAUDE.md hard rule #3). `nodes` is a sparse `{ nodeId: level }` map
+  // exactly like `tech` (absent key = level 0): the global multipliers it drives are
+  // TRANSIENT (re-derived by aggregatePrestigeMods inside effectiveMods in
+  // recomputeDerived after import), so only the levels persist. Every PRESENT key must be
+  // a KNOWN prestige node id whose level is an integer inside that node's [0, maxLevel]
+  // band; unknown keys are REJECTED for the same reason as the tech map — `nodes` is a
+  // free-form account-wide map written ONLY by onPurchasePrestige (known ids), so a key
+  // outside PRESTIGE_NODE_IDS means a corrupt/tampered/forward-version save (downgrade is
+  // best-effort, like the rest of forward-compat). An empty `{}` always passes, which the
+  // v8->v9 migration guarantees.
+  const { prestige } = s
+  if (!isObject(prestige)) throw new Error('save: missing prestige')
+  for (const key of ['points', 'totalEarned', 'ascensions'] as const) {
+    const n = prestige[key]
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+      throw new Error(`save: invalid prestige ${key}`)
+    }
+  }
+  const prestigeNodes = prestige.nodes
+  if (!isObject(prestigeNodes)) throw new Error('save: invalid prestige nodes')
+  const knownPrestigeIds = PRESTIGE_NODE_IDS as readonly string[]
+  for (const nodeId of Object.keys(prestigeNodes)) {
+    if (!knownPrestigeIds.includes(nodeId)) {
+      throw new Error(`save: unknown prestige node ${nodeId}`)
+    }
+    const level = prestigeNodes[nodeId]
+    const maxLevel = PRESTIGE_NODES[nodeId].maxLevel
+    if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
+      throw new Error(`save: invalid prestige level ${nodeId}`)
     }
   }
 

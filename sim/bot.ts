@@ -37,6 +37,13 @@ import {
   globalResources,
   aggregateTechMods,
 } from '../src/systems/tech'
+import { PRESTIGE_NODE_IDS } from '../src/content/prestige'
+import {
+  pendingPrestigePoints,
+  prestigeNodeAvailable,
+  prestigeNodeLevel,
+  prestigeNodeCost,
+} from '../src/systems/prestige'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -723,6 +730,71 @@ export function chooseTech(state: GameState): string | null {
     const sum = cost.wood.add(cost.clay).add(cost.iron)
     if (bestSum === null || sum.lt(bestSum)) {
       bestSum = sum
+      best = id
+    }
+  }
+  return best
+}
+
+/**
+ * Profitability floor for ascending (M4.1): the bot resets the run only once doing so
+ * RIGHT NOW would bank at least this many prestige points — enough for a meaningful
+ * prestige purchase (several baseCost-1 root levels). This threshold is what PACES the
+ * ascension loop and guarantees it can never spin: a fresh post-ascension run scores
+ * only ~8 (a single capital) → pendingPP ~2 < this, so the bot must rebuild the economy
+ * to score >= ASCEND_MIN_PP² (≈ 36) before it will ascend again — there is no degenerate
+ * "ascend for nothing" cycle. Sized so the FIRST ascension lands in a reasonable session
+ * (a built-up capital reaches it within a couple thousand ticks — see the sim).
+ */
+export const ASCEND_MIN_PP = 6
+
+/**
+ * Hard cap on ascensions the bot performs in one harness run (M4.1). Each ascension
+ * RESETS the run, so an unbounded ascend loop would never terminate the headless sim;
+ * this bounds it while still proving the mechanic REPEATS deterministically (>= 1 with
+ * headroom). The {@link ASCEND_MIN_PP} threshold already paces them; this is the
+ * belt-and-suspenders runtime guard the brief calls for ("ogranicz liczbę ascensions").
+ */
+export const BOT_MAX_ASCENSIONS = 4
+
+/**
+ * ASCEND decision (M4.1): true when the bot should reset the run for prestige points
+ * THIS step. Gated on (a) the ascension cap {@link BOT_MAX_ASCENSIONS} (so the resetting
+ * loop always terminates) and (b) the {@link ASCEND_MIN_PP} profitability floor on
+ * {@link pendingPrestigePoints} (so a reset always banks a worthwhile, spendable amount —
+ * and so a just-reset run can never immediately re-ascend). A pure function of `state`, so
+ * two identical runs ascend at the same ticks — the determinism / save-load-continuation
+ * invariants hold across the reset. `maxAscensions` is overridable for tests.
+ */
+export function chooseAscend(state: GameState, maxAscensions: number = BOT_MAX_ASCENSIONS): boolean {
+  if (state.prestige.ascensions >= maxAscensions) return false
+  return pendingPrestigePoints(state) >= ASCEND_MIN_PP
+}
+
+/**
+ * PRESTIGE-tree decision (M4.1): the next prestige node to buy from the BANKED points,
+ * or null when nothing affordable/available remains. Picks the CHEAPEST available node
+ * (prerequisites met, not maxed) whose next-level {@link prestigeNodeCost} the bank
+ * covers — ranked by PP cost, ties resolved to the first id in {@link PRESTIGE_NODE_IDS}
+ * order, so it is fully deterministic. Cheapest-first spends each ascension's PP on
+ * BREADTH (the roots — incl. the production root, so the permanent economy bonus folds in
+ * — then their cheap minors), which is exactly what the prestige targets verify.
+ *
+ * PP has no idle accrual (it is earned ONLY by ascending), so the runner calls this in a
+ * loop after each ascension to spend the bank DOWN to its unaffordable residual. A pure
+ * function of `state`, so the buy order is identical across the determinism / save-load
+ * runs.
+ */
+export function choosePrestige(state: GameState): string | null {
+  const points = state.prestige.points
+  let best: string | null = null
+  let bestCost = Infinity
+  for (const id of PRESTIGE_NODE_IDS) {
+    if (!prestigeNodeAvailable(state, id)) continue
+    const cost = prestigeNodeCost(id, prestigeNodeLevel(state, id))
+    if (cost > points) continue
+    if (cost < bestCost) {
+      bestCost = cost
       best = id
     }
   }

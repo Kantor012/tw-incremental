@@ -60,6 +60,24 @@ export interface UiCtx {
    * disabled/affordability cue — this callback is the commit, not the validation.
    */
   onPurchaseTech: (nodeId: string) => boolean
+  /**
+   * ASCEND (M4.1): bank the pending prestige points and RESET the run (villages →
+   * a fresh capital, world regenerated from the seed, tech/battle log cleared, start
+   * bonuses applied). Returns the number of PP awarded — `0` when ascending was a
+   * no-op (no pending points). On a positive result the new run is already committed +
+   * persisted. The panel confirms the destructive reset with the player itself; this
+   * callback is the commit, not the prompt. The PERMANENT prestige tree + banked
+   * points survive.
+   */
+  onAscend: () => number
+  /**
+   * Purchase the NEXT level of the prestige node `nodeId`, paid from banked PRESTIGE
+   * POINTS; returns true on success (PP spent, `state.prestige.nodes[nodeId]`
+   * incremented, derived multipliers recomputed, committed + persisted). The prestige
+   * panel reads `canPurchasePrestige` (systems/prestige) itself for the disabled/
+   * affordability cue — this callback is the commit, not the validation.
+   */
+  onPurchasePrestige: (nodeId: string) => boolean
   /** Serialize the current run to a save code string. */
   onExport: () => string
   /** Load a save code; returns true when it parsed and was applied. */

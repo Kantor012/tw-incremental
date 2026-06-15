@@ -19,7 +19,9 @@ import {
   SAVE_VERSION,
 } from '../src/engine/save'
 import { aggregateTechMods } from '../src/systems/tech'
+import { effectiveMods } from '../src/systems/prestige'
 import { TECH_NODES } from '../src/content/tech'
+import { PRESTIGE_NODES } from '../src/content/prestige'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
 import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { WORLD_CENTER } from '../src/systems/world'
@@ -475,5 +477,163 @@ describe('save — v8 tech round-trip', () => {
     const wrong = techState()
     ;(wrong as { tech: unknown }).tech = 'nope'
     expect(() => validateState(wrong)).toThrow()
+  })
+})
+
+/**
+ * A fresh v9 state with a NON-EMPTY PERMANENT prestige (ascension) record (M4.1): the PP
+ * counters are banked (points / totalEarned / ascensions) and three purchased nodes —
+ * prosperity_root (production_mult), prosperity_growth_n (pop_mult) and prosperity_core_m2
+ * (storage_mult) — exercise all three economy-multiplier kinds. The levels are set directly
+ * (a legitimate purchase state — all three are in-band and reachable from the prosperity
+ * root) and `recomputeDerived` folds the prestige multipliers (via effectiveMods) into every
+ * village's derived stats. Built fresh per test so the corruption mutations never leak.
+ */
+function prestigeState(): GameState {
+  const s = createInitialState('save-v9-prestige', 9999)
+  s.prestige = {
+    points: 5,
+    totalEarned: 20,
+    ascensions: 2,
+    nodes: { prosperity_root: 3, prosperity_growth_n: 2, prosperity_core_m2: 4 },
+  }
+  recomputeDerived(s)
+  return s
+}
+
+describe('save — v9 prestige round-trip', () => {
+  it('the prestige multipliers lift the derived economy above the building-only base', () => {
+    const prestige = prestigeState()
+    // Same seed, ZERO prestige -> the pure-building baseline to compare against.
+    const base = createInitialState('save-v9-prestige', 9999)
+    const v = prestige.villages.v0
+    const b = base.villages.v0
+    // production_mult (prosperity_root) lifts every resource; pop_mult / storage_mult lift caps.
+    expect(v.production.wood.gt(b.production.wood)).toBe(true)
+    expect(v.production.clay.gt(b.production.clay)).toBe(true)
+    expect(v.production.iron.gt(b.production.iron)).toBe(true)
+    expect(v.storageCap.gt(b.storageCap)).toBe(true)
+    expect(v.popCap.gt(b.popCap)).toBe(true)
+  })
+
+  it('serialize/deserialize preserves the prestige record and the prestige-boosted Decimals', () => {
+    const state = prestigeState()
+    const json = serialize(state)
+    const back = deserialize(json)
+
+    expect(back.version).toBe(SAVE_VERSION)
+    // The whole permanent record round-trips verbatim (plain JSON numbers + sparse map).
+    expect(back.prestige).toEqual({
+      points: 5,
+      totalEarned: 20,
+      ascensions: 2,
+      nodes: { prosperity_root: 3, prosperity_growth_n: 2, prosperity_core_m2: 4 },
+    })
+    // The boosted derived Decimals survive the {$d} tag exactly.
+    expect(back.villages.v0.production.wood.toString()).toBe(
+      state.villages.v0.production.wood.toString(),
+    )
+    expect(back.villages.v0.storageCap.toString()).toBe(state.villages.v0.storageCap.toString())
+    expect(back.villages.v0.popCap.toString()).toBe(state.villages.v0.popCap.toString())
+    // serialize is idempotent across the round-trip (stable key order, re-tagged).
+    expect(serialize(back)).toBe(json)
+  })
+
+  it('validateState accepts an in-band prestige record and the recompute stays consistent', () => {
+    const state = prestigeState()
+    expect(validateState(state)).toBe(state)
+    // Re-deriving from the same prestige map changes nothing (already consistent), which is
+    // the invariant importSave relies on.
+    const wood = state.villages.v0.production.wood.toString()
+    recomputeDerived(state)
+    expect(state.villages.v0.production.wood.toString()).toBe(wood)
+  })
+
+  it('exportSave/importSave folds the prestige multipliers back into the derived stats', () => {
+    const state = prestigeState()
+    const restored = importSave(exportSave(state))
+
+    // The whole record survives the export/import (migrate is a no-op at the current version).
+    expect(restored.prestige).toEqual({
+      points: 5,
+      totalEarned: 20,
+      ascensions: 2,
+      nodes: { prosperity_root: 3, prosperity_growth_n: 2, prosperity_core_m2: 4 },
+    })
+
+    // importSave re-derives from restored.prestige (combined with the empty tech bag), so the
+    // folded production matches effectiveMods applied to the building-only baseline.
+    const mods = effectiveMods(restored)
+    const baseline = createInitialState('save-v9-prestige', 9999) // zero prestige
+    const expectedWood = baseline.villages.v0.production.wood.mul(mods.productionMult.wood)
+    expect(restored.villages.v0.production.wood.toString()).toBe(expectedWood.toString())
+
+    // Byte-identical: the derived fields were already consistent before export, so
+    // importSave's recomputeDerived pass changes nothing.
+    expect(serialize(restored)).toBe(serialize(state))
+  })
+
+  it('round-trips alongside a non-empty tech map (both trees fold together)', () => {
+    // tech (eco_root, production) AND prestige (prosperity_root, production) both lift wood;
+    // effectiveMods MULTIPLIES the two factors, and that combined fold survives import.
+    const state = createInitialState('save-v9-both', 1234)
+    state.tech = { eco_root: 2 }
+    state.prestige = { points: 0, totalEarned: 0, ascensions: 0, nodes: { prosperity_root: 2 } }
+    recomputeDerived(state)
+
+    const restored = importSave(exportSave(state))
+    expect(restored.tech).toEqual({ eco_root: 2 })
+    expect(restored.prestige.nodes).toEqual({ prosperity_root: 2 })
+    const mods = effectiveMods(restored)
+    const baseline = createInitialState('save-v9-both', 1234) // empty tech + zero prestige
+    const expectedWood = baseline.villages.v0.production.wood.mul(mods.productionMult.wood)
+    expect(restored.villages.v0.production.wood.toString()).toBe(expectedWood.toString())
+    expect(serialize(restored)).toBe(serialize(state))
+  })
+
+  it("rejects a prestige level outside its node's [0, maxLevel] band, a non-integer or an unknown key", () => {
+    const over = prestigeState()
+    over.prestige.nodes.prosperity_root = PRESTIGE_NODES.prosperity_root.maxLevel + 1
+    expect(() => validateState(over)).toThrow()
+
+    const neg = prestigeState()
+    neg.prestige.nodes.prosperity_root = -1
+    expect(() => validateState(neg)).toThrow()
+
+    const frac = prestigeState()
+    frac.prestige.nodes.prosperity_root = 1.5
+    expect(() => validateState(frac)).toThrow()
+
+    // Unknown keys are REJECTED (fail loudly) rather than silently ignored.
+    const unknown = prestigeState()
+    ;(unknown.prestige.nodes as Record<string, number>).not_a_real_node = 1
+    expect(() => validateState(unknown)).toThrow()
+  })
+
+  it('rejects a missing / non-object prestige field or a non-object nodes map', () => {
+    const missing = prestigeState()
+    delete (missing as { prestige?: unknown }).prestige
+    expect(() => validateState(missing)).toThrow()
+
+    const wrong = prestigeState()
+    ;(wrong as { prestige: unknown }).prestige = 'nope'
+    expect(() => validateState(wrong)).toThrow()
+
+    const badNodes = prestigeState()
+    ;(badNodes.prestige as { nodes: unknown }).nodes = 'nope'
+    expect(() => validateState(badNodes)).toThrow()
+  })
+
+  it('rejects a negative / non-finite PP counter (points / totalEarned / ascensions)', () => {
+    for (const key of ['points', 'totalEarned', 'ascensions'] as const) {
+      const neg = prestigeState()
+      neg.prestige[key] = -1
+      expect(() => validateState(neg)).toThrow()
+
+      const nan = prestigeState()
+      neg.prestige[key] = 0
+      nan.prestige[key] = Number.NaN
+      expect(() => validateState(nan)).toThrow()
+    }
   })
 })

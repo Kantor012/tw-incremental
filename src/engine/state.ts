@@ -5,12 +5,14 @@ import { signal, type Signal } from './store'
 import { BUILDINGS, BUILDING_IDS, type BuildingId } from '../content/buildings'
 import { UNIT_IDS, type UnitId } from '../content/units'
 import { generateWorld, WORLD_CENTER } from '../systems/world'
-// VALUE import that closes a 2-way edge with systems/tech.ts (which imports
+// VALUE import that closes a 2-way edge with systems/prestige.ts (which imports
 // recomputeDerived + the types below back from here). It is SAFE from an
-// initialisation cycle because `aggregateTechMods` is referenced ONLY inside the
-// body of `recomputeDerived` (never at module top level), so by the time it is
-// actually called both modules are fully evaluated regardless of load order.
-import { aggregateTechMods } from '../systems/tech'
+// initialisation cycle because `effectiveMods` is referenced ONLY inside the body of
+// `recomputeDerived` (never at module top level), so by the time it is actually
+// called both modules are fully evaluated regardless of load order. `effectiveMods`
+// itself folds the tech bag (systems/tech) with the prestige bag, so this single
+// import is the one place derived stats pick up BOTH trees (M4.1).
+import { effectiveMods } from '../systems/prestige'
 
 /**
  * The single source of truth. Everything the simulation needs lives here so it
@@ -249,6 +251,28 @@ export interface World {
   barbarians: BarbarianVillage[]
 }
 
+/**
+ * The PERMANENT prestige (ascension) account state (M4.1). Survives every run reset
+ * (`ascend`): you bank {@link points} by ascending and spend them in the prestige
+ * tree, whose purchased levels live in {@link nodes}. The economic effect of those
+ * nodes is TRANSIENT (rolled up by `aggregatePrestigeMods` and combined with the tech
+ * bag by `effectiveMods`); only this raw account state serializes.
+ */
+export interface PrestigeState {
+  /** Unspent prestige points (PP) available to buy nodes. Plain finite number >= 0. */
+  points: number
+  /** Lifetime PP ever earned across all ascensions (monotonic; stats/UI). >= 0. */
+  totalEarned: number
+  /** Number of ascensions performed so far (run resets). >= 0. */
+  ascensions: number
+  /**
+   * Purchased level per prestige node id (absent key = level 0). The single
+   * permanent prestige-tree state — its effects are recomputed from this map by
+   * `aggregatePrestigeMods` and never stored derived (mirrors {@link GameState.tech}).
+   */
+  nodes: Record<string, number>
+}
+
 export interface GameState {
   /** Save schema version — drives migrations. */
   version: number
@@ -289,6 +313,13 @@ export interface GameState {
    * field is ever stored on the state (only this raw `{ id: level }` map serializes).
    */
   tech: Record<string, number>
+  /**
+   * PERMANENT prestige (ascension) account state (M4.1) — banked points, lifetime
+   * totals, ascension count and the purchased prestige-tree levels. SURVIVES every
+   * run reset; its node effects combine with tech via `effectiveMods`. See
+   * {@link PrestigeState}.
+   */
+  prestige: PrestigeState
 }
 
 /**
@@ -413,11 +444,12 @@ export function recomputeVillageDerived(v: Village, mods: TechModifiers = NO_TEC
  * all cached fields are consistent with the building levels they derive from.
  */
 export function recomputeDerived(state: GameState): void {
-  // Compute the GLOBAL tech multipliers once and apply them to every village. This is
-  // the ONLY call site of aggregateTechMods inside state.ts and it lives in the
-  // function body (not module top level), which is what keeps the systems/tech.ts
+  // Compute the GLOBAL effective multipliers once (tech bag COMBINED with the prestige
+  // bag — see systems/prestige.ts `effectiveMods`) and apply them to every village.
+  // This is the ONLY call site of effectiveMods inside state.ts and it lives in the
+  // function body (not module top level), which is what keeps the systems/prestige.ts
   // value import free of an initialisation cycle (see the import note above).
-  const mods = aggregateTechMods(state.tech)
+  const mods = effectiveMods(state)
   for (const id of state.villageOrder) recomputeVillageDerived(state.villages[id], mods)
 }
 
@@ -486,6 +518,7 @@ export function createInitialState(seed: string, now: number): GameState {
     world: generateWorld(seed),
     battleLog: [],
     tech: {},
+    prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
   }
 }
 

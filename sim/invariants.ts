@@ -16,6 +16,12 @@ import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS, TECH_ROOTS } from '../src/content/tech'
+import {
+  PRESTIGE_NODES,
+  PRESTIGE_NODE_IDS,
+  PRESTIGE_ROOTS,
+  type PrestigeArchetype,
+} from '../src/content/prestige'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { WORLD_SIZE } from '../src/systems/world'
@@ -26,9 +32,15 @@ import {
   deadPerkNodes,
   nodeLevel,
   prerequisitesMet,
-  aggregateTechMods,
 } from '../src/systems/tech'
-import { layoutTree, techEdges } from '../src/systems/techLayout'
+import {
+  effectiveMods,
+  prestigeHasCycle,
+  orphanPrestigeNodes,
+  deadPrestigeNodes,
+  prestigeNodeLevel,
+} from '../src/systems/prestige'
+import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
 /**
@@ -509,6 +521,279 @@ export function checkTechState(state: GameState): InvariantResult {
   }
 }
 
+/**
+ * Smallest centre-to-centre distance two DISTINCT prestige-node positions may have in the
+ * computed layout before it counts as a gross overlap. The prestige tree (3 branches, 33
+ * nodes) is laid out by the SAME radial algorithm as the tech tree, so it inherits the
+ * same generous floor (mirrors {@link TECH_MIN_NODE_SEP}); it trips immediately if a
+ * topology / algorithm change ever stacks two prestige nodes on the same spot.
+ */
+const PRESTIGE_MIN_NODE_SEP = 24
+
+/** The maxLevel band each prestige archetype must sit in (CLAUDE.md tree rule, mirrors tech). */
+function prestigeBandOk(archetype: PrestigeArchetype, maxLevel: number): boolean {
+  return archetype === 'gateway'
+    ? maxLevel === 1
+    : archetype === 'notable'
+      ? maxLevel >= 2 && maxLevel <= 3
+      : maxLevel >= 7 && maxLevel <= 10 // minor
+}
+
+/**
+ * STATIC prestige-tree invariants (M4.1) — pure functions of the {@link PRESTIGE_NODES}
+ * catalogue + the generic {@link layoutNodes} layout, independent of any {@link GameState},
+ * so the runner asserts them ONCE per run (like {@link checkTechTree}). A single FAIL is a
+ * commit blocker: a malformed prestige tree would mis-drive the permanent meta-layer and
+ * the constellation view. Mirrors checkTechTree exactly, bound to the prestige data:
+ *  - prestige-acyclic:        the prerequisite graph is a DAG — {@link prestigeHasCycle}.
+ *  - prestige-no-orphans:     every node reachable from a {@link PRESTIGE_ROOTS} root —
+ *                             {@link orphanPrestigeNodes}.
+ *  - prestige-no-dead-perks:  every node has a real effect (perLevel > 0) —
+ *                             {@link deadPrestigeNodes}.
+ *  - prestige-maxlevel-range: every maxLevel is an integer in [1, 10].
+ *  - prestige-archetype-band: maxLevel matches the archetype band (gateway 1 / notable 2-3
+ *                             / minor 7-10).
+ *  - prestige-roots:          PRESTIGE_ROOTS non-empty; every root exists and truly has no
+ *                             prerequisite (an always-available category entry).
+ *  - prestige-layout-complete:   a FINITE position for every node id.
+ *  - prestige-layout-no-overlap: no two distinct centres closer than {@link PRESTIGE_MIN_NODE_SEP}.
+ *  - prestige-edges-valid:    every edge endpoint is a known node and the edge count equals
+ *                             the total number of (known) prerequisite links.
+ */
+export function checkPrestigeTree(): InvariantResult[] {
+  const results: InvariantResult[] = []
+
+  const cycle = prestigeHasCycle()
+  results.push({
+    name: 'prestige-acyclic',
+    ok: !cycle,
+    detail: cycle ? 'prerequisite graph contains a cycle (must be a DAG)' : undefined,
+  })
+
+  const orphans = orphanPrestigeNodes()
+  results.push({
+    name: 'prestige-no-orphans',
+    ok: orphans.length === 0,
+    detail: orphans.length ? `unreachable from roots: ${orphans.join(', ')}` : undefined,
+  })
+
+  const dead = deadPrestigeNodes()
+  results.push({
+    name: 'prestige-no-dead-perks',
+    ok: dead.length === 0,
+    detail: dead.length ? `no effect / perLevel<=0: ${dead.join(', ')}` : undefined,
+  })
+
+  const badLevel: string[] = []
+  const badBand: string[] = []
+  for (const id of PRESTIGE_NODE_IDS) {
+    const node = PRESTIGE_NODES[id]
+    const m = node.maxLevel
+    if (!Number.isInteger(m) || m < 1 || m > 10) badLevel.push(`${id}=${m}`)
+    if (!prestigeBandOk(node.archetype, m)) badBand.push(`${id}(${node.archetype})=${m}`)
+  }
+  results.push({
+    name: 'prestige-maxlevel-range',
+    ok: badLevel.length === 0,
+    detail: badLevel.length ? `maxLevel out of [1,10]: ${badLevel.join(', ')}` : undefined,
+  })
+  results.push({
+    name: 'prestige-archetype-band',
+    ok: badBand.length === 0,
+    detail: badBand.length ? `maxLevel off archetype band: ${badBand.join(', ')}` : undefined,
+  })
+
+  const rootIssues: string[] = []
+  if (PRESTIGE_ROOTS.length === 0) rootIssues.push('no roots')
+  for (const id of PRESTIGE_ROOTS) {
+    const node = PRESTIGE_NODES[id]
+    if (!node) rootIssues.push(`unknown root ${id}`)
+    else if (node.prerequisites.length > 0) rootIssues.push(`root ${id} has prerequisites`)
+  }
+  results.push({
+    name: 'prestige-roots',
+    ok: rootIssues.length === 0,
+    detail: rootIssues.length ? rootIssues.join('; ') : undefined,
+  })
+
+  const pos = layoutNodes(PRESTIGE_NODES, PRESTIGE_NODE_IDS)
+  const missing: string[] = []
+  for (const id of PRESTIGE_NODE_IDS) {
+    const p = pos[id]
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) missing.push(id)
+  }
+  results.push({
+    name: 'prestige-layout-complete',
+    ok: missing.length === 0,
+    detail: missing.length ? `no finite position for: ${missing.join(', ')}` : undefined,
+  })
+
+  let overlap: string | null = null
+  for (let i = 0; i < PRESTIGE_NODE_IDS.length && overlap === null; i++) {
+    const a = pos[PRESTIGE_NODE_IDS[i]]
+    if (!a) continue
+    for (let j = i + 1; j < PRESTIGE_NODE_IDS.length; j++) {
+      const b = pos[PRESTIGE_NODE_IDS[j]]
+      if (!b) continue
+      const d = Math.hypot(a.x - b.x, a.y - b.y)
+      if (d < PRESTIGE_MIN_NODE_SEP) {
+        overlap = `${PRESTIGE_NODE_IDS[i]} & ${PRESTIGE_NODE_IDS[j]} only ${d.toFixed(1)} apart`
+        break
+      }
+    }
+  }
+  results.push({
+    name: 'prestige-layout-no-overlap',
+    ok: overlap === null,
+    detail: overlap ?? undefined,
+  })
+
+  let expectedEdges = 0
+  for (const id of PRESTIGE_NODE_IDS) {
+    for (const pre of PRESTIGE_NODES[id].prerequisites) if (pre in PRESTIGE_NODES) expectedEdges += 1
+  }
+  const edges = nodeEdges(PRESTIGE_NODES, PRESTIGE_NODE_IDS)
+  const badEdge = edges.find((e) => !(e.from in PRESTIGE_NODES) || !(e.to in PRESTIGE_NODES))
+  const edgeOk = badEdge === undefined && edges.length === expectedEdges
+  results.push({
+    name: 'prestige-edges-valid',
+    ok: edgeOk,
+    detail: edgeOk
+      ? undefined
+      : badEdge
+        ? `edge with unknown endpoint ${badEdge.from}->${badEdge.to}`
+        : `edge count ${edges.length} != prerequisite links ${expectedEdges}`,
+  })
+
+  return results
+}
+
+/**
+ * Runtime prestige-state invariant (M4.1), checked at every prestige-run sample (and right
+ * after each ascension). The PERMANENT account state {@link GameState.prestige} must stay
+ * structurally sound however the bot ascends / buys and however the save round-trips:
+ *  - it is an object with finite, non-negative `points` / `totalEarned` and an integer,
+ *    non-negative `ascensions` (the banked PP and lifetime totals can never go NaN/negative),
+ *  - `nodes` is an object; every KEY is a known prestige-node id (no stray keys),
+ *  - every level is an INTEGER in [0, node.maxLevel] (a buy never overshoots / goes negative
+ *    / turns fractional),
+ *  - every OWNED node (level >= 1) has its prerequisites met — the unlock DAG is respected
+ *    in the live state, so a node can never be bought out of order even across a reset.
+ *
+ * Mirrors {@link checkTechState}; pairs with resources-non-negative to prove ascend /
+ * purchasePrestige keep the books balanced. Each offending entry names the field / node.
+ */
+export function checkPrestigeState(state: GameState): InvariantResult {
+  const prestige = state.prestige as
+    | { points?: unknown; totalEarned?: unknown; ascensions?: unknown; nodes?: unknown }
+    | undefined
+  if (prestige === undefined || typeof prestige !== 'object' || prestige === null) {
+    return { name: 'prestige-state', ok: false, detail: 'state.prestige missing or not an object' }
+  }
+
+  const issues: string[] = []
+  const num = (k: 'points' | 'totalEarned' | 'ascensions', requireInt: boolean): void => {
+    const v = prestige[k]
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || (requireInt && !Number.isInteger(v))) {
+      issues.push(`${k}=${String(v)}`)
+    }
+  }
+  num('points', false)
+  num('totalEarned', false)
+  num('ascensions', true)
+
+  const nodes = prestige.nodes
+  if (typeof nodes !== 'object' || nodes === null) {
+    issues.push('nodes not an object')
+  } else {
+    const map = nodes as Record<string, unknown>
+    for (const key of Object.keys(map)) {
+      const node = PRESTIGE_NODES[key]
+      if (!node) {
+        issues.push(`unknown ${key}`)
+        continue
+      }
+      const lvl = map[key]
+      if (typeof lvl !== 'number' || !Number.isInteger(lvl) || lvl < 0 || lvl > node.maxLevel) {
+        issues.push(`${key}=${String(lvl)} (max ${node.maxLevel})`)
+      }
+    }
+    // Owned nodes must respect the unlock DAG (prerequisites at level >= 1).
+    for (const id of PRESTIGE_NODE_IDS) {
+      if (prestigeNodeLevel(state, id) >= 1) {
+        for (const pre of PRESTIGE_NODES[id].prerequisites) {
+          if (prestigeNodeLevel(state, pre) < 1) {
+            issues.push(`${id} owned with unmet prerequisite ${pre}`)
+            break
+          }
+        }
+      }
+    }
+  }
+
+  return {
+    name: 'prestige-state',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Post-ascension playability invariant (M4.1): right after {@link import('../src/systems/prestige').ascend}
+ * the reset run MUST be a valid, playable single-capital state — never a softlock or a
+ * corrupt ledger. Asserts the structural facts unique to the reset (the broader resource /
+ * army / world / round-trip / no-softlock checks are sampled alongside this one):
+ *  - at least one ascension was actually recorded (`prestige.ascensions >= 1`),
+ *  - the village ledger is consistent: `villageOrder` non-empty, every id in it resolves to
+ *    a village, and `villages` has no key missing from / extra to the order,
+ *  - the regenerated world is NON-EMPTY (there is always a barbarian to attack — the combat
+ *    loop is reopened, not softlocked),
+ *  - the capital's resources are all finite and non-negative (the start-resource head-start,
+ *    if any, was applied sanely).
+ *
+ * This is the "ascend leaves the game grywalny" guard the brief calls for. Pure function of
+ * the post-ascend state.
+ */
+export function checkAscendValid(state: GameState): InvariantResult {
+  const issues: string[] = []
+
+  if (!(state.prestige?.ascensions >= 1)) issues.push(`ascensions=${String(state.prestige?.ascensions)}`)
+
+  const order = state.villageOrder
+  if (!Array.isArray(order) || order.length === 0) {
+    issues.push('villageOrder empty')
+  } else {
+    for (const id of order) {
+      if (!state.villages[id]) issues.push(`villageOrder id ${id} has no village`)
+    }
+    const orderSet = new Set(order)
+    if (orderSet.size !== order.length) issues.push('villageOrder has duplicates')
+    for (const id of Object.keys(state.villages)) {
+      if (!orderSet.has(id)) issues.push(`village ${id} missing from villageOrder`)
+    }
+  }
+
+  if (!state.world || !Array.isArray(state.world.barbarians) || state.world.barbarians.length === 0) {
+    issues.push('world has no barbarians (combat loop would softlock)')
+  }
+
+  const capital = state.villages[state.villageOrder[0]]
+  if (capital) {
+    for (const r of RESOURCE_IDS) {
+      const res = capital.resources[r]
+      if (!isFiniteDecimal(res) || res.lt(0)) issues.push(`capital.${r}=${res?.toString?.() ?? String(res)}`)
+    }
+  } else {
+    issues.push('no capital village')
+  }
+
+  return {
+    name: 'ascend-valid',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
 /** Sum of all resources across EVERY village — the coarse "have I made progress?" measure. */
 export function totalResources(state: GameState): Decimal {
   let total = ZERO
@@ -613,10 +898,12 @@ export function checkNoSoftlock(
 ): InvariantResult {
   const grew = totalResources(state).gt(prevTotal)
 
-  // M3.2: the probe must judge availability with the SAME tech bonuses the bot uses, so a
-  // build affordable only at the discounted price (or an attack winnable only with the
-  // military bonus) still counts as an available action. Pure function of state.tech.
-  const mods = aggregateTechMods(state.tech)
+  // M3.2/M4.1: the probe must judge availability with the SAME effective bonuses the bot
+  // uses, so a build affordable only at the discounted price (or an attack winnable only
+  // with the military bonus) still counts as an available action. effectiveMods folds tech
+  // WITH the permanent prestige tree; for a prestige-empty state it equals the tech bag
+  // exactly, so the M1–M3 runs are unchanged. Pure function of state.tech + state.prestige.
+  const mods = effectiveMods(state)
 
   let hasAction = false
   let inFlight = false
@@ -667,6 +954,12 @@ function seedRecruitment(state: GameState): void {
   const v = firstVillage(state)
   v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
   v.buildings.barracks = 1
+  // M4.1: seed a PERMANENT prestige multiplier too, so the offline-determinism check folds
+  // the SAME effectiveMods (tech × prestige) production the live engine uses — proving
+  // offline catch-up stays byte-identical with prestige active (prestige is in the v9 save).
+  // Both the big-step and chunked branches seed this identically, so the equality still
+  // isolates a real offline/online split rather than masking one.
+  state.prestige.nodes.prosperity_root = 2
   recomputeDerived(state)
   v.popCap = D(1000) // headroom: queued + trained + away units all count
   // Live training queue (recruitment clock).

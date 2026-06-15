@@ -1,28 +1,32 @@
-import {
-  TECH_NODES,
-  TECH_NODE_IDS,
-  type TechCategory,
-  type TechNode,
-} from '../content/tech'
+import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 
 /**
- * Tech-tree LAYOUT — a pure, deterministic radial placement of the passive
- * constellation (M3.1), computed ENTIRELY from the topology in `content/tech.ts`.
- * There are NO hand-authored coordinates anywhere: feed it the data and it derives
- * a Path-of-Exile-style radial map (a central hub, one arm per category, clusters
- * marching outward along each arm, a notable in the middle of every cluster with
- * its minors ringed around it; a gateway that opens THIS cluster sits at its hub-side
- * junction, one that leads onward is pushed out toward the next cluster).
+ * Radial constellation LAYOUT — a pure, deterministic placement of a Path-of-Exile
+ * style passive tree (M3.1: the tech tree; M4.1 onward: the prestige tree too),
+ * computed ENTIRELY from the topology of a node set. There are NO hand-authored
+ * coordinates anywhere: feed it the data and it derives a radial map (a central hub,
+ * one arm per category, clusters marching outward along each arm, a notable in the
+ * middle of every cluster with its minors ringed around it; a gateway that opens THIS
+ * cluster sits at its hub-side junction, one that leads onward is pushed out toward
+ * the next cluster).
+ *
+ * Generic core, thin wrappers: {@link layoutNodes} / {@link nodeEdges} take ANY node
+ * set shaped like {@link LayoutNode} (category / cluster / archetype / prerequisites)
+ * plus its stable id list, so the prestige tree reuses the exact same algorithm. The
+ * tech-specific {@link layoutTree} / {@link techEdges} are now zero-cost wrappers that
+ * pass TECH_NODES / TECH_NODE_IDS — their output is byte-for-byte unchanged.
  *
  * Why it lives in `systems/` (not the UI): the panel is a dumb renderer of points
- * and lines. layoutTree()/techEdges() are the model; the SVG view (panels/tech.ts)
- * just frames the returned coordinates in a pan/zoom viewBox exactly the way
- * panels/map.ts frames world coordinates. The same pure output also lets the sim
- * harness assert "every id has a position" and "no gross overlaps" without a DOM.
+ * and lines. layoutNodes()/nodeEdges() are the model; the SVG view (panels/tech.ts,
+ * panels/treeView.ts) just frames the returned coordinates in a pan/zoom viewBox
+ * exactly the way panels/map.ts frames world coordinates. The same pure output also
+ * lets the sim harness assert "every id has a position" and "no gross overlaps"
+ * without a DOM.
  *
- * Import discipline: this module imports ONLY the pure data + types from
- * content/tech.ts (no engine, no clock, no RNG, no Decimal), so it can never form
- * an initialisation cycle and its output is byte-identical across replays/platforms.
+ * Import discipline: this module imports ONLY the pure data from content/tech.ts
+ * (no engine, no clock, no RNG, no Decimal), so it can never form an initialisation
+ * cycle and its output is byte-identical across replays/platforms. The generic
+ * functions take their data as arguments, so the prestige content adds no new import.
  *
  * Coordinate space: an abstract layout space centred on the hub at (0, 0); +x is
  * right, +y is DOWN (SVG convention), so the first arm — offset to -y — points up
@@ -32,7 +36,7 @@ import {
  *
  * ── ALGORITHM (manifest) ───────────────────────────────────────────────────────
  *  1. CATEGORIES → ARMS. Categories are discovered in first-appearance order over
- *     TECH_NODE_IDS (stable). With K categories, arm k points at angle
+ *     the supplied id list (stable). With K categories, arm k points at angle
  *     ARM_ANGLE0 + k·(2π/K) — evenly spread around the hub.
  *  2. NODE DEPTH. Shortest distance from a root (no-prereq node) along prerequisite
  *     edges, memoised; used to order clusters so unlocks flow OUTWARD from the hub.
@@ -52,11 +56,26 @@ import {
  *  5. WEDGE FIT. The innermost band radius R0 is enlarged if needed so the widest
  *     cluster's angular half-width stays well inside its arm's share of the circle —
  *     so arms never bleed into each other (holds as more categories are added).
- *  6. EDGES. One edge per (prerequisite → node) pair, in stable TECH_NODE_IDS order.
+ *  6. EDGES. One edge per (prerequisite → node) pair, in stable id-list order.
  *
- * Everything is memoised on first use (the data is static), so layoutTree(),
- * techEdges(), layoutBounds() and TECH_HUB all reflect one consistent computation.
+ * Everything is memoised per node set on first use (the data is static, keyed by the
+ * data object's identity), so layoutNodes()/nodeEdges() for a given tree — and the
+ * tech wrappers layoutTree(), techEdges(), layoutBounds() and TECH_HUB — all reflect
+ * one consistent computation.
  */
+
+/**
+ * The minimal node shape the layout reads: its arm (category), its authoring unit
+ * (cluster), its role (archetype: 'minor' | 'notable' | 'gateway' as plain strings)
+ * and its prerequisite ids. A node's OWN id is the key in the `Record` / the id list,
+ * never a field here — so both {@link TechNode} and {@link PrestigeNode} satisfy it.
+ */
+export interface LayoutNode {
+  category: string
+  cluster: string
+  archetype: string
+  prerequisites: string[]
+}
 
 export interface NodePos {
   x: number
@@ -105,8 +124,8 @@ function r2(n: number): number {
 }
 
 /** Cluster id for a node (falls back to the node's own id for a clusterless node). */
-function clusterOf(node: TechNode): string {
-  return node.cluster && node.cluster.length > 0 ? node.cluster : node.id
+function clusterOf(node: LayoutNode, id: string): string {
+  return node.cluster && node.cluster.length > 0 ? node.cluster : id
 }
 
 /** Ring radius for `n` minors: large enough that adjacent ones stay ≥ MIN_SEP apart. */
@@ -119,7 +138,7 @@ function ringRadius(n: number): number {
 
 interface ClusterInfo {
   id: string
-  category: TechCategory
+  category: string
   /** All member node ids, in stable TECH_NODE_IDS order. */
   nodes: string[]
   /** Shallowest member depth (for radial ordering within the arm). */
@@ -148,17 +167,21 @@ interface Computed {
   bounds: LayoutBounds
 }
 
-let cache: Computed | null = null
+/** Per-node-set memo (the topology is static), keyed by the data object's identity. */
+const layoutCache = new WeakMap<object, Computed>()
 
 /** Shortest prerequisite-distance from a root, memoised. Unknown prereqs are ignored. */
-function computeDepths(): Record<string, number> {
+function computeDepths(
+  nodes: Record<string, LayoutNode>,
+  nodeIds: readonly string[],
+): Record<string, number> {
   const memo: Record<string, number> = {}
   const visiting = new Set<string>()
 
   const depthOf = (id: string): number => {
     const cached = memo[id]
     if (cached !== undefined) return cached
-    const node = TECH_NODES[id]
+    const node = nodes[id]
     if (!node || node.prerequisites.length === 0) {
       memo[id] = 0
       return 0
@@ -167,7 +190,7 @@ function computeDepths(): Record<string, number> {
     visiting.add(id)
     let best = Infinity
     for (const pre of node.prerequisites) {
-      if (!(pre in TECH_NODES)) continue
+      if (!(pre in nodes)) continue
       best = Math.min(best, depthOf(pre) + 1)
     }
     visiting.delete(id)
@@ -176,25 +199,29 @@ function computeDepths(): Record<string, number> {
     return d
   }
 
-  for (const id of TECH_NODE_IDS) depthOf(id)
+  for (const id of nodeIds) depthOf(id)
   return memo
 }
 
 /** Build the per-cluster bag (membership, centre/ring/gateway split, extents). */
-function buildClusters(depths: Record<string, number>): {
-  categories: TechCategory[]
-  byCategory: Map<TechCategory, ClusterInfo[]>
+function buildClusters(
+  nodes: Record<string, LayoutNode>,
+  nodeIds: readonly string[],
+  depths: Record<string, number>,
+): {
+  categories: string[]
+  byCategory: Map<string, ClusterInfo[]>
 } {
   // Categories in first-appearance order (stable arm assignment).
-  const categories: TechCategory[] = []
+  const categories: string[] = []
   const clusterMap = new Map<string, ClusterInfo>()
 
-  for (let i = 0; i < TECH_NODE_IDS.length; i++) {
-    const id = TECH_NODE_IDS[i]
-    const node = TECH_NODES[id]
+  for (let i = 0; i < nodeIds.length; i++) {
+    const id = nodeIds[i]
+    const node = nodes[id]
     if (!categories.includes(node.category)) categories.push(node.category)
 
-    const cid = clusterOf(node)
+    const cid = clusterOf(node, id)
     let info = clusterMap.get(cid)
     if (!info) {
       info = {
@@ -224,7 +251,7 @@ function buildClusters(depths: Record<string, number>): {
     // Centre: the first notable; otherwise the shallowest node (cluster entry).
     let centre = ''
     for (const id of info.nodes) {
-      if (TECH_NODES[id].archetype === 'notable') {
+      if (nodes[id].archetype === 'notable') {
         centre = id
         break
       }
@@ -243,7 +270,7 @@ function buildClusters(depths: Record<string, number>): {
 
     for (const id of info.nodes) {
       if (id === centre) continue
-      if (TECH_NODES[id].archetype === 'gateway') info.gatewayNodes.push(id)
+      if (nodes[id].archetype === 'gateway') info.gatewayNodes.push(id)
       else info.ringNodes.push(id)
     }
 
@@ -255,7 +282,7 @@ function buildClusters(depths: Record<string, number>): {
       let gatesInward = false
       for (const member of info.nodes) {
         if (member === gid) continue
-        if (TECH_NODES[member].prerequisites.includes(gid)) {
+        if (nodes[member].prerequisites.includes(gid)) {
           gatesInward = true
           break
         }
@@ -280,7 +307,7 @@ function buildClusters(depths: Record<string, number>): {
 
   // Group clusters per category, ordered (minDepth, firstIdx) — a total deterministic
   // order, so the result does not depend on Array.sort stability.
-  const byCategory = new Map<TechCategory, ClusterInfo[]>()
+  const byCategory = new Map<string, ClusterInfo[]>()
   for (const cat of categories) byCategory.set(cat, [])
   for (const info of clusterMap.values()) {
     byCategory.get(info.category)?.push(info)
@@ -292,11 +319,14 @@ function buildClusters(depths: Record<string, number>): {
   return { categories, byCategory }
 }
 
-function compute(): Computed {
+function computeLayout(
+  nodes: Record<string, LayoutNode>,
+  nodeIds: readonly string[],
+): Computed {
   const pos: Record<string, NodePos> = {}
 
-  const depths = computeDepths()
-  const { categories, byCategory } = buildClusters(depths)
+  const depths = computeDepths(nodes, nodeIds)
+  const { categories, byCategory } = buildClusters(nodes, nodeIds, depths)
   const K = categories.length
 
   // Wedge-fit: enlarge R0 so even the widest cluster's angular half-width stays inside
@@ -368,18 +398,18 @@ function compute(): Computed {
 
   // Safety net: any node that somehow missed a cluster pass (shouldn't happen) still
   // gets a deterministic, non-overlapping position on a fallback ring around the hub.
-  for (let i = 0; i < TECH_NODE_IDS.length; i++) {
-    const id = TECH_NODE_IDS[i]
+  for (let i = 0; i < nodeIds.length; i++) {
+    const id = nodeIds[i]
     if (pos[id]) continue
-    const a = ARM_ANGLE0 + (i * TAU) / Math.max(1, TECH_NODE_IDS.length)
+    const a = ARM_ANGLE0 + (i * TAU) / Math.max(1, nodeIds.length)
     pos[id] = { x: r2(BASE_R0 * Math.cos(a)), y: r2(BASE_R0 * Math.sin(a)) }
   }
 
   // Edges: one per (prerequisite → node), stable order, skipping unknown prereq ids.
   const edges: TechEdge[] = []
-  for (const id of TECH_NODE_IDS) {
-    for (const pre of TECH_NODES[id].prerequisites) {
-      if (pre in TECH_NODES) edges.push({ from: pre, to: id })
+  for (const id of nodeIds) {
+    for (const pre of nodes[id].prerequisites) {
+      if (pre in nodes) edges.push({ from: pre, to: id })
     }
   }
 
@@ -389,7 +419,7 @@ function compute(): Computed {
   let maxX = 0
   let maxY = 0
   let first = true
-  for (const id of TECH_NODE_IDS) {
+  for (const id of nodeIds) {
     const p = pos[id]
     if (!p) continue
     if (first) {
@@ -420,24 +450,43 @@ function compute(): Computed {
   return { pos, edges, bounds }
 }
 
-/** Lazily compute (and memoise) the whole layout — the data is static. */
+/**
+ * Lazily compute (and memoise) the layout for a given node set — the data is static,
+ * so the first call for each distinct `nodes` object is cached by its identity.
+ */
+function computedFor(
+  nodes: Record<string, LayoutNode>,
+  nodeIds: readonly string[],
+): Computed {
+  const hit = layoutCache.get(nodes)
+  if (hit) return hit
+  const result = computeLayout(nodes, nodeIds)
+  layoutCache.set(nodes, result)
+  return result
+}
+
+/** The tech tree's memoised layout (preserves the original single-tree behaviour). */
 function computed(): Computed {
-  if (cache === null) cache = compute()
-  return cache
+  return computedFor(TECH_NODES, TECH_NODE_IDS)
 }
 
 /** The central hub of the constellation (decorative anchor; not a real node). */
 export const TECH_HUB: NodePos = { x: 0, y: 0 }
 
 /**
- * Deterministic radial position for EVERY node id in {@link TECH_NODES}, derived from
- * the topology alone (see the algorithm manifest at the top of this file). Returns a
- * fresh shallow copy each call so a caller can never mutate the memoised layout.
+ * GENERIC radial placement: a deterministic position for EVERY id in `nodeIds`,
+ * derived from the topology of `nodes` alone (see the algorithm manifest at the top
+ * of this file). Works for any tree shaped like {@link LayoutNode} — the tech tree,
+ * the prestige tree, anything. Returns a fresh shallow copy each call so a caller can
+ * never mutate the memoised layout.
  */
-export function layoutTree(): Record<string, NodePos> {
-  const src = computed().pos
+export function layoutNodes(
+  nodes: Record<string, LayoutNode>,
+  nodeIds: readonly string[],
+): Record<string, NodePos> {
+  const src = computedFor(nodes, nodeIds).pos
   const out: Record<string, NodePos> = {}
-  for (const id of TECH_NODE_IDS) {
+  for (const id of nodeIds) {
     const p = src[id]
     out[id] = { x: p.x, y: p.y }
   }
@@ -445,11 +494,33 @@ export function layoutTree(): Record<string, NodePos> {
 }
 
 /**
- * Every constellation edge as a (prerequisite → dependent) pair, in stable
- * {@link TECH_NODE_IDS} order. Returns a fresh array of fresh pairs each call.
+ * GENERIC edges: every (prerequisite → dependent) pair of `nodes`, in stable `nodeIds`
+ * order, skipping prereqs that point at an unknown id. Returns a fresh array of fresh
+ * pairs each call.
+ */
+export function nodeEdges(
+  nodes: Record<string, LayoutNode>,
+  nodeIds: readonly string[],
+): TechEdge[] {
+  return computedFor(nodes, nodeIds).edges.map((e) => ({ from: e.from, to: e.to }))
+}
+
+/**
+ * Deterministic radial position for EVERY node id in {@link TECH_NODES} — a thin
+ * wrapper over {@link layoutNodes} bound to the tech data. Output is byte-for-byte
+ * unchanged from the pre-generic implementation.
+ */
+export function layoutTree(): Record<string, NodePos> {
+  return layoutNodes(TECH_NODES, TECH_NODE_IDS)
+}
+
+/**
+ * Every tech-constellation edge as a (prerequisite → dependent) pair, in stable
+ * {@link TECH_NODE_IDS} order — a thin wrapper over {@link nodeEdges} bound to the
+ * tech data. Returns a fresh array of fresh pairs each call.
  */
 export function techEdges(): TechEdge[] {
-  return computed().edges.map((e) => ({ from: e.from, to: e.to }))
+  return nodeEdges(TECH_NODES, TECH_NODE_IDS)
 }
 
 /**

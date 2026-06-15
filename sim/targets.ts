@@ -98,6 +98,31 @@ export interface BalanceTargets {
    * starving the M1/M2 targets the node costs (content/tech.ts) need tuning.
    */
   minTechPurchases: number
+
+  // --- M4.1 prestige (ascension meta-layer) goals (warnings) ---
+  /**
+   * The bot must ASCEND at least this many times over the (separate) prestige run — proof
+   * the reset-for-points mechanic is reachable within a reasonable session AND repeats
+   * deterministically. >= 1 is the contract floor; the bot self-limits ascensions (see
+   * sim/bot.BOT_MAX_ASCENSIONS) so this never runs away. If it cannot be hit, PP_SCALE /
+   * prestigeScore (systems/prestige.ts) or the ASCEND_MIN_PP heuristic need tuning.
+   */
+  minAscensions: number
+  /**
+   * The bot must BUY at least this many prestige-node levels from banked PP over the
+   * prestige run — proof the prestige tree is a reachable PP sink and the purchase path is
+   * exercised. Sized well below a healthy run's measured total (≈16 levels across the
+   * ascension cap) so normal play passes but a PP-cost / yield regression that leaves the
+   * tree mostly unbought trips a warning.
+   */
+  minPrestigePurchases: number
+  /**
+   * The permanent prestige bonus must actually FOLD INTO the economy: when the bot owns a
+   * production prestige node, a fresh re-derived run's production must exceed the no-prestige
+   * baseline (prestigeProductionMult > 1). True turns this into a (warning) target — the
+   * confirmation the brief calls for that ascension makes future runs stronger.
+   */
+  requirePrestigeProductionUplift: boolean
 }
 
 export const TARGETS: BalanceTargets = {
@@ -153,6 +178,19 @@ export const TARGETS: BalanceTargets = {
   // minimum proof-of-mechanic (the bot self-limits conquests so founding keeps room
   // under the village cap — see sim/bot.chooseConquest).
   minVillagesConquered: 1,
+
+  // M4.1: prestige online. A matured run should be able to ascend (reset for prestige
+  // points) and spend them on the permanent, account-wide prestige tree, with the resulting
+  // bonuses folding back into every future run. Measured by a SEPARATE ascension-driving run
+  // (see sim/runner.runPrestige) so the M1–M3 targets above stay measured on an un-reset
+  // economy. Floors sized at the proof-of-mechanic level, well below a healthy run's measured
+  // values (≈4 ascensions / ≈16 prestige levels / x1.14 production uplift across all seeds),
+  // so normal play passes but a PP_SCALE / cost / heuristic regression trips a warning. If
+  // these cannot be hit without changing the tree, tune PP_SCALE / baseCost (systems &
+  // content/prestige.ts) — see manifest notes.
+  minAscensions: 1,
+  minPrestigePurchases: 8,
+  requirePrestigeProductionUplift: true,
 
   // M3.2: tech online, WIDENED to ~180 nodes across 9 categories (economy/storage/
   // settlement + the new military/fortification/logistics/plunder/construction/training

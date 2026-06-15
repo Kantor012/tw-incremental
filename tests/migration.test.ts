@@ -19,22 +19,25 @@ import { BUILDING_IDS } from '../src/content/buildings'
 import { UNIT_IDS } from '../src/content/units'
 import { barbarianTarget } from '../src/content/barbarians'
 import { TECH_NODE_IDS } from '../src/content/tech'
+import { PRESTIGE_NODE_IDS } from '../src/content/prestige'
 import { WORLD_CENTER } from '../src/systems/world'
 
 /**
  * `migrate` always chains a raw save all the way up to {@link SAVE_VERSION} (now
- * v8, the global passive-tree shape). So every legacy save — v1, v2, v3, v4, v5, v6,
- * v7 — ends as a v8 GameState: the global header (version/seed/rng/timestamps) at the
- * top level, the per-village economy wrapped under `villages.v0` (the "Stolica"
+ * v9, the prestige/ascension shape). So every legacy save — v1, v2, v3, v4, v5, v6,
+ * v7, v8 — ends as a v9 GameState: the global header (version/seed/rng/timestamps) at
+ * the top level, the per-village economy wrapped under `villages.v0` (the "Stolica"
  * capital, since old saves only ever had the one village) — now carrying integer
  * map coordinates (the capital pinned to WORLD_CENTER) — a bijective `villageOrder`
  * `['v0']`, a seed-generated barbarian `world`, a GLOBAL `battleLog` whose every
- * report is stamped `villageId 'v0'`, and a GLOBAL `tech` map. These tests assert each
- * migration backfills its own fields AND that the v4->v5 wrap lands every per-village
- * field under `villages.v0`, the v5->v6 step adds coords + world and upgrades any
- * carried march to the 'legacy' spatial shape, the v6->v7 step backfills the academy
- * building, the noble unit (in the roster AND in every in-flight march) and full
- * barbarian loyalty, and the v7->v8 step backfills the empty account-wide `tech` map.
+ * report is stamped `villageId 'v0'`, a GLOBAL `tech` map and a permanent `prestige`
+ * record. These tests assert each migration backfills its own fields AND that the
+ * v4->v5 wrap lands every per-village field under `villages.v0`, the v5->v6 step adds
+ * coords + world and upgrades any carried march to the 'legacy' spatial shape, the
+ * v6->v7 step backfills the academy building, the noble unit (in the roster AND in
+ * every in-flight march) and full barbarian loyalty, the v7->v8 step backfills the
+ * empty account-wide `tech` map, and the v8->v9 step backfills the zero permanent
+ * `prestige` (ascension) record.
  */
 
 /**
@@ -59,7 +62,7 @@ describe('migration v1 -> current', () => {
   it('migrate() chains v1->...->v8: seeds buildings, popCap, units, queue, combat, coords + world, nobles + loyalty, the tech map and wraps into villages.v0', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(8)
+    expect(migrated.version).toBe(9)
     expect(migrated.version).toBe(SAVE_VERSION)
     // v4->v5: the lone economy is wrapped under villages.v0 with a bijective order.
     expect(migrated.villageOrder).toEqual(['v0'])
@@ -89,6 +92,8 @@ describe('migration v1 -> current', () => {
     expect(v0.raidTimer).toBeGreaterThan(0)
     // v7->v8: the empty account-wide passive-tree map is backfilled at the top level.
     expect(migrated.tech).toEqual({})
+    // v8->v9: the zero permanent prestige (ascension) record is backfilled too.
+    expect(migrated.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
     // Pre-existing fields are carried through untouched.
     expect(migrated.seed).toBe('legacy')
     expect(v0.resources.wood.toString()).toBe('100')
@@ -263,7 +268,7 @@ describe('migration v4 -> current', () => {
   it('wraps the lone village under villages.v0 (Stolica) and globalises the battle log', () => {
     const m = migrate(rawV4())
 
-    expect(m.version).toBe(8)
+    expect(m.version).toBe(9)
     expect(m.version).toBe(SAVE_VERSION)
     // Bijective single-village order: exactly one ordered id, exactly one village.
     expect(m.villageOrder).toEqual(['v0'])
@@ -426,7 +431,7 @@ describe('migration v5 -> v6', () => {
   it('pins the capital to WORLD_CENTER, generates the barbarian world, and upgrades the legacy march', () => {
     const m = migrate(rawV5())
 
-    expect(m.version).toBe(8)
+    expect(m.version).toBe(9)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -577,7 +582,7 @@ describe('migration v6 -> v7', () => {
   it('backfills the academy building, the noble unit (roster + marches) and full barbarian loyalty', () => {
     const m = migrate(rawV6())
 
-    expect(m.version).toBe(8)
+    expect(m.version).toBe(9)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -735,7 +740,7 @@ describe('migration v7 -> v8', () => {
   it('backfills the empty account-wide tech map and carries everything else through', () => {
     const m = migrate(rawV7())
 
-    expect(m.version).toBe(8)
+    expect(m.version).toBe(9)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: an empty passive-tree map (absent key = level 0).
     expect(m.tech).toEqual({})
@@ -810,6 +815,153 @@ describe('migration v7 -> v8', () => {
     // recomputeDerived ran on import (with the empty tech mods, an identity multiplier),
     // so production is consistent with sawmill lvl 2.
     expect(state.villages.v0.production.wood.toString()).toBe('2')
+  })
+})
+
+/**
+ * A raw v8 save: the multi-village + conquest + passive-tree shape right before M4.1.
+ * It already carries everything the v7->v8 migration added (a top-level account-wide
+ * `tech` map) but predates the PERMANENT prestige/ascension account: there is NO
+ * `prestige` field at the top level. Exactly the one thing the v8->v9 migration must
+ * backfill — `prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} }`, the
+ * zero permanent record (the multipliers its nodes drive are TRANSIENT, folded by
+ * aggregatePrestigeMods inside effectiveMods in recomputeDerived on import, so nothing
+ * derived is stored or seeded by the migration) — without disturbing anything else.
+ */
+function rawV8() {
+  return {
+    version: 8,
+    seed: 'v8',
+    rngState: 4242,
+    createdAt: 1000,
+    lastSeen: 2000,
+    villages: {
+      v0: {
+        id: 'v0',
+        name: 'Stolica',
+        x: WORLD_CENTER.x,
+        y: WORLD_CENTER.y,
+        resources: { wood: D(10), clay: D(20), iron: D(30) },
+        production: { wood: D(2), clay: D(0.8), iron: D(0.5) },
+        storageCap: D(4000),
+        popCap: D(22),
+        buildings: { hq: 1, sawmill: 2, clay_pit: 1, iron_mine: 1, warehouse: 1, farm: 1, barracks: 1, academy: 0 },
+        units: { spearman: 5, swordsman: 0, axeman: 3, noble: 0 },
+        recruitQueue: [],
+        marches: [
+          {
+            targetId: 'b7',
+            targetLevel: 3,
+            targetX: WORLD_CENTER.x + 9,
+            targetY: WORLD_CENTER.y,
+            units: { spearman: 0, swordsman: 0, axeman: 2, noble: 0 },
+            phase: 'returning',
+            remaining: 30,
+            loot: { wood: D(50), clay: D(40), iron: D(10) },
+          },
+        ],
+        raidTimer: 500,
+      },
+    },
+    villageOrder: ['v0'],
+    world: {
+      barbarians: [
+        { id: 'b0', x: 210, y: 198, level: 2, name: 'Obóz barbarzyńców (poz. 2)', loyalty: 100 },
+        { id: 'b1', x: 190, y: 205, level: 5, name: 'Obóz barbarzyńców (poz. 5)', loyalty: 80 },
+      ],
+    },
+    battleLog: [
+      { kind: 'attack', villageId: 'v0', targetLevel: 3, won: true, lootSum: '100', losses: 0 },
+    ],
+    // The v7->v8 field is already present (a non-empty account-wide tech map).
+    tech: { eco_root: 2 },
+    // NB: no `prestige` field yet — that is what v8->v9 backfills (the zero record).
+  }
+}
+
+describe('migration v8 -> v9', () => {
+  it('backfills the zero permanent prestige record and carries everything else through', () => {
+    const m = migrate(rawV8())
+
+    expect(m.version).toBe(9)
+    expect(m.version).toBe(SAVE_VERSION)
+    // The single new top-level field: the zero permanent prestige (ascension) record.
+    expect(m.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
+
+    // The v7->v8 tech map + multi-village shape + economy + conquest content all carried
+    // through verbatim (the v8->v9 step touches nothing but `prestige` and `version`).
+    expect(m.tech).toEqual({ eco_root: 2 })
+    expect(m.villageOrder).toEqual(['v0'])
+    expect(Object.keys(m.villages)).toEqual(['v0'])
+    const v0 = m.villages.v0
+    expect(v0.name).toBe('Stolica')
+    expect(v0.x).toBe(WORLD_CENTER.x)
+    expect(v0.y).toBe(WORLD_CENTER.y)
+    expect(v0.buildings.academy).toBe(0)
+    expect(v0.buildings.sawmill).toBe(2)
+    expect(v0.units).toEqual({ spearman: 5, swordsman: 0, axeman: 3, noble: 0 })
+    expect(v0.marches[0].units.noble).toBe(0)
+    expect(v0.marches[0].loot.wood.toString()).toBe('50')
+    expect(v0.resources.wood.toString()).toBe('10')
+    expect(v0.raidTimer).toBe(500)
+    expect(m.world.barbarians.map((b: { loyalty: number }) => b.loyalty)).toEqual([100, 80])
+    // Header carried through.
+    expect(m.seed).toBe('v8')
+    expect(m.rngState).toBe(4242)
+    expect(m.createdAt).toBe(1000)
+    expect(m.lastSeen).toBe(2000)
+    expect(m.battleLog).toHaveLength(1)
+    expect(m.battleLog[0].villageId).toBe('v0')
+  })
+
+  it('a migrated v8 save passes validateState (a zero prestige record is always valid)', () => {
+    const v = validateState(migrate(rawV8()))
+    expect(v.version).toBe(SAVE_VERSION)
+    expect(v.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
+  })
+
+  it('preserves a prestige record a forward-compat v8 save already carries (known node ids)', () => {
+    // A save that already has an OBJECT `prestige` keeps it verbatim — the default only
+    // fills a missing/non-object one — so a hand-edited / newer save round-trips faithfully.
+    const knownId = PRESTIGE_NODE_IDS[0]
+    expect(typeof knownId).toBe('string')
+    const raw = rawV8() as Record<string, unknown>
+    raw.prestige = { points: 7, totalEarned: 12, ascensions: 2, nodes: { [knownId]: 1 } }
+    const m = migrate(raw)
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.prestige).toEqual({ points: 7, totalEarned: 12, ascensions: 2, nodes: { [knownId]: 1 } })
+    // In-band counters + a level-1 KNOWN node id, so the carried record still validates.
+    expect(validateState(m).version).toBe(SAVE_VERSION)
+  })
+
+  it('resets a non-object prestige field to the zero record', () => {
+    // A corrupt / wrongly-typed `prestige` (string / number / null) is reset to the zero
+    // record rather than carried through, so the migrated save always validates.
+    for (const bad of ['nope', 5, null] as const) {
+      const raw = rawV8() as Record<string, unknown>
+      raw.prestige = bad
+      const m = migrate(raw)
+      expect(m.version).toBe(SAVE_VERSION)
+      expect(m.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
+      expect(validateState(m).version).toBe(SAVE_VERSION)
+    }
+  })
+
+  it('importSave of a v8 export backfills the zero prestige record and re-derives stats', () => {
+    // Encode exactly as exportSave would (Decimals tagged); import migrates v8->v9.
+    const b64 = exportSave(rawV8() as never)
+    const state = importSave(b64)
+
+    expect(state.version).toBe(SAVE_VERSION)
+    expect(state.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
+    // The carried tech map survived the migration too.
+    expect(state.tech).toEqual({ eco_root: 2 })
+    // Loot Decimals survived the {$d} tag round-trip through the migration.
+    expect(state.villages.v0.marches[0].loot.wood.toString()).toBe('50')
+    // recomputeDerived ran on import (with empty prestige mods + the eco_root tech mod),
+    // so production reflects sawmill lvl 2 (base 2) lifted by the +0.04 production
+    // multiplier (eco_root level 2 → 1.04). The prestige bag is identity, so it adds nothing.
+    expect(Number(state.villages.v0.production.wood.toString())).toBeCloseTo(2.08, 6)
   })
 })
 

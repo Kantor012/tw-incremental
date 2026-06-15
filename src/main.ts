@@ -18,7 +18,8 @@ import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
 import { sendAttack } from './systems/marches'
 import { foundVillage } from './systems/villages'
-import { aggregateTechMods, purchaseTech } from './systems/tech'
+import { purchaseTech } from './systems/tech'
+import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -81,9 +82,9 @@ mountApp(root, {
     location.reload()
   },
   onBuild: (villageId, id) => {
-    // Fold the global tech multipliers into the post-build recompute so a freshly
-    // upgraded building immediately reflects the account-wide bonuses.
-    const ok = build(store.state.villages[villageId], id, aggregateTechMods(store.state.tech))
+    // Fold the EFFECTIVE multipliers (tech × prestige) into the post-build recompute so a
+    // freshly upgraded building immediately reflects the account-wide + permanent bonuses.
+    const ok = build(store.state.villages[villageId], id, effectiveMods(store.state))
     if (ok) {
       store.commit()
       saveToLocal(store.state)
@@ -92,12 +93,12 @@ mountApp(root, {
   },
   onRecruit: (villageId: VillageId, id: UnitId, count: number) => {
     // Recruit time snapshots the per-unit duration at queue time; fold in the
-    // account-wide tech recruit-speed bonus so the queued ETA reflects it.
+    // EFFECTIVE recruit-speed bonus (tech × prestige) so the queued ETA reflects it.
     const ok = recruit(
       store.state.villages[villageId],
       id,
       count,
-      aggregateTechMods(store.state.tech),
+      effectiveMods(store.state),
     )
     if (ok) {
       store.commit()
@@ -106,15 +107,15 @@ mountApp(root, {
     return ok
   },
   onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => {
-    // March time + combat power for the dispatched army fold in the account-wide
-    // tech modifiers (march_speed / attack_mult / loot_mult).
+    // March time + combat power for the dispatched army fold in the EFFECTIVE
+    // modifiers (tech × prestige): march_speed / attack_mult / loot_mult.
     const ok = sendAttack(
       store.state.villages[villageId],
       store.state.world,
       store.state.battleLog,
       targetId,
       units,
-      aggregateTechMods(store.state.tech),
+      effectiveMods(store.state),
     )
     if (ok) {
       store.commit()
@@ -140,7 +141,33 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.10.0',
+  onAscend: () => {
+    // ascend banks the pending PP and resets the run in place (fresh capital, world
+    // regenerated from a per-ascension seed, tech/log cleared, start bonuses applied);
+    // the prestige account survives. No-op (returns 0) when there is nothing to bank.
+    // The active village may be gone after the reset, so resnap to the new run's first
+    // village before committing so the selection stays valid.
+    const pp = ascend(store.state)
+    if (pp > 0) {
+      if (store.state.villages[activeVillageId.value] === undefined) {
+        activeVillageId.value = store.state.villageOrder[0]
+      }
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return pp
+  },
+  onPurchasePrestige: (nodeId: string) => {
+    // purchasePrestige spends banked PP and recomputes derived multipliers internally
+    // (the new permanent bonus folds into every village); persist + commit on success.
+    const ok = purchasePrestige(store.state, nodeId)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
+  version: '0.11.0',
   offlineSeconds,
 })
 
