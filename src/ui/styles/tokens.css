@@ -39,6 +39,22 @@
   --good: #7ec06a;      /* sukces / zysk / dostępne                          */
   --bad: #e0644c;       /* błąd / strata / zablokowane                       */
 
+  /* ---- Paleta: gałęzie drzewa rozwoju (9 ramion konstelacji) ------------ */
+  /* Odrębny odcień na każde ramię — niesie TOŻSAMOŚĆ przestrzenną gałęzi
+   * (obrys/halo węzła, barwa krawędzi, etykieta ramienia), niezależnie od
+   * STANU węzła (wypełnienie). Kolor to wskazówka WTÓRNA: kształt, etykieta i
+   * legenda też rozróżniają gałęzie (WCAG 1.4.1). Dobrane na czytelność na
+   * ciemnym tle --bg-2 i wzajemną rozróżnialność odcieni. */
+  --cat-economy: #d6b94a;       /* gospodarka — pszeniczne złoto             */
+  --cat-storage: #7fa8c9;       /* magazyny — stalowy błękit                 */
+  --cat-settlement: #8fcf7a;    /* osadnictwo — zieleń pól                   */
+  --cat-military: #e0644c;      /* militaria — czerwień ostrza               */
+  --cat-fortification: #5fb8a8; /* fortyfikacje — morski/teal                */
+  --cat-logistics: #e0913f;     /* logistyka — pomarańcz taborów             */
+  --cat-plunder: #b388d6;       /* grabież — fiolet łupu                     */
+  --cat-construction: #c98a6b;  /* budownictwo — ceglany brąz                */
+  --cat-training: #6fc4d6;      /* szkolenie — cyjan musztry                 */
+
   /* ---- Typografia: rodziny (wyłącznie fonty systemowe) ------------------ */
   --font-display: Georgia, "Iowan Old Style", Palatino, "Palatino Linotype",
     "Book Antiqua", serif;

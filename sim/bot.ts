@@ -1,5 +1,12 @@
 import { ZERO, type Decimal } from '../src/engine/decimal'
-import { RESOURCE_IDS, type GameState, type Village, type World } from '../src/engine/state'
+import {
+  RESOURCE_IDS,
+  NO_TECH_MODS,
+  type GameState,
+  type Village,
+  type World,
+  type TechModifiers,
+} from '../src/engine/state'
 import { BUILDING_IDS, type BuildingId } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { nextCostAffordable } from '../src/systems/buildings'
@@ -23,7 +30,13 @@ import { foundCost, findFoundingSpot, canFound, playerVillageCount } from '../sr
 import { raidPower } from '../src/systems/raids'
 import { nobleCount, LOYALTY_NOBLE_HIT } from '../src/systems/conquest'
 import { TECH_NODE_IDS } from '../src/content/tech'
-import { nodeAvailable, nodeLevel, techCost, globalResources } from '../src/systems/tech'
+import {
+  nodeAvailable,
+  nodeLevel,
+  techCost,
+  globalResources,
+  aggregateTechMods,
+} from '../src/systems/tech'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -59,6 +72,18 @@ import { nodeAvailable, nodeLevel, techCost, globalResources } from '../src/syst
  * successful raid wipes the ENTIRE home stack — so without a standing wall the fragile
  * nobles could never survive at home. Both are pure functions of state, so determinism /
  * save-load continuation hold with conquest in play.
+ *
+ * M3.2 threads the aggregated tech {@link TechModifiers} through every decision that
+ * weighs power or cost, so the bot judges combat and affordability against the SAME
+ * numbers the engine resolves with: {@link chooseAction} (and its garrison / surplus /
+ * strike helpers) takes `mods` as an argument (the per-village probe has no GameState),
+ * while the state-level {@link chooseConquest} / {@link chooseFounding} derive
+ * `aggregateTechMods(state.tech)` internally. `mods` is a pure function of `state.tech`,
+ * so two identical runs compute identical bonuses — determinism / save-load continuation
+ * hold with the M3.2 military / fortification / logistics / plunder / construction /
+ * training branches in play. The runner threads the same `mods` into the live
+ * build / recruit / sendAttack calls, and chooseTech (unchanged) keeps buying the
+ * cheapest available node, so the widened ~180-node tree is bought breadth-first.
  */
 export type BotAction =
   | { kind: 'build'; id: BuildingId }
@@ -108,12 +133,22 @@ function resourceSum(v: Village): Decimal {
  * resources (wood + clay + iron) on Decimal so the comparison stays exact past
  * 2^53. Ties resolve to the first id in {@link BUILDING_IDS} order — fully
  * deterministic.
+ *
+ * `mods` (M3.2) thread the account-wide tech `costReduction` into `nextCostAffordable`
+ * so the bot judges affordability against the SAME discounted price `build(v, id, mods)`
+ * actually charges — without it the bot would pass over a building it can in fact afford
+ * once construction perks are bought. The discount is a single multiplier applied
+ * uniformly to every building, so the cheapest RANKING is unchanged; only the
+ * affordability cut moves. Defaults to {@link NO_TECH_MODS} (no discount).
  */
-function cheapestBuilding(v: Village): { id: BuildingId; sum: Decimal } | null {
+function cheapestBuilding(
+  v: Village,
+  mods: TechModifiers = NO_TECH_MODS,
+): { id: BuildingId; sum: Decimal } | null {
   let best: BuildingId | null = null
   let bestSum: Decimal | null = null
   for (const id of BUILDING_IDS) {
-    const { cost, affordable, maxed } = nextCostAffordable(v, id)
+    const { cost, affordable, maxed } = nextCostAffordable(v, id, mods)
     if (maxed || !affordable) continue
     const sum = cost.wood.add(cost.clay).add(cost.iron)
     if (bestSum === null || sum.lt(bestSum)) {
@@ -196,19 +231,31 @@ function emptyRoster(): Record<UnitId, number> {
   return r
 }
 
-/** Defence of the COMBAT garrison currently at home (nobles excluded — they march off). */
-function combatGarrisonDef(v: Village): number {
-  return armyDefensePower({ ...stationedUnits(v), noble: 0 })
+/**
+ * Defence of the COMBAT garrison currently at home (nobles excluded — they march off).
+ * `mods.defenseMult` (M3.2 fortification tech) is threaded so the bot reads the SAME
+ * boosted defence the raid resolver applies (`armyDefensePower(home, mods)` in raids.ts);
+ * without it the bot would over-build the wall. Defaults to {@link NO_TECH_MODS} (×1).
+ */
+function combatGarrisonDef(v: Village, mods: TechModifiers = NO_TECH_MODS): number {
+  return armyDefensePower({ ...stationedUnits(v), noble: 0 }, mods)
 }
 
-/** Defence the home garrison must hold to repel the next raid with a safety margin. */
+/**
+ * Defence the home garrison must hold to repel the next raid with a safety margin. Built
+ * from {@link raidPower} (the INCOMING raid strength), which is deliberately left on the
+ * NO_TECH_MODS default — raidPower's army term is a coarse village-progress proxy, not the
+ * player's defence, so it is NOT scaled by fortification tech (mirrors resolveRaid, which
+ * boosts only the defending garrison). The defender side carries the tech bonus instead,
+ * via {@link combatGarrisonDef}.
+ */
 function raidThreshold(v: Village): number {
   return raidPower(v) * RAID_REPEL_MARGIN
 }
 
-/** Whether the home combat garrison already out-defends the next raid. */
-function homeRepelsRaid(v: Village): boolean {
-  return combatGarrisonDef(v) >= raidThreshold(v)
+/** Whether the home combat garrison already out-defends the next raid (defence tech-boosted). */
+function homeRepelsRaid(v: Village, mods: TechModifiers = NO_TECH_MODS): boolean {
+  return combatGarrisonDef(v, mods) >= raidThreshold(v)
 }
 
 /**
@@ -228,9 +275,9 @@ function homeRepelsRaid(v: Village): boolean {
  * than needed stays). Returns an all-zero roster when nothing can be spared (whole
  * garrison is needed — early game, or a stack already out).
  */
-function marchSurplus(v: Village): Record<UnitId, number> {
+function marchSurplus(v: Village, mods: TechModifiers = NO_TECH_MODS): Record<UnitId, number> {
   const combatHome = { ...stationedUnits(v), noble: 0 }
-  const homeDef = armyDefensePower(combatHome)
+  const homeDef = armyDefensePower(combatHome, mods)
   if (homeDef <= 0) return emptyRoster()
   const surplusDef = homeDef - raidThreshold(v)
   const out = emptyRoster()
@@ -252,11 +299,17 @@ function marchSurplus(v: Village): Record<UnitId, number> {
  * and the building count — established cheaply early (low threshold) and topped up
  * thereafter, so the garrison is NEVER wiped and the conquest pipeline has a safe home.
  */
-function garrisonRecruit(v: Village): Extract<BotAction, { kind: 'recruit' }> | null {
+function garrisonRecruit(
+  v: Village,
+  mods: TechModifiers = NO_TECH_MODS,
+): Extract<BotAction, { kind: 'recruit' }> | null {
   if (!barracksUnlocked(v)) return null
-  const gap = raidThreshold(v) - combatGarrisonDef(v)
+  const gap = raidThreshold(v) - combatGarrisonDef(v, mods)
   if (gap <= 0) return null
-  const want = Math.ceil(gap / UNITS.spearman.defInfantry)
+  // Each recruited spearman closes `defInfantry * defenseMult` of the (post-tech) gap,
+  // so size the batch against the boosted per-unit defence — fewer units once
+  // fortification perks are bought, matching the tech-aware repel check above.
+  const want = Math.ceil(gap / (UNITS.spearman.defInfantry * mods.defenseMult))
   const batch = Math.min(want, recruitBatch(v, 'spearman', combatPopBudget(v)))
   if (batch >= 1 && canRecruit(v, 'spearman', batch).ok) {
     return { kind: 'recruit', unitId: 'spearman', count: batch }
@@ -287,15 +340,22 @@ function garrisonRecruit(v: Village): Extract<BotAction, { kind: 'recruit' }> | 
  * Returns null when the barracks are locked, the sparable surplus is below
  * {@link STRIKE_MIN_ARMY}, or no tier is winnable within the loss budget.
  */
-function chooseAttack(v: Village, world: World): Extract<BotAction, { kind: 'attack' }> | null {
+function chooseAttack(
+  v: Village,
+  world: World,
+  mods: TechModifiers = NO_TECH_MODS,
+): Extract<BotAction, { kind: 'attack' }> | null {
   if (!barracksUnlocked(v)) return null
   // March only the SURPLUS beyond a raid-repelling home garrison (see marchSurplus): the
   // home stack survives raids, so the accumulating nobles (excluded here anyway — carry 0)
   // stay alive. Early game / a stack already out leaves no surplus, so the army builds up
   // at home until it can spare a striking force.
-  const army = marchSurplus(v)
+  const army = marchSurplus(v, mods)
   if (homeArmySize(army) < STRIKE_MIN_ARMY) return null
-  const atkPower = armyAttackPower(army)
+  // `mods.attackMult` (M3.2 military tech) scales the army's power to the SAME figure
+  // advanceMarches resolves with — so the ladder scan below picks the true highest
+  // beatable tier (and the survivor/carry projection matches the real outcome).
+  const atkPower = armyAttackPower(army, mods)
   if (atkPower <= 0) return null
 
   // Highest beatable camp tier within the loss budget and with surviving carry.
@@ -348,9 +408,13 @@ function chooseAttack(v: Village, world: World): Extract<BotAction, { kind: 'att
  * be trained — the signal checkNoSoftlock pairs with resource growth / content
  * consumption to classify a stall.
  */
-export function chooseAction(v: Village, world: World): BotAction | null {
+export function chooseAction(
+  v: Village,
+  world: World,
+  mods: TechModifiers = NO_TECH_MODS,
+): BotAction | null {
   if (!barracksUnlocked(v)) {
-    const b = nextCostAffordable(v, 'barracks')
+    const b = nextCostAffordable(v, 'barracks', mods)
     if (!b.maxed && b.affordable) return { kind: 'build', id: 'barracks' }
     // Can't afford the barracks yet — grow the economy via the cheapest build below.
   }
@@ -364,15 +428,15 @@ export function chooseAction(v: Village, world: World): BotAction | null {
   // off keeps the building count (and threshold) low so the wall is cheap to establish;
   // once it holds, normal play resumes and tops it up incrementally (raids repelled, so
   // the garrison is never wiped again).
-  if (barracksUnlocked(v) && !homeRepelsRaid(v)) {
-    return garrisonRecruit(v) // a defensive spearman batch, or null to accumulate for it
+  if (barracksUnlocked(v) && !homeRepelsRaid(v, mods)) {
+    return garrisonRecruit(v, mods) // a defensive spearman batch, or null to accumulate for it
   }
 
   // M2.4: the Pałac is the conquest unlock — buy level 1 the moment it is affordable (its
   // higher levels are left to the cheapest-building economy). Placed AFTER the garrison
   // gate so the wall always takes precedence.
   if (v.buildings.academy === 0) {
-    const a = nextCostAffordable(v, 'academy')
+    const a = nextCostAffordable(v, 'academy', mods)
     if (!a.maxed && a.affordable) return { kind: 'build', id: 'academy' }
   }
 
@@ -381,10 +445,10 @@ export function chooseAction(v: Village, world: World): BotAction | null {
   // M2.4: chooseAttack now marches only the SURPLUS beyond a raid-repelling home
   // garrison (see marchSurplus), so the home stack always survives raids — which is what
   // keeps the accumulating nobles alive (a successful raid wipes the whole home garrison).
-  const attack = chooseAttack(v, world)
+  const attack = chooseAttack(v, world, mods)
   if (attack !== null) return attack
 
-  const building = cheapestBuilding(v)
+  const building = cheapestBuilding(v, mods)
   // Combat recruitment uses a REDUCED population budget so the noble strike force always
   // has room to train (see combatPopBudget); the noble itself is never the cheapest pick.
   const recruit = barracksUnlocked(v) ? cheapestRecruit(v, combatPopBudget(v)) : null
@@ -465,7 +529,11 @@ const RAID_REPEL_MARGIN = 1.15
  * escort keeps the garrison home, so the conquest march never exposes the village to a
  * raid. Pure over (village + world); safe to call repeatedly.
  */
-function chooseConquestAttack(v: Village, world: World): Extract<BotAction, { kind: 'attack' }> | null {
+function chooseConquestAttack(
+  v: Village,
+  world: World,
+  mods: TechModifiers = NO_TECH_MODS,
+): Extract<BotAction, { kind: 'attack' }> | null {
   const home = stationedUnits(v)
   const nobles = nobleCount(home)
   if (nobles < 1) return null
@@ -473,9 +541,12 @@ function chooseConquestAttack(v: Village, world: World): Extract<BotAction, { ki
   // garrison home means the conquest march doesn't expose the village to raids, and the
   // escort makes the loss fraction tiny so the nobles survive (the nobles alone already
   // beat a low-tier camp, but the escort guarantees the floor leaves enough of them).
-  const army = marchSurplus(v)
+  const army = marchSurplus(v, mods)
   army.noble = nobles
-  const atkPower = armyAttackPower(army)
+  // `mods.attackMult` matches the resolution power, so the surviving-noble projection
+  // below (battleOutcome of this power) is exactly what advanceMarches will compute —
+  // a tech-boosted strike only ever survives BETTER, so the one-march capture still lands.
+  const atkPower = armyAttackPower(army, mods)
   if (atkPower <= 0) return null
   for (const b of targetsByDistance(v, world)) {
     if (b.loyalty <= 0) continue // already taken / being taken
@@ -517,16 +588,20 @@ export function chooseConquest(state: GameState): Extract<BotAction, { kind: 're
   const v = state.villages[state.villageOrder[0]]
   if (v.buildings.academy <= 0) return null
 
+  // M3.2: fold the account-wide tech bonuses so the conquest power/defence projections
+  // match what the engine resolves with. Derived from state.tech (deterministic).
+  const mods = aggregateTechMods(state.tech)
+
   const home = stationedUnits(v)
   if (nobleCount(home) >= CONQUEST_TARGET_NOBLES) {
-    const attack = chooseConquestAttack(v, state.world)
+    const attack = chooseConquestAttack(v, state.world, mods)
     if (attack !== null) return attack
   }
 
   // Train nobles only once the home garrison repels raids — they accumulate behind that
   // wall (a raid would otherwise wipe the home stack, nobles included). garrisonRecruit
   // stands the wall up first, so this gate clears in the ordinary course of play.
-  if (!homeRepelsRaid(v)) return null
+  if (!homeRepelsRaid(v, mods)) return null
 
   // Keep topping up toward the strike force (owned home + away + queued all count).
   const have = v.units.noble + queuedUnits(v, 'noble')
@@ -584,8 +659,14 @@ export function chooseFounding(state: GameState): Extract<BotAction, { kind: 'fo
   const payerId = state.villageOrder[0]
   const payer = state.villages[payerId]
 
+  // M3.2: judge "could still build" against the tech-discounted price (cheapestBuilding
+  // threads mods), so founding waits behind a genuinely idle build queue — not one that
+  // only looks exhausted at full price. Recruit cost is mod-independent, so cheapestRecruit
+  // needs no mods. Derived from state.tech (deterministic).
+  const mods = aggregateTechMods(state.tech)
+
   // Only expand with idle resources: never when the capital could still build or train.
-  if (cheapestBuilding(payer) !== null) return null
+  if (cheapestBuilding(payer, mods) !== null) return null
   if (cheapestRecruit(payer) !== null) return null
 
   const cost = foundCost(state)

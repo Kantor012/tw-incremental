@@ -5,6 +5,7 @@ import {
   TECH_NODE_IDS,
   TECH_ROOTS,
   type TechNode,
+  type TechEffect,
   type TechArchetype,
   type TechCategory,
 } from '../../content/tech'
@@ -98,7 +99,36 @@ const CATEGORY_LABEL: Record<TechCategory, string> = {
   economy: 'Gospodarka',
   storage: 'Magazyny',
   settlement: 'Osadnictwo',
+  military: 'Militaria',
+  fortification: 'Fortyfikacje',
+  logistics: 'Logistyka',
+  plunder: 'Grabież',
+  construction: 'Budownictwo',
+  training: 'Szkolenie',
 }
+
+/**
+ * Per-category HUE, as a reference to a design token defined in tokens.css (never a
+ * raw hex here). Set on each node `g`, each `.tech-edge` and each arm label via the
+ * `--cat` custom property, so an arm has a stable spatial IDENTITY (colour + named
+ * label) independent of a node's STATE fill — at ~180 nodes across 9 arms this is the
+ * primary navigational affordance of the PoE-style constellation (WCAG 1.4.1: colour
+ * is a SECONDARY cue layered on top of shape/label/legend, never the only one).
+ */
+const CATEGORY_HUE: Record<TechCategory, string> = {
+  economy: 'var(--cat-economy)',
+  storage: 'var(--cat-storage)',
+  settlement: 'var(--cat-settlement)',
+  military: 'var(--cat-military)',
+  fortification: 'var(--cat-fortification)',
+  logistics: 'var(--cat-logistics)',
+  plunder: 'var(--cat-plunder)',
+  construction: 'var(--cat-construction)',
+  training: 'var(--cat-training)',
+}
+
+/** Stable category order (declaration order) for the legend, jump bar and groups. */
+const CATEGORY_ORDER = Object.keys(CATEGORY_LABEL) as TechCategory[]
 
 /** PL display name per archetype (carried in the node aria-label + detail card). */
 const ARCHETYPE_LABEL: Record<TechArchetype, string> = {
@@ -130,6 +160,19 @@ function pct(frac: number): string {
   return formatNumber(frac * 100, 2) + '%'
 }
 
+/**
+ * True for effects that REDUCE an underlying time/cost (cost/recruit/march). These read
+ * with a "−" sign and shrink the value, unlike the additive "+X%" multipliers — so the
+ * detail card never claims a reduction is a gain.
+ */
+function isReduction(effect: TechEffect): boolean {
+  return (
+    effect.kind === 'cost_reduction' ||
+    effect.kind === 'recruit_speed' ||
+    effect.kind === 'march_speed'
+  )
+}
+
 /** What the node's effect *targets*, in PL (the subject of the per-level bonus). */
 function effectSubject(node: TechNode): string {
   const effect = node.effect
@@ -142,12 +185,29 @@ function effectSubject(node: TechNode): string {
       return 'pojemności magazynu'
     case 'pop_mult':
       return 'limitu populacji'
+    case 'cost_reduction':
+      return 'kosztu budowy'
+    case 'recruit_speed':
+      return 'czasu rekrutacji'
+    case 'march_speed':
+      return 'czasu marszu'
+    case 'attack_mult':
+      return 'siły ataku armii'
+    case 'defense_mult':
+      return 'siły obrony armii'
+    case 'loot_mult':
+      return 'wielkości łupu'
   }
 }
 
-/** Full "+X% <subject> / poziom" line for the detail card. */
+/** The leading sign for an effect: "−" for a reduction, "+" for an additive bonus. */
+function effectSign(effect: TechEffect): string {
+  return isReduction(effect) ? '−' : '+'
+}
+
+/** Full "±X% <subject> / poziom" line for the detail card. */
 function effectText(node: TechNode): string {
-  return '+' + pct(node.effect.perLevel) + ' ' + effectSubject(node) + ' / poziom'
+  return effectSign(node.effect) + pct(node.effect.perLevel) + ' ' + effectSubject(node) + ' / poziom'
 }
 
 /** Derive a node's visual state from the live `state.tech` levels + prerequisites. */
@@ -186,6 +246,20 @@ export function createTechPanel(ctx: UiCtx): Panel {
   // Ids that actually got a position (defensive: layout owns every id, but never
   // crash the whole tab if one is missing — just skip it).
   const placedIds = TECH_NODE_IDS.filter((id) => positions[id])
+
+  // Per-category ANCHOR node — the camera target for the quick-jump bar and the
+  // position of the on-canvas arm label. Prefer the arm's prereq-free root (a node in
+  // TECH_ROOTS); fall back to the first placed node of that category. Deterministic
+  // (stable TECH_ROOTS / TECH_NODE_IDS order); a category with no placed node is absent.
+  const categoryAnchor = {} as Record<TechCategory, string>
+  for (const id of TECH_ROOTS) {
+    const c = TECH_NODES[id].category
+    if (categoryAnchor[c] === undefined && positions[id]) categoryAnchor[c] = id
+  }
+  for (const id of placedIds) {
+    const c = TECH_NODES[id].category
+    if (categoryAnchor[c] === undefined) categoryAnchor[c] = id
+  }
 
   // Bounding box of the constellation (for the initial frame + pan clamps).
   let minX = Infinity
@@ -278,6 +352,22 @@ export function createTechPanel(ctx: UiCtx): Panel {
   addLegend('is-gateway', 'Brama (romb, większy)')
   el.appendChild(legend)
 
+  // Category colour key — one swatch per arm, hue from the node's `--cat` token so
+  // the legend and the constellation agree (finding: the 9 arms need a colour key).
+  const catLegend = h('div', 'tech-legend tech-legend--cat')
+  catLegend.setAttribute('role', 'note')
+  catLegend.setAttribute('aria-label', 'Legenda kategorii (gałęzi) drzewa rozwoju')
+  for (const cat of CATEGORY_ORDER) {
+    const item = h('span', 'tech-legend-item')
+    const sw = h('span', 'tech-legend-swatch is-cat')
+    sw.style.setProperty('--cat', CATEGORY_HUE[cat])
+    sw.setAttribute('aria-hidden', 'true')
+    item.appendChild(sw)
+    item.appendChild(document.createTextNode(' ' + CATEGORY_LABEL[cat]))
+    catLegend.appendChild(item)
+  }
+  el.appendChild(catLegend)
+
   // ---- Global resource pool (the currency tech is bought from) ------------
   const pool = h('div', 'tech-pool')
   pool.setAttribute('role', 'note')
@@ -297,6 +387,29 @@ export function createTechPanel(ctx: UiCtx): Panel {
   }
   el.appendChild(pool)
 
+  // ---- Category quick-jump bar --------------------------------------------
+  // One button per arm: pans/zooms the camera to that arm's anchor (root) in a single
+  // action, so reaching a specific arm at ~180 nodes no longer needs many arrow-key
+  // steps or manual panning (Hick's-law / findability). Each button carries the arm's
+  // hue swatch + PL name, so it also reads as a colour key for the constellation.
+  const jumpBar = h('nav', 'tech-jump')
+  jumpBar.setAttribute('aria-label', 'Skok do gałęzi drzewa rozwoju')
+  for (const cat of CATEGORY_ORDER) {
+    const anchor = categoryAnchor[cat]
+    if (!anchor) continue
+    const btn = h('button', 'btn btn-ghost tech-jump-btn')
+    btn.type = 'button'
+    const sw = h('span', 'tech-jump-swatch')
+    sw.style.setProperty('--cat', CATEGORY_HUE[cat])
+    sw.setAttribute('aria-hidden', 'true')
+    btn.appendChild(sw)
+    btn.appendChild(document.createTextNode(CATEGORY_LABEL[cat]))
+    btn.setAttribute('aria-label', 'Przejdź do gałęzi: ' + CATEGORY_LABEL[cat])
+    btn.addEventListener('click', () => selectAndReveal(anchor, true))
+    jumpBar.appendChild(btn)
+  }
+  el.appendChild(jumpBar)
+
   // ---- Constellation viewport (SVG) + overlay controls --------------------
   const wrap = h('div', 'tech-wrap')
 
@@ -313,12 +426,48 @@ export function createTechPanel(ctx: UiCtx): Panel {
   )
   wrap.appendChild(svgEl)
 
-  // Drawing layers, back-to-front: edges, nodes, overlay (selection ring).
+  // Drawing layers, back-to-front: edges, nodes, arm labels, overlay (selection ring).
   const edgesGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
   edgesGroup.setAttribute('class', 'tech-edges')
   edgesGroup.setAttribute('aria-hidden', 'true')
   const nodesGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
   nodesGroup.setAttribute('class', 'tech-nodes')
+  // Per-category SUBGROUPS (a11y): each arm is a role=group with its name, so a
+  // screen-reader user traversing the ~180 nodes always has arm context. Nodes are
+  // appended into their category's group below (stable CATEGORY_ORDER).
+  const catGroups = {} as Record<TechCategory, SVGGElement>
+  for (const cat of CATEGORY_ORDER) {
+    const cg = document.createElementNS(SVG_NS, 'g') as SVGGElement
+    cg.setAttribute('class', 'tech-cat-group')
+    cg.setAttribute('role', 'group')
+    cg.setAttribute('aria-label', 'Gałąź: ' + CATEGORY_LABEL[cat])
+    nodesGroup.appendChild(cg)
+    catGroups[cat] = cg
+  }
+  // On-canvas arm labels — one named, hue-tinted <text> per arm at its anchor, pushed
+  // radially outward from the hub so each sector is named on the constellation itself.
+  const labelsGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
+  labelsGroup.setAttribute('class', 'tech-arm-labels')
+  labelsGroup.setAttribute('aria-hidden', 'true')
+  for (const cat of CATEGORY_ORDER) {
+    const aid = categoryAnchor[cat]
+    if (!aid) continue
+    const p = positions[aid]
+    const dx = p.x - centerX
+    const dy = p.y - centerY
+    const len = Math.hypot(dx, dy) || 1
+    const off = unit * 1.6
+    const t = svg('text', {
+      x: fmt2(p.x + (dx / len) * off),
+      y: fmt2(p.y + (dy / len) * off),
+      class: 'tech-arm-label',
+    })
+    t.setAttribute('text-anchor', 'middle')
+    t.setAttribute('font-size', fmt2(Math.max(unit * 0.8, 1e-3)))
+    t.style.setProperty('--cat', CATEGORY_HUE[cat])
+    t.textContent = CATEGORY_LABEL[cat]
+    labelsGroup.appendChild(t)
+  }
   const overlayGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
   overlayGroup.setAttribute('class', 'tech-overlay')
   overlayGroup.setAttribute('aria-hidden', 'true')
@@ -330,6 +479,7 @@ export function createTechPanel(ctx: UiCtx): Panel {
 
   svgEl.appendChild(edgesGroup)
   svgEl.appendChild(nodesGroup)
+  svgEl.appendChild(labelsGroup)
   svgEl.appendChild(overlayGroup)
 
   const controls = h('div', 'tech-controls')
@@ -542,6 +692,9 @@ export function createTechPanel(ctx: UiCtx): Panel {
       class: 'tech-edge',
     })
     line.setAttribute('vector-effect', 'non-scaling-stroke')
+    // Tint the link by the arm it leads INTO (the dependent node's category), so the
+    // path colour matches the destination arm; the unlocked emphasis is brightness/width.
+    line.style.setProperty('--cat', CATEGORY_HUE[TECH_NODES[e.to].category])
     edgesGroup.appendChild(line)
     edgeRefs.push({ line, from: e.from })
   }
@@ -562,6 +715,10 @@ export function createTechPanel(ctx: UiCtx): Panel {
     // Roving tabindex: only the selected / first node is tabbable (set in update()),
     // so a keyboard user reaches the detail card without traversing every node.
     g.setAttribute('tabindex', '-1')
+    // Arm IDENTITY: expose the category hue as `--cat` so the category ring/edge tint
+    // resolve from one place (the node's state fill stays untouched — colour is a
+    // secondary cue layered on top of shape + state).
+    g.style.setProperty('--cat', CATEGORY_HUE[node.category])
 
     // Transparent, screen-sized hit circle FIRST (under the glyph) so taps meet the
     // touch-target minimum without enlarging the visible glyph. Radius via updateHitRadii.
@@ -575,6 +732,17 @@ export function createTechPanel(ctx: UiCtx): Panel {
     hit.style.stroke = 'none'
     hit.style.pointerEvents = 'all'
     g.appendChild(hit)
+
+    // Outer CATEGORY ring (drawn under the state glyph, with a larger radius so its
+    // hue peeks out as a halo regardless of the state fill). Static; never re-styled.
+    const catRing = svg('circle', {
+      cx: fmt2(p.x),
+      cy: fmt2(p.y),
+      r: fmt2(r + unit * 0.12),
+      class: 'tech-node-cat',
+    })
+    catRing.setAttribute('vector-effect', 'non-scaling-stroke')
+    g.appendChild(catRing)
 
     // Visible glyph: diamond for a gateway (shape cue), circle otherwise.
     let shape: SVGElement
@@ -637,7 +805,7 @@ export function createTechPanel(ctx: UiCtx): Panel {
       if (next) selectAndReveal(next, true)
     })
 
-    nodesGroup.appendChild(g)
+    ;(catGroups[node.category] ?? nodesGroup).appendChild(g)
     nodeRefs.push({ g, shape, hit, node, pos: p, radius: r, lastKey: '' })
   }
   const refById = new Map<string, NodeRefs>()
@@ -901,8 +1069,21 @@ export function createTechPanel(ctx: UiCtx): Panel {
         )
       }
       // Affordability is a frequently-changing, SECONDARY cue (resources accrue every
-      // tick) — a static glow, layered on top of the structural state. Cheap + idempotent.
-      ref.g.classList.toggle('is-affordable', canPurchaseTech(state, ref.node.id).ok)
+      // tick). Compute it INLINE against the cached global pool (poolRes) rather than
+      // calling canPurchaseTech per node — that helper re-runs globalResources(state)
+      // (a sum over every village × 3 resources) for EACH of ~180 nodes every frame,
+      // which is O(nodes × villages) Decimal work against the perf budget. A node is
+      // affordable exactly when canPurchaseTech would say ok: it is buyable (state
+      // 'available' or 'owned' ⇒ prereqs met AND not maxed) AND the pool covers its
+      // next-level cost. The full canPurchaseTech is still used for the selected node
+      // and the buy action below.
+      let affordable = false
+      if (st === 'available' || st === 'owned') {
+        const cost = techCost(ref.node.id, lvl)
+        affordable =
+          !poolRes.wood.lt(cost.wood) && !poolRes.clay.lt(cost.clay) && !poolRes.iron.lt(cost.iron)
+      }
+      ref.g.classList.toggle('is-affordable', affordable)
     }
 
     // Drop a selection whose node somehow vanished (defensive — ids are static).
@@ -959,7 +1140,9 @@ export function createTechPanel(ctx: UiCtx): Panel {
     effectEl.textContent = effectText(selected)
     bonusEl.textContent =
       lvl > 0
-        ? 'Obecny łączny bonus: +' + pct(selected.effect.perLevel * lvl)
+        ? 'Obecny łączny bonus: ' +
+          effectSign(selected.effect) +
+          pct(selected.effect.perLevel * lvl)
         : 'Jeszcze nie wykupiony.'
 
     const verdict = canPurchaseTech(state, selected.id)

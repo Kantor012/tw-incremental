@@ -3,8 +3,10 @@ import {
   RESOURCE_IDS,
   INITIAL_BUILDINGS,
   RAID_BASE_INTERVAL,
+  NO_TECH_MODS,
   type Village,
   type BattleReport,
+  type TechModifiers,
 } from '../engine/state'
 import { BUILDING_IDS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
@@ -92,11 +94,22 @@ function raidsActive(v: Village): boolean {
   return buildingLevelSum(v) > initSum
 }
 
-/** Resolve one raid against the village's current home garrison. Deterministic. */
-function resolveRaid(v: Village, log: BattleReport[]): void {
+/**
+ * Resolve one raid against the village's current home garrison. Deterministic.
+ *
+ * `mods` are the aggregated tech multipliers: ONLY the player's home defence is
+ * scaled by them (`armyDefensePower(home, mods)` — the `mods.defenseMult` from the
+ * fortification branch), so buying defence perks directly hardens the garrison
+ * against raids. The incoming raid's strength ({@link raidPower}) is left on the
+ * NO_TECH_MODS default on purpose: its army term is a coarse village-progress proxy,
+ * not the player's defence, and scaling it by `defenseMult` too would cancel the
+ * very bonus the player paid for. Default {@link NO_TECH_MODS} (1) reproduces the
+ * pre-M3.2 outcome byte-for-byte for any caller that does not thread tech.
+ */
+function resolveRaid(v: Village, log: BattleReport[], mods: TechModifiers = NO_TECH_MODS): void {
   const power = raidPower(v)
   const home = stationedUnits(v)
-  const outcome = battleOutcome(power, armyDefensePower(home)) // attacker = the raid
+  const outcome = battleOutcome(power, armyDefensePower(home, mods)) // attacker = the raid
 
   if (!outcome.attackerWins) {
     // Repelled: no losses, nothing stolen (the raiders break on the wall).
@@ -140,8 +153,19 @@ function resolveRaid(v: Village, log: BattleReport[]): void {
  * (long offline catch-up) resolves every raid that fell within the window in order.
  * Reports land on the shared global `log`, tagged with this village. Deterministic
  * and Node-safe.
+ *
+ * `mods` are the aggregated tech multipliers (M3.2), threaded straight into each
+ * {@link resolveRaid} so the player's home defence enjoys the fortification bonus.
+ * The tick computes them once per sub-step and passes them in; they default to
+ * {@link NO_TECH_MODS} (1) so a caller without tech (or a pre-M3.2 call site)
+ * resolves raids exactly as before.
  */
-export function advanceRaids(v: Village, log: BattleReport[], dtSeconds: number): void {
+export function advanceRaids(
+  v: Village,
+  log: BattleReport[],
+  dtSeconds: number,
+  mods: TechModifiers = NO_TECH_MODS,
+): void {
   if (!(dtSeconds > 0)) return
   if (!raidsActive(v)) return
   let dt = dtSeconds
@@ -152,7 +176,7 @@ export function advanceRaids(v: Village, log: BattleReport[], dtSeconds: number)
     }
     dt -= v.raidTimer
     v.raidTimer = 0
-    resolveRaid(v, log)
+    resolveRaid(v, log, mods)
     v.raidTimer = RAID_BASE_INTERVAL
   }
 }

@@ -1,4 +1,5 @@
 import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
+import { NO_TECH_MODS, type TechModifiers } from '../engine/state'
 
 /**
  * Combat resolution — PURE, DETERMINISTIC, RNG-FREE (M1.3).
@@ -54,22 +55,41 @@ export function battleOutcome(atkPower: number, defPower: number): BattleOutcome
   }
 }
 
-/** Total offensive power of an army: Σ count * UnitDef.attack. */
-export function armyAttackPower(units: Record<UnitId, number>): number {
+/**
+ * Total offensive power of an army: (Σ count * UnitDef.attack) * mods.attackMult.
+ *
+ * `mods.attackMult` is the aggregated tech "military" multiplier (>= 1; 1 = no
+ * bonus, the {@link NO_TECH_MODS} default). It scales the raw power total, so the
+ * same army hits harder once attack perks are bought — applied uniformly across
+ * unit types, which keeps {@link battleOutcome} unchanged (it only ever sees the
+ * final power figure). Still pure / deterministic: no clock, no RNG.
+ */
+export function armyAttackPower(
+  units: Record<UnitId, number>,
+  mods: TechModifiers = NO_TECH_MODS,
+): number {
   let power = 0
   for (const id of UNIT_IDS) power += (units[id] ?? 0) * UNITS[id].attack
-  return power
+  return power * mods.attackMult
 }
 
 /**
- * Total defensive power of an army vs infantry: Σ count * UnitDef.defInfantry.
+ * Total defensive power of an army vs infantry: (Σ count * UnitDef.defInfantry) *
+ * mods.defenseMult.
+ *
  * M1.3 enemies (barbarians and raiders) are all infantry, so the infantry profile
  * is the right one for both the player garrison's defence and a barb camp's wall.
+ * `mods.defenseMult` is the aggregated tech "fortification" multiplier (>= 1;
+ * default {@link NO_TECH_MODS} = 1). It scales the raw defence total uniformly,
+ * leaving {@link battleOutcome} untouched. Pure / deterministic.
  */
-export function armyDefensePower(units: Record<UnitId, number>): number {
+export function armyDefensePower(
+  units: Record<UnitId, number>,
+  mods: TechModifiers = NO_TECH_MODS,
+): number {
   let power = 0
   for (const id of UNIT_IDS) power += (units[id] ?? 0) * UNITS[id].defInfantry
-  return power
+  return power * mods.defenseMult
 }
 
 /** Total haul capacity of an army: Σ count * UnitDef.carry. */

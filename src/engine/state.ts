@@ -292,26 +292,53 @@ export interface GameState {
 }
 
 /**
- * Global, account-wide tech multipliers (M3.1) — the TRANSIENT roll-up of the
- * passive tree's economic effects, recomputed from {@link GameState.tech} by
- * `aggregateTechMods` (systems/tech.ts) and threaded into
- * {@link recomputeVillageDerived}. Each field is a plain `number` factor where
- * `1` means "no bonus": `productionMult[r]` scales resource `r`'s production,
- * `storageMult` the storage cap, `popMult` the population cap. Never stored on the
- * state — it is derived on demand and discarded after each recompute.
+ * Global, account-wide tech multipliers — the TRANSIENT roll-up of the passive
+ * tree's effects, recomputed from {@link GameState.tech} by `aggregateTechMods`
+ * (systems/tech.ts) and threaded into the systems that consume them. Never stored on
+ * the state — derived on demand and discarded after each use.
+ *
+ * The ECONOMY fields (M3.1) are plain `number` factors where `1` means "no bonus" and
+ * are folded by {@link recomputeVillageDerived}: `productionMult[r]` scales resource
+ * `r`'s production, `storageMult` the storage cap, `popMult` the population cap.
+ *
+ * The M3.2 fields are threaded into the combat/logistics/cost systems (NOT into
+ * recomputeVillageDerived). Two shapes:
+ *  - FRACTIONS in [0, cap] subtracted from a time/cost (0 = no bonus):
+ *    `costReduction` (off build cost, cap 0.8), `recruitSpeedFrac` (off recruit time,
+ *    cap 0.75), `marchSpeedFrac` (off march time, cap 0.75).
+ *  - MULTIPLIERS >= 1 (1 = no bonus): `attackMult`, `defenseMult`, `lootMult`.
  */
 export interface TechModifiers {
   productionMult: Record<ResourceId, number>
   storageMult: number
   popMult: number
+  /** Fraction off building cost, clamped 0..0.8 (consumed by systems/buildings.ts). */
+  costReduction: number
+  /** Fraction off recruitment time, clamped 0..0.75 (consumed by systems/recruitment.ts). */
+  recruitSpeedFrac: number
+  /** Fraction off march time, clamped 0..0.75 (consumed by systems/marches.ts). */
+  marchSpeedFrac: number
+  /** Army attack power multiplier, >= 1 (consumed by systems/combat.ts). */
+  attackMult: number
+  /** Army defence power multiplier, >= 1 (consumed by systems/combat.ts). */
+  defenseMult: number
+  /** Loot haul multiplier, >= 1 (consumed by systems/marches.ts). */
+  lootMult: number
 }
 
-/** Identity tech multipliers (everything 1 = no bonus). The default for any village
- * recompute that runs before/without tech (createVillage, plain build, the sim). */
+/** Identity tech multipliers (no bonus): economy/combat factors 1, fractional
+ * reductions 0. The default for any consumer that runs before/without tech
+ * (createVillage, plain build, the sim). */
 export const NO_TECH_MODS: TechModifiers = {
   productionMult: { wood: 1, clay: 1, iron: 1 },
   storageMult: 1,
   popMult: 1,
+  costReduction: 0,
+  recruitSpeedFrac: 0,
+  marchSpeedFrac: 0,
+  attackMult: 1,
+  defenseMult: 1,
+  lootMult: 1,
 }
 
 /** Base storage cap before any warehouse levels. Storage scales with warehouse. */

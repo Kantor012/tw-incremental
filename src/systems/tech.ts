@@ -63,16 +63,32 @@ export function techCost(nodeId: string, level: number): ResourceCost {
 }
 
 /**
- * Roll up the whole purchased tree into the GLOBAL economic multipliers. Each field
- * is `1 + Σ (effect.perLevel * level)` over the matching nodes — a plain `number`
- * factor where 1 means "no bonus". Iterates {@link TECH_NODE_IDS} (stable order) and
- * ignores any unknown key in `tech`, so the result is fully deterministic and robust
- * to a stray key. `production_mult` with no `resource` applies to all three resources.
+ * Roll up the whole purchased tree into the GLOBAL {@link TechModifiers}. Iterates
+ * {@link TECH_NODE_IDS} (stable order) and ignores any unknown / non-positive key in
+ * `tech`, so the result is fully deterministic and robust to a stray key.
+ *
+ * Per kind it sums `effect.perLevel * level` and folds it into the matching field:
+ *  - production_mult / storage_mult / pop_mult -> `1 + Σ` factor (no `resource` on a
+ *    production node = all three resources).
+ *  - cost_reduction -> `costReduction`, a FRACTION clamped to [0, 0.8].
+ *  - recruit_speed  -> `recruitSpeedFrac`, a FRACTION clamped to [0, 0.75].
+ *  - march_speed    -> `marchSpeedFrac`, a FRACTION clamped to [0, 0.75].
+ *  - attack_mult / defense_mult / loot_mult -> `1 + Σ` factor (>= 1).
+ *
+ * The fractional caps bound how far time/cost can be reduced (so a tree can never make
+ * builds free or marches instant); the multiplicative fields are unbounded but grow
+ * only via small per-level fractions in the data, kept in check by the Balance phase.
  */
 export function aggregateTechMods(tech: Record<string, number>): TechModifiers {
   const productionMult: Record<ResourceId, number> = { wood: 1, clay: 1, iron: 1 }
   let storageMult = 1
   let popMult = 1
+  let costReduction = 0
+  let recruitSpeedFrac = 0
+  let marchSpeedFrac = 0
+  let attackSum = 0
+  let defenseSum = 0
+  let lootSum = 0
 
   for (const id of TECH_NODE_IDS) {
     const level = tech[id]
@@ -95,10 +111,40 @@ export function aggregateTechMods(tech: Record<string, number>): TechModifiers {
       case 'pop_mult':
         popMult += amount
         break
+      case 'cost_reduction':
+        costReduction += amount
+        break
+      case 'recruit_speed':
+        recruitSpeedFrac += amount
+        break
+      case 'march_speed':
+        marchSpeedFrac += amount
+        break
+      case 'attack_mult':
+        attackSum += amount
+        break
+      case 'defense_mult':
+        defenseSum += amount
+        break
+      case 'loot_mult':
+        lootSum += amount
+        break
     }
   }
 
-  return { productionMult, storageMult, popMult }
+  const clamp = (x: number, lo: number, hi: number): number => (x < lo ? lo : x > hi ? hi : x)
+
+  return {
+    productionMult,
+    storageMult,
+    popMult,
+    costReduction: clamp(costReduction, 0, 0.8),
+    recruitSpeedFrac: clamp(recruitSpeedFrac, 0, 0.75),
+    marchSpeedFrac: clamp(marchSpeedFrac, 0, 0.75),
+    attackMult: 1 + attackSum,
+    defenseMult: 1 + defenseSum,
+    lootMult: 1 + lootSum,
+  }
 }
 
 /** True when every prerequisite of `nodeId` is owned at level >= 1 (or it has none). */

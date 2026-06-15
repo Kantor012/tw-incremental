@@ -1,11 +1,13 @@
 import { D, ZERO, type Decimal } from '../engine/decimal'
 import {
   RESOURCE_IDS,
+  NO_TECH_MODS,
   type Village,
   type BattleReport,
   type ResourceMap,
   type BarbarianVillage,
   type World,
+  type TechModifiers,
 } from '../engine/state'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
@@ -124,18 +126,30 @@ export function stationedUnits(v: Village): Record<UnitId, number> {
  * take the slowest, the standard TW rule.) Returns 0 for an empty army. There-and-back
  * is symmetric: the return leg reuses the snapshotted target geometry, so survivors
  * never travel home faster than they came.
+ *
+ * `mods` (M3.2) carry the aggregated tech "logistics" reduction: the base travel time
+ * is scaled by `(1 - mods.marchSpeedFrac)` (a fraction in [0, 0.75], already clamped by
+ * aggregateTechMods). Defaults to {@link NO_TECH_MODS} (frac 0 → no change), so callers
+ * that do not thread tech reproduce the pure-distance time byte-for-byte. Because
+ * outbound and return both call this with the SAME `mods`, the legs stay symmetric.
  */
 export function marchTime(
   v: Village,
   target: { x: number; y: number },
   units: Record<UnitId, number>,
+  mods: TechModifiers = NO_TECH_MODS,
 ): number {
   let slowest = 0
   for (const id of UNIT_IDS) {
     if ((units[id] ?? 0) > 0) slowest = Math.max(slowest, UNITS[id].speed)
   }
   if (slowest <= 0) return 0
-  return distance(v.x, v.y, target.x, target.y) * slowest * MARCH_TIME_SCALE
+  return (
+    distance(v.x, v.y, target.x, target.y) *
+    slowest *
+    MARCH_TIME_SCALE *
+    (1 - mods.marchSpeedFrac)
+  )
 }
 
 /**
@@ -188,6 +202,7 @@ export function sendAttack(
   _log: BattleReport[],
   targetId: string,
   units: Record<UnitId, number>,
+  mods: TechModifiers = NO_TECH_MODS,
 ): boolean {
   const target = barbarianById(world, targetId)
   if (target === undefined) return false
@@ -201,16 +216,26 @@ export function sendAttack(
     targetY: target.y,
     units: sent,
     phase: 'outbound',
-    remaining: marchTime(v, target, sent),
+    remaining: marchTime(v, target, sent, mods),
     loot: emptyLoot(),
   })
   return true
 }
 
-/** Loot actually hauled: min(carry, total camp loot), split proportionally, floored. */
-function computeLoot(survivors: Record<UnitId, number>, targetLevel: number): ResourceMap {
+/**
+ * Loot actually hauled: min(effective carry, total camp loot), split proportionally,
+ * floored. The army's raw carry capacity is scaled by `mods.lootMult` (M3.2 tech
+ * "plunder" multiplier, >= 1; {@link NO_TECH_MODS} = 1 = no bonus), so plunder perks let
+ * the SAME survivors haul more — still capped by what the camp actually holds
+ * (totalTarget), so it never invents resources. Deterministic.
+ */
+function computeLoot(
+  survivors: Record<UnitId, number>,
+  targetLevel: number,
+  mods: TechModifiers,
+): ResourceMap {
   const target = barbarianTarget(targetLevel)
-  const carry = D(armyCarry(survivors))
+  const carry = D(armyCarry(survivors)).mul(mods.lootMult)
   const totalTarget = target.loot.wood.add(target.loot.clay).add(target.loot.iron)
   if (carry.lte(0) || totalTarget.lte(0)) return emptyLoot()
   const haul: Decimal = carry.lt(totalTarget) ? carry : totalTarget
@@ -257,7 +282,11 @@ function lootSum(loot: ResourceMap): string {
 
 /**
  * Advance every in-flight march of `v` by `dtSeconds`, mutating `v` (and appending
- * any resolved-battle reports to the GLOBAL `log`). Reads `world` to resolve the
+ * any resolved-battle reports to the GLOBAL `log`). `mods` (M3.2) carry the aggregated
+ * tech bonuses applied at RESOLUTION: `mods.attackMult` scales the army's attack power
+ * (combat.ts), `mods.lootMult` the haul (computeLoot), and `mods.marchSpeedFrac` the
+ * return-leg travel time. They default to {@link NO_TECH_MODS} (all identity) so a sim /
+ * caller without tech replays byte-for-byte. Reads `world` to resolve the
  * concrete target and, since M2.4, to erode its loyalty when a noble survives a won
  * attack; returns the {@link ConquestEvent}s (target reached zero loyalty) for the
  * tick to apply AFTER every village has advanced (so a capture mutates the world
@@ -284,6 +313,7 @@ export function advanceMarches(
   world: World,
   log: BattleReport[],
   dtSeconds: number,
+  mods: TechModifiers = NO_TECH_MODS,
 ): ConquestEvent[] {
   const events: ConquestEvent[] = []
   if (!(dtSeconds > 0)) return events
@@ -308,7 +338,7 @@ export function advanceMarches(
 
       // Outbound complete → resolve the engagement.
       const target = barbarianTarget(m.targetLevel)
-      const outcome = battleOutcome(armyAttackPower(m.units), target.defensePower)
+      const outcome = battleOutcome(armyAttackPower(m.units, mods), target.defensePower)
       const sent = m.units
 
       if (!outcome.attackerWins) {
@@ -328,7 +358,7 @@ export function advanceMarches(
 
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
       const losses = applyCasualties(v, sent, survivors)
-      const loot = computeLoot(survivors, m.targetLevel)
+      const loot = computeLoot(survivors, m.targetLevel, mods)
 
       // Conquest (M2.4): a won fight whose survivors still include a noble erodes
       // the LIVE target's loyalty in the world. Look it up by the snapshotted id —
@@ -379,7 +409,7 @@ export function advanceMarches(
       // Symmetric return: travel time from the SNAPSHOTTED target coordinates back
       // to `v` for the originally dispatched stack, so survivors don't teleport home
       // faster than they came (and so a world edited mid-flight can't change it).
-      const returnTime = marchTime(v, { x: m.targetX, y: m.targetY }, sent)
+      const returnTime = marchTime(v, { x: m.targetX, y: m.targetY }, sent, mods)
       m.units = survivors
       m.loot = loot
       m.phase = 'returning'

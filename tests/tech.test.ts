@@ -57,6 +57,56 @@ describe('tech catalogue (static topology invariants)', () => {
     expect(TECH_NODE_IDS.length).toBeGreaterThanOrEqual(50)
   })
 
+  it('has grown to the M3.2 scale target (~180 nodes across 9 categories)', () => {
+    // M3.2 widens the tree from 72 (3 economic arms) to ~180 by adding 6
+    // combat/logistics/cost arms. Pin the floor so a future trim is caught.
+    expect(TECH_NODE_IDS.length).toBeGreaterThanOrEqual(170)
+    const cats = new Set(TECH_NODE_IDS.map((id) => TECH_NODES[id].category))
+    expect(cats).toEqual(
+      new Set([
+        'economy',
+        'storage',
+        'settlement',
+        'military',
+        'fortification',
+        'logistics',
+        'plunder',
+        'construction',
+        'training',
+      ]),
+    )
+  })
+
+  it('every new M3.2 effect kind is present in the catalogue', () => {
+    const kinds = new Set(TECH_NODE_IDS.map((id) => TECH_NODES[id].effect.kind))
+    for (const kind of [
+      'cost_reduction',
+      'recruit_speed',
+      'march_speed',
+      'attack_mult',
+      'defense_mult',
+      'loot_mult',
+    ] as const) {
+      expect(kinds.has(kind)).toBe(true)
+    }
+  })
+
+  it('maps each M3.2 category to exactly its one effect kind', () => {
+    const categoryEffect: Record<string, string> = {
+      military: 'attack_mult',
+      fortification: 'defense_mult',
+      logistics: 'march_speed',
+      plunder: 'loot_mult',
+      construction: 'cost_reduction',
+      training: 'recruit_speed',
+    }
+    for (const id of TECH_NODE_IDS) {
+      const node = TECH_NODES[id]
+      const expected = categoryEffect[node.category]
+      if (expected) expect(node.effect.kind).toBe(expected)
+    }
+  })
+
   it('the prerequisite graph is an acyclic DAG', () => {
     expect(techHasCycle()).toBe(false)
   })
@@ -94,8 +144,24 @@ describe('tech catalogue (static topology invariants)', () => {
     }
     const fromData = TECH_NODE_IDS.filter((id) => TECH_NODES[id].prerequisites.length === 0)
     expect([...TECH_ROOTS].sort()).toEqual(fromData.sort())
-    const cats = new Set(TECH_ROOTS.map((id) => TECH_NODES[id].category))
-    expect(cats).toEqual(new Set(['economy', 'storage', 'settlement']))
+    // Since M3.2 there are nine arms; the contract is exactly ONE root per category.
+    const cats = TECH_ROOTS.map((id) => TECH_NODES[id].category)
+    expect(new Set(cats)).toEqual(
+      new Set([
+        'economy',
+        'storage',
+        'settlement',
+        'military',
+        'fortification',
+        'logistics',
+        'plunder',
+        'construction',
+        'training',
+      ]),
+    )
+    // one-per-category ⇒ no duplicate categories among the roots.
+    expect(cats.length).toBe(new Set(cats).size)
+    expect(TECH_ROOTS.length).toBe(9)
   })
 
   it('every prerequisite id points at a real node', () => {
@@ -212,6 +278,91 @@ describe('aggregateTechMods', () => {
 
   it('ignores unknown / zeroed keys (robust + deterministic)', () => {
     expect(aggregateTechMods({ phantom: 5, eco_root: 0 })).toEqual(NO_TECH_MODS)
+  })
+})
+
+describe('aggregateTechMods — M3.2 combat / logistics / cost fields', () => {
+  it('folds cost_reduction into a fraction (construction arm), economy untouched', () => {
+    // con_root: cost_reduction perLevel 0.005 → 0.005 * 4 = 0.02.
+    const mods = aggregateTechMods({ con_root: 4 })
+    expect(mods.costReduction).toBeCloseTo(0.02, 9)
+    // The other M3.2 fractions stay at 0, the multipliers at 1, economy at identity.
+    expect(mods.recruitSpeedFrac).toBe(0)
+    expect(mods.marchSpeedFrac).toBe(0)
+    expect(mods.attackMult).toBe(1)
+    expect(mods.defenseMult).toBe(1)
+    expect(mods.lootMult).toBe(1)
+    expect(mods.productionMult).toEqual({ wood: 1, clay: 1, iron: 1 })
+    expect(mods.storageMult).toBe(1)
+    expect(mods.popMult).toBe(1)
+  })
+
+  it('folds recruit_speed into recruitSpeedFrac (training arm)', () => {
+    // tra_root: recruit_speed perLevel 0.005 → 0.005 * 6 = 0.03.
+    const mods = aggregateTechMods({ tra_root: 6 })
+    expect(mods.recruitSpeedFrac).toBeCloseTo(0.03, 9)
+    expect(mods.costReduction).toBe(0)
+    expect(mods.marchSpeedFrac).toBe(0)
+  })
+
+  it('folds march_speed into marchSpeedFrac (logistics arm)', () => {
+    // log_root: march_speed perLevel 0.005 → 0.005 * 8 = 0.04.
+    const mods = aggregateTechMods({ log_root: 8 })
+    expect(mods.marchSpeedFrac).toBeCloseTo(0.04, 9)
+    expect(mods.recruitSpeedFrac).toBe(0)
+  })
+
+  it('folds attack_mult / defense_mult / loot_mult into 1 + Σ multipliers', () => {
+    // mil_core_n: attack_mult perLevel 0.03 → 1 + 0.03*2 = 1.06.
+    expect(aggregateTechMods({ mil_core_n: 2 }).attackMult).toBeCloseTo(1.06, 9)
+    // fort_root: defense_mult perLevel 0.005 → 1 + 0.005*4 = 1.02.
+    expect(aggregateTechMods({ fort_root: 4 }).defenseMult).toBeCloseTo(1.02, 9)
+    // plun_core_n: loot_mult perLevel 0.03 → 1 + 0.03*2 = 1.06.
+    expect(aggregateTechMods({ plun_core_n: 2 }).lootMult).toBeCloseTo(1.06, 9)
+    // each multiplier leaves the other two at identity.
+    const atk = aggregateTechMods({ mil_core_n: 2 })
+    expect(atk.defenseMult).toBe(1)
+    expect(atk.lootMult).toBe(1)
+  })
+
+  it('clamps cost_reduction to [0, 0.8]', () => {
+    // Over-level the node well past its maxLevel to drive the raw sum above the cap.
+    // 0.03 * 1000 = 30, clamped to the 0.8 ceiling.
+    expect(aggregateTechMods({ con_core_n: 1000 }).costReduction).toBe(0.8)
+  })
+
+  it('clamps recruitSpeedFrac and marchSpeedFrac to [0, 0.75]', () => {
+    expect(aggregateTechMods({ tra_core_n: 1000 }).recruitSpeedFrac).toBe(0.75)
+    expect(aggregateTechMods({ log_core_n: 1000 }).marchSpeedFrac).toBe(0.75)
+  })
+
+  it('leaves the M3.2 fields at their identity for a purely economic tree', () => {
+    const mods = aggregateTechMods({ eco_root: 3, sto_root: 2, set_root: 1 })
+    expect(mods.costReduction).toBe(0)
+    expect(mods.recruitSpeedFrac).toBe(0)
+    expect(mods.marchSpeedFrac).toBe(0)
+    expect(mods.attackMult).toBe(1)
+    expect(mods.defenseMult).toBe(1)
+    expect(mods.lootMult).toBe(1)
+  })
+
+  it('composes every kind independently in one pass', () => {
+    const mods = aggregateTechMods({
+      eco_root: 1, // +0.02 production (all)
+      con_root: 2, // +0.01 cost reduction
+      tra_root: 2, // +0.01 recruit frac
+      log_root: 2, // +0.01 march frac
+      mil_root: 2, // +0.01 attack
+      fort_root: 2, // +0.01 defense
+      plun_root: 2, // +0.01 loot
+    })
+    expect(mods.productionMult.wood).toBeCloseTo(1.02, 9)
+    expect(mods.costReduction).toBeCloseTo(0.01, 9)
+    expect(mods.recruitSpeedFrac).toBeCloseTo(0.01, 9)
+    expect(mods.marchSpeedFrac).toBeCloseTo(0.01, 9)
+    expect(mods.attackMult).toBeCloseTo(1.01, 9)
+    expect(mods.defenseMult).toBeCloseTo(1.01, 9)
+    expect(mods.lootMult).toBeCloseTo(1.01, 9)
   })
 })
 
@@ -361,6 +512,17 @@ describe('purchaseTech', () => {
     expect(bought).toBe(TECH_NODES.eco_root.maxLevel)
     expect(nodeLevel(s, 'eco_root')).toBe(TECH_NODES.eco_root.maxLevel)
     expect(canPurchaseTech(s, 'eco_root').reason).toBe('Poziom maksymalny')
+  })
+
+  it('buys an M3.2 combat-arm root and folds it into the aggregated mods', () => {
+    const s = richState()
+    // mil_root is a no-prerequisite root → available immediately from the global pool.
+    expect(nodeAvailable(s, 'mil_root')).toBe(true)
+    expect(purchaseTech(s, 'mil_root')).toBe(true)
+    expect(nodeLevel(s, 'mil_root')).toBe(1)
+    // The stored tech map drives the combat multiplier (consumed by combat.ts).
+    const mods = aggregateTechMods(s.tech)
+    expect(mods.attackMult).toBeCloseTo(1 + TECH_NODES.mil_root.effect.perLevel, 9)
   })
 })
 

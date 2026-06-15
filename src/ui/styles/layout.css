@@ -1009,6 +1009,16 @@ html {
   transform: rotate(45deg);
 }
 
+/* Legenda KATEGORII (ramion) — własny rząd; każda próbka niesie odcień gałęzi. */
+.tech-legend--cat {
+  margin-top: calc(-1 * var(--space-1));
+}
+
+.tech-legend-swatch.is-cat {
+  background-color: var(--cat, var(--muted));
+  border-color: var(--cat, var(--border));
+}
+
 /* ---- Wspólna pula surowców (waluta zakupu węzłów) --------------------- */
 .tech-pool {
   display: flex;
@@ -1028,6 +1038,32 @@ html {
   align-items: center;
   gap: var(--space-1);
   color: var(--text);
+}
+
+/* ---- Pasek szybkiego skoku do gałęzi (nawigacja po ramionach) --------- */
+.tech-jump {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.tech-jump-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  padding: var(--space-1) var(--space-2);
+  min-height: 36px;
+}
+
+.tech-jump-swatch {
+  flex: none;
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: var(--radius-pill);
+  background-color: var(--cat, var(--muted));
+  border: 1px solid var(--cat, var(--border));
 }
 
 /* ---- Obszar konstelacji (pozycjonuje SVG, kontrolki i kartę detali) --- */
@@ -1071,17 +1107,20 @@ html {
  * krawędź (jej prereq jest wykupiony) świeci akcentem — dodatkowy sygnał ścieżki. */
 .tech-edge {
   fill: none;
-  stroke: var(--border);
-  stroke-opacity: 0.4;
+  stroke: var(--cat, var(--border));
+  stroke-opacity: 0.32;
   stroke-width: 1.5;
   pointer-events: none;
   transition: stroke var(--dur-fast) var(--ease),
-    stroke-opacity var(--dur-fast) var(--ease);
+    stroke-opacity var(--dur-fast) var(--ease),
+    stroke-width var(--dur-fast) var(--ease);
 }
 
+/* Odblokowana krawędź (jej prereq jest wykupiony) — ta sama barwa ramienia, lecz
+ * jaśniejsza i grubsza: sygnał ścieżki niesie JASNOŚĆ/GRUBOŚĆ, nie zmiana koloru. */
 .tech-edge.is-unlocked {
-  stroke: var(--accent);
-  stroke-opacity: 0.5;
+  stroke-opacity: 0.85;
+  stroke-width: 2.2;
 }
 
 /* ---- Węzły (SVG <g>: figura + przezroczyste pole dotyku + <title>) ---- */
@@ -1114,6 +1153,37 @@ html {
   fill: var(--bg);
   stroke: none;
   opacity: 0.85;
+  pointer-events: none;
+}
+
+/* Zewnętrzny pierścień KATEGORII — halo w barwie ramienia (--cat), niosące tożsamość
+ * gałęzi NIEZALEŻNIE od stanu (stan steruje wypełnieniem figury). Statyczny. */
+.tech-node-cat {
+  fill: none;
+  stroke: var(--cat, var(--border));
+  stroke-width: 2;
+  opacity: 0.8;
+  pointer-events: none;
+}
+
+.tech-node--locked .tech-node-cat {
+  opacity: 0.5;
+}
+
+/* Etykieta ramienia rysowana na płótnie — nazwa gałęzi w jej odcieniu (--cat). */
+.tech-arm-label {
+  fill: var(--cat, var(--muted));
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  paint-order: stroke;
+  stroke: var(--bg);
+  stroke-width: 0.14em;
+  opacity: 0.9;
+  pointer-events: none;
+  user-select: none;
+}
+
+.tech-arm-labels {
   pointer-events: none;
 }
 

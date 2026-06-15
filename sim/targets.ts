@@ -154,12 +154,14 @@ export const TARGETS: BalanceTargets = {
   // under the village cap — see sim/bot.chooseConquest).
   minVillagesConquered: 1,
 
-  // M3.1: tech online. The global passive tree must be a reachable sink the bot buys
-  // into from its surplus. A matured empire buys the ENTIRE starter tree over the budget
-  // (measured 507 levels = every one of the 72 nodes maxed; production uplift ≈ x5 over
-  // the no-tech base), so this floor sits well below that — passing normal play but
-  // tripping a warning if a cost/heuristic regression leaves the tree mostly unbought.
-  // (The starter tree fully maxing by end-game is expected for M3.1; M3.2 adds breadth.)
-  // See CHANGELOG "Balance" for the before/after.
-  minTechPurchases: 200,
+  // M3.2: tech online, WIDENED to ~180 nodes across 9 categories (economy/storage/
+  // settlement + the new military/fortification/logistics/plunder/construction/training
+  // combat-and-logistics branches). The global passive tree must be a reachable sink the
+  // bot buys into from its surplus, now with far more breadth to buy. A matured empire buys
+  // deep into the widened tree over the budget (the combat/cost/march/recruit perks feed
+  // back into a faster economy, so purchases compound), so this floor is RAISED from the
+  // M3.1 value of 200 to 300 — still well below a healthy run's measured total, passing
+  // normal play but tripping a warning if a cost/heuristic regression leaves the widened
+  // tree mostly unbought. See CHANGELOG "Balance" for the before/after.
+  minTechPurchases: 300,
 }

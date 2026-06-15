@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { D } from '../src/engine/decimal'
-import { createVillage, recomputeVillageDerived, type Village } from '../src/engine/state'
+import {
+  createVillage,
+  recomputeVillageDerived,
+  NO_TECH_MODS,
+  type Village,
+  type TechModifiers,
+} from '../src/engine/state'
 import {
   buildingCost,
   build,
@@ -22,6 +28,11 @@ function rich(): Village {
   const v = createVillage('v0', 'Stolica')
   v.resources = { wood: D(1e9), clay: D(1e9), iron: D(1e9) }
   return v
+}
+
+/** NO_TECH_MODS with selected fields overridden — a terse TechModifiers builder. */
+function mods(partial: Partial<TechModifiers>): TechModifiers {
+  return { ...NO_TECH_MODS, ...partial }
 }
 
 describe('buildingCost', () => {
@@ -48,6 +59,24 @@ describe('buildingCost', () => {
     expect(reducedCost.clay.lt(baseCost.clay)).toBe(true)
     expect(reducedCost.iron.lt(baseCost.iron)).toBe(true)
   })
+
+  it('tech costReduction makes the next level cheaper (and the default mods do not)', () => {
+    const v = rich()
+    v.buildings.hq = 0 // isolate the tech term (building factor 1)
+    const base = buildingCost(v, 'sawmill')
+    const cheaper = buildingCost(v, 'sawmill', mods({ costReduction: 0.5 }))
+    expect(cheaper.wood.lt(base.wood)).toBe(true)
+    expect(cheaper.clay.lt(base.clay)).toBe(true)
+    expect(cheaper.iron.lt(base.iron)).toBe(true)
+    // The discounted cost is the un-rounded formula (baseCost * growth) scaled by the
+    // 0.5 factor, then ceiled — verified against the raw inputs (no double-ceil).
+    const def = BUILDINGS.sawmill
+    const growth = D(def.costFactor).pow(v.buildings.sawmill)
+    const expected = D(def.baseCost.wood).mul(growth).mul(D(0.5)).ceil()
+    expect(cheaper.wood.toString()).toBe(expected.toString())
+    // Passing NO_TECH_MODS explicitly equals the no-arg call.
+    expect(buildingCost(v, 'sawmill', NO_TECH_MODS).wood.toString()).toBe(base.wood.toString())
+  })
 })
 
 describe('costReduction', () => {
@@ -63,6 +92,28 @@ describe('costReduction', () => {
     const v = createVillage('v0', 'Stolica')
     v.buildings.hq = BUILDINGS.hq.maxLevel // 0.96^20 ~= 0.44, below the floor
     expect(costReduction(v).toString()).toBe('0.5')
+  })
+
+  it('NO_TECH_MODS leaves the pure-building factor unchanged (default == explicit)', () => {
+    const v = createVillage('v0', 'Stolica')
+    v.buildings.hq = 5
+    expect(costReduction(v, NO_TECH_MODS).toString()).toBe(costReduction(v).toString())
+  })
+
+  it('folds the tech costReduction fraction in ADDITIVELY on the reduction side', () => {
+    const v = createVillage('v0', 'Stolica')
+    v.buildings.hq = 0 // isolate the tech term: building factor is exactly 1
+    // reduction = (1 - 1) + 0.5 = 0.5 → multiplier 0.5.
+    expect(costReduction(v, mods({ costReduction: 0.5 })).toString()).toBe('0.5')
+    // a 0.2 fraction with no HQ → multiplier 0.8.
+    expect(costReduction(v, mods({ costReduction: 0.2 })).toString()).toBe('0.8')
+  })
+
+  it('clamps the COMBINED building+tech reduction to 0.9 (multiplier floor 0.1)', () => {
+    const v = createVillage('v0', 'Stolica')
+    v.buildings.hq = BUILDINGS.hq.maxLevel // building factor floored at 0.5 → 0.5 reduction
+    // 0.5 (building) + 0.8 (tech) = 1.3 reduction, clamped to 0.9 → multiplier 0.1.
+    expect(costReduction(v, mods({ costReduction: 0.8 })).toString()).toBe('0.1')
   })
 })
 
@@ -115,6 +166,20 @@ describe('build', () => {
     expect(v.buildings.sawmill).toBe(max)
     expect(v.resources.wood.toString()).toBe(wood.toString())
   })
+
+  it('charges the tech-discounted cost when mods carry a costReduction', () => {
+    const v = rich()
+    v.buildings.hq = 0 // isolate the tech term
+    const m = mods({ costReduction: 0.5 })
+    const level = v.buildings.sawmill
+    const cost = buildingCost(v, 'sawmill', m)
+    const beforeWood = v.resources.wood
+
+    // The same mods must drive the spend AND the post-build recompute.
+    expect(build(v, 'sawmill', m)).toBe(true)
+    expect(v.buildings.sawmill).toBe(level + 1)
+    expect(v.resources.wood.toString()).toBe(beforeWood.sub(cost.wood).toString())
+  })
 })
 
 describe('recomputeVillageDerived', () => {
@@ -161,6 +226,17 @@ describe('nextCostAffordable', () => {
     const maxedInfo = nextCostAffordable(v, 'sawmill')
     expect(maxedInfo.maxed).toBe(true)
     expect(maxedInfo.affordable).toBe(false)
+  })
+
+  it('threads the tech costReduction into the reported cost', () => {
+    const v = rich()
+    v.buildings.hq = 0 // isolate the tech term
+    const base = nextCostAffordable(v, 'sawmill')
+    const discounted = nextCostAffordable(v, 'sawmill', mods({ costReduction: 0.5 }))
+    expect(discounted.cost.wood.lt(base.cost.wood)).toBe(true)
+    expect(discounted.cost.wood.toString()).toBe(
+      buildingCost(v, 'sawmill', mods({ costReduction: 0.5 })).wood.toString(),
+    )
   })
 })
 

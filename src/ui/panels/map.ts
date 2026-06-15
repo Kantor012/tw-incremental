@@ -1,4 +1,4 @@
-import type { Village, BarbarianVillage, ResourceMap } from '../../engine/state'
+import type { Village, BarbarianVillage, ResourceMap, TechModifiers } from '../../engine/state'
 import { RESOURCE_IDS } from '../../engine/state'
 import { D, type Decimal } from '../../engine/decimal'
 import { formatNumber, formatInt, formatTime } from '../../engine/format'
@@ -15,6 +15,7 @@ import { canFound } from '../../systems/villages'
 import { marchTime, stationedUnits, canAttack } from '../../systems/marches'
 import { unitUnlocked } from '../../systems/recruitment'
 import { armyAttackPower, armyCarry, battleOutcome } from '../../systems/combat'
+import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
 import { h, svg, SVG_NS, unitIcon, shieldIcon } from '../dom'
 // Aliased: the detail card already has a local element named `conquestHint`.
@@ -727,7 +728,8 @@ export function createMapPanel(ctx: UiCtx): Panel {
       return
     }
     const target = barbarianTarget(barb.level)
-    const outcome = battleOutcome(armyAttackPower(army), target.defensePower)
+    const mods = aggregateTechMods(ctx.store.state.tech)
+    const outcome = battleOutcome(armyAttackPower(army, mods), target.defensePower)
     if (
       !outcome.attackerWins &&
       !window.confirm(
@@ -981,12 +983,14 @@ export function createMapPanel(ctx: UiCtx): Panel {
     }
   }
 
-  // Per-frame: slide each march marker to its current progress along its line.
-  const updateMarchMarkers = (v: Village): void => {
+  // Per-frame: slide each march marker to its current progress along its line. Takes the
+  // aggregated tech mods so the denominator (total travel time) matches the tech-discounted
+  // time the march was actually dispatched with — otherwise the marker progress would drift.
+  const updateMarchMarkers = (v: Village, mods: TechModifiers): void => {
     for (let i = 0; i < marchRefs.length && i < v.marches.length; i++) {
       const ref = marchRefs[i]
       const m = v.marches[i]
-      const total = marchTime(v, { x: m.targetX, y: m.targetY }, m.units)
+      const total = marchTime(v, { x: m.targetX, y: m.targetY }, m.units, mods)
       const prog = total > 0 ? Math.max(0, Math.min(1, 1 - m.remaining / total)) : 1
       ref.marker.setAttribute('cx', fmt2(ref.fromX + (ref.toX - ref.fromX) * prog))
       ref.marker.setAttribute('cy', fmt2(ref.fromY + (ref.toY - ref.fromY) * prog))
@@ -1019,12 +1023,15 @@ export function createMapPanel(ctx: UiCtx): Panel {
   const update = (): void => {
     const v = activeVillage()
     const world = ctx.store.state.world
+    // Account-wide tech mods, computed once per frame and threaded into every display
+    // estimate (march time, attack forecast) so what the map shows matches a dispatch.
+    const mods = aggregateTechMods(ctx.store.state.tech)
 
     rebuildBarbs()
     rebuildPlayers()
     refreshAria(v)
     rebuildMarches(v)
-    updateMarchMarkers(v)
+    updateMarchMarkers(v, mods)
     applyView()
 
     // Drop a selection whose target no longer exists (e.g. after a save import).
@@ -1093,7 +1100,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
     }
 
     distVal.textContent = formatNumber(distance(v.x, v.y, selected.x, selected.y), 1) + ' pól'
-    timeVal.textContent = composed > 0 ? formatTime(marchTime(v, selected, army)) : '—'
+    timeVal.textContent = composed > 0 ? formatTime(marchTime(v, selected, army, mods)) : '—'
 
     // Loyalty (live: regenerates every tick) + conquest hint. The numeric stat and
     // the bar both carry the value; the hint adapts to whether the active village can
@@ -1106,7 +1113,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
     conquestHint.textContent = conquestHintText(unitUnlocked(v, 'noble'))
 
     if (composed > 0) {
-      const oc = battleOutcome(armyAttackPower(army), target.defensePower)
+      const oc = battleOutcome(armyAttackPower(army, mods), target.defensePower)
       const pct = Math.round(oc.attackerLossFrac * 100)
       setForecast(oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka')
       forecast.classList.toggle('forecast-win', oc.attackerWins)

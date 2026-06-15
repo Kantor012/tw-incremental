@@ -1,4 +1,4 @@
-import type { Village, BarbarianVillage } from '../../engine/state'
+import type { Village, BarbarianVillage, TechModifiers } from '../../engine/state'
 import { D } from '../../engine/decimal'
 import { formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
@@ -8,6 +8,7 @@ import { stationedUnits, marchTime, canAttack } from '../../systems/marches'
 import { targetsByDistance, distance, barbarianById } from '../../systems/world'
 import { raidPower } from '../../systems/raids'
 import { barracksUnlocked, unitUnlocked } from '../../systems/recruitment'
+import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon } from '../dom'
 import { conquestHint } from '../conquestCopy'
@@ -299,7 +300,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
           update()
           return
         }
-        const outcome = battleOutcome(armyAttackPower(army), barbarianTarget(barb.level).defensePower)
+        const outcome = battleOutcome(
+          armyAttackPower(army, aggregateTechMods(ctx.store.state.tech)),
+          barbarianTarget(barb.level).defensePower,
+        )
         // Guard against accidentally throwing the whole army at a camp it will lose to.
         if (
           !outcome.attackerWins &&
@@ -343,9 +347,14 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
    * Refresh the army-dependent fields of every target card from the composed army.
    * Only called when the army (or barracks unlock) changes — never on a plain tick.
    */
-  const pokeTargets = (v: Village, army: Record<UnitId, number>, composed: number): void => {
+  const pokeTargets = (
+    v: Village,
+    army: Record<UnitId, number>,
+    composed: number,
+    mods: TechModifiers,
+  ): void => {
     const carry = armyCarry(army)
-    const atkPow = armyAttackPower(army)
+    const atkPow = armyAttackPower(army, mods)
     for (const card of targetCards) {
       const lvl = card.barb.level
       const total = campTotalLoot(lvl)
@@ -354,7 +363,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         const cd = D(carry)
         const haul = cd.lt(total) ? cd : total
         card.loot.textContent = formatInt(haul)
-        card.march.textContent = formatTime(marchTime(v, card.barb, army))
+        card.march.textContent = formatTime(marchTime(v, card.barb, army, mods))
         const oc = battleOutcome(atkPow, barbarianTarget(lvl).defensePower)
         const pct = Math.round(oc.attackerLossFrac * 100)
         card.forecast.textContent = oc.attackerWins ? '✓ wygrana · straty ~' + pct + '%' : '✗ porażka'
@@ -442,7 +451,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     const army = readArmy(v)
     const composed = armySize(army)
     const carry = armyCarry(army)
-    const atkPow = armyAttackPower(army)
+    // Account-wide tech mods threaded into every power/time estimate shown here and in
+    // the per-target cards (pokeTargets), so the display matches what a dispatch does.
+    const mods = aggregateTechMods(ctx.store.state.tech)
+    const atkPow = armyAttackPower(army, mods)
 
     let homeSum = 0
     for (const id of UNIT_IDS) homeSum += home[id]
@@ -490,7 +502,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     const armySig = v.id + ':' + unlocked + ':' + UNIT_IDS.map((id) => army[id]).join(',')
     if (armySig !== lastArmySig) {
       lastArmySig = armySig
-      pokeTargets(v, army, composed)
+      pokeTargets(v, army, composed, mods)
     }
     // Loyalty changes every tick (regen / noble hits), independent of the army — so it
     // gets its own per-tick, change-gated refresh rather than riding the army poke.
@@ -552,7 +564,12 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
 
     // ---- Defence (incoming raids) ----
     raidEtaVal.textContent = formatTime(v.raidTimer)
-    const homeDef = armyDefensePower(home)
+    // Defence MUST be read with the same tech mods the raid engine defends with
+    // (raids.ts: battleOutcome(power, armyDefensePower(home, mods))), or the shown
+    // "Obrona domowa" stat, the defence-vs-threat bar and the verdict would understate
+    // real defence once Fortyfikacje (defense_mult) is bought and could contradict the
+    // actual raid outcome. The threat (raidPower) stays on NO_TECH_MODS, mirroring raids.ts.
+    const homeDef = armyDefensePower(home, mods)
     const threat = raidPower(v)
     homeDefVal.textContent = formatInt(homeDef)
     raidPowerVal.textContent = formatInt(Math.round(threat))

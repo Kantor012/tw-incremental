@@ -3,8 +3,10 @@ import { D, type Decimal } from '../src/engine/decimal'
 import {
   createInitialState,
   recomputeVillageDerived,
+  NO_TECH_MODS,
   type GameState,
   type Village,
+  type TechModifiers,
 } from '../src/engine/state'
 import {
   barracksUnlocked,
@@ -53,6 +55,11 @@ function armed(seed = 'rec'): GameState {
 /** Per-unit training time at the village's current barracks level (the snapshot). */
 function perUnit(v: Village, unitId: 'spearman' | 'swordsman' | 'axeman'): number {
   return UNITS[unitId].recruitSeconds * recruitSpeedMult(v)
+}
+
+/** NO_TECH_MODS with selected fields overridden — a terse TechModifiers builder. */
+function mods(partial: Partial<TechModifiers>): TechModifiers {
+  return { ...NO_TECH_MODS, ...partial }
 }
 
 describe('recruitment gate (canRecruit / recruit)', () => {
@@ -243,6 +250,46 @@ describe('recruit_speed (barracks upgrades)', () => {
     const fresh = v.recruitQueue[1].perUnitSeconds
     expect(fresh).toBeCloseTo(80 * 0.9025)
     expect(fresh).toBeLessThan(snapshot)
+  })
+})
+
+describe('recruit_speed (tech training branch, M3.2)', () => {
+  it('recruitSpeedMult folds the tech recruitSpeedFrac in as a final (1 - frac)', () => {
+    const v = cap(armed()) // barracks lvl 1 → building mult 0.95
+    expect(recruitSpeedMult(v)).toBeCloseTo(0.95)
+    expect(recruitSpeedMult(v, NO_TECH_MODS)).toBeCloseTo(0.95) // default == explicit
+    // 0.95 * (1 - 0.2) = 0.76.
+    expect(recruitSpeedMult(v, mods({ recruitSpeedFrac: 0.2 }))).toBeCloseTo(0.76)
+    expect(recruitSpeedMult(v, mods({ recruitSpeedFrac: 0.2 }))).toBeLessThan(recruitSpeedMult(v))
+  })
+
+  it('applies AFTER the barracks floor, so it can shorten training below 0.25', () => {
+    const v = cap(armed())
+    v.buildings.barracks = 100 // building mult clamped to the 0.25 floor
+    expect(recruitSpeedMult(v)).toBe(0.25)
+    // The tech fraction is a separate path: 0.25 * (1 - 0.5) = 0.125 < the floor.
+    expect(recruitSpeedMult(v, mods({ recruitSpeedFrac: 0.5 }))).toBeCloseTo(0.125)
+  })
+
+  it('recruit() snapshots the tech-accelerated per-unit time', () => {
+    const v = cap(armed())
+    const m = mods({ recruitSpeedFrac: 0.5 })
+    expect(recruit(v, 'spearman', 1, m)).toBe(true)
+    const order = v.recruitQueue[0]
+    // 80 base * 0.95 (barracks) * 0.5 (tech) = 38.
+    expect(order.perUnitSeconds).toBeCloseTo(80 * recruitSpeedMult(v, m))
+    expect(order.perUnitSeconds).toBeCloseTo(38)
+    // Strictly faster than the building-only snapshot (80 * 0.95 = 76).
+    expect(order.perUnitSeconds).toBeLessThan(80 * recruitSpeedMult(v))
+  })
+
+  it('a tech-accelerated order trains a unit sooner on the shared clock', () => {
+    const v = cap(armed())
+    recruit(v, 'spearman', 1, mods({ recruitSpeedFrac: 0.5 })) // perUnit 38
+    // 38s elapses → the unit is minted; the building-only order (76s) would not be.
+    advanceRecruitment(v, 38)
+    expect(v.units.spearman).toBe(1)
+    expect(v.recruitQueue.length).toBe(0)
   })
 })
 

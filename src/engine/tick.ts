@@ -5,6 +5,7 @@ import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
 import { advanceRaids } from '../systems/raids'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
+import { aggregateTechMods } from '../systems/tech'
 
 /**
  * Fixed simulation step shared by the live loop and offline catch-up: 20 ticks
@@ -55,6 +56,14 @@ function subStep(state: GameState, dt: number): void {
   // player village would resize villageOrder under the loop. Typed off advanceMarches'
   // return so this stays decoupled from where ConquestEvent is declared.
   const conquests: ReturnType<typeof advanceMarches> = []
+  // Tech modifiers are a pure function of the GLOBAL tech ledger, so they are the same
+  // for every village this sub-step — aggregate ONCE here (not per village) to keep the
+  // hot loop cheap and the result byte-identical regardless of how many villages exist.
+  // Threaded into the combat advancers (marches/raids) where attack/defense/march-speed
+  // /loot multipliers apply; recruitment is intentionally NOT passed mods — it snapshots
+  // its per-unit duration (incl. the recruit-speed fraction) at queue time, so reading
+  // mods again mid-flight would double-apply.
+  const mods = aggregateTechMods(state.tech)
   for (const id of state.villageOrder) {
     const v = state.villages[id]
     for (const r of RESOURCE_IDS) {
@@ -71,8 +80,8 @@ function subStep(state: GameState, dt: number): void {
     // the global world is passed so marches resolve targets and erode loyalty. Marches
     // return any captures earned this step — deferred to after the loop.
     advanceRecruitment(v, dt)
-    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt))
-    advanceRaids(v, state.battleLog, dt)
+    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt, mods))
+    advanceRaids(v, state.battleLog, dt, mods)
   }
   // Apply captures once, in deterministic collection order. applyConquest no-ops on a
   // barbId already removed this sub-step (two armies both flooring the same target), so

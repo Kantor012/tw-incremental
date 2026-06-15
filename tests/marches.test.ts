@@ -3,9 +3,11 @@ import { D } from '../src/engine/decimal'
 import {
   createInitialState,
   recomputeDerived,
+  NO_TECH_MODS,
   type GameState,
   type Village,
   type BarbarianVillage,
+  type TechModifiers,
 } from '../src/engine/state'
 import { type UnitId } from '../src/content/units'
 import {
@@ -28,6 +30,11 @@ function army(spearman = 0, swordsman = 0, axeman = 0, noble = 0): Record<UnitId
 /** A barbarian village descriptor at a chosen tier and map position (full loyalty). */
 function barb(id: string, level: number, x: number, y: number): BarbarianVillage {
   return { id, x, y, level, name: `Wioska barbarzyńska (poz. ${level})`, loyalty: 100 }
+}
+
+/** NO_TECH_MODS with selected fields overridden — a terse TechModifiers builder. */
+function mods(partial: Partial<TechModifiers>): TechModifiers {
+  return { ...NO_TECH_MODS, ...partial }
 }
 
 /**
@@ -185,6 +192,98 @@ describe('advanceMarches — full attack cycle', () => {
     advanceMarches(v, s.world, s.battleLog, t) // return + deliver
     expect(v.resources.wood.toString()).toBe(v.storageCap.toString())
     expect(v.resources.wood.lte(v.storageCap)).toBe(true)
+  })
+})
+
+describe('tech mods (M3.2) — logistics / plunder / military through a march', () => {
+  it('marchTime is shortened by mods.marchSpeedFrac (and frac 0 is the base)', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 5)
+    const target = barbarianById(s.world, 'b0')!
+    const base = marchTime(v, target, army(0, 0, 5)) // distance 3 * axeman speed 18 = 54
+    expect(base).toBe(54)
+    expect(marchTime(v, target, army(0, 0, 5), mods({ marchSpeedFrac: 0 }))).toBe(base)
+    expect(marchTime(v, target, army(0, 0, 5), mods({ marchSpeedFrac: 0.25 }))).toBeCloseTo(54 * 0.75)
+    expect(marchTime(v, target, army(0, 0, 5), mods({ marchSpeedFrac: 0.5 }))).toBeCloseTo(27)
+  })
+
+  it('sendAttack snapshots a shortened outbound remaining when march speed is bought', () => {
+    const s = armed()
+    const v = s.villages.v0
+    v.units = army(0, 0, 5)
+    expect(sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5), mods({ marchSpeedFrac: 0.5 }))).toBe(
+      true,
+    )
+    // 54 base * (1 - 0.5) = 27.
+    expect(v.marches[0].remaining).toBeCloseTo(27)
+  })
+
+  it('loot scales with mods.lootMult, capped at the camp total', () => {
+    // Haul a full attack cycle and read the delivered loot for a given lootMult.
+    // attackMult stays 1 so survivors (and therefore raw carry) are identical across runs.
+    function deliveredWood(lootMult: number): string {
+      const s = armed()
+      const v = s.villages.v0
+      v.units = army(0, 0, 5)
+      const target = barbarianById(s.world, 'b0')!
+      const m = mods({ lootMult })
+      sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 5), m)
+      const t = marchTime(v, target, army(0, 0, 5), m) // 54 (marchSpeedFrac 0)
+      advanceMarches(v, s.world, s.battleLog, t, m) // battle resolves
+      advanceMarches(v, s.world, s.battleLog, t, m) // return + deliver
+      return v.resources.wood.toString()
+    }
+    // Baseline (lootMult 1): 4 surviving axemen carry 40, split over a 600-total camp →
+    // floor(40 * 200/600) = 13 each, delivered onto the starting 50 → 63 (pins the M3.1 number).
+    expect(deliveredWood(1)).toBe('63')
+    // lootMult 2: carry 80 → floor(80 * 200/600) = 26 → 76 delivered (strictly more).
+    expect(deliveredWood(2)).toBe('76')
+    // A huge multiplier is capped at what the camp actually holds (200/resource) → 250.
+    expect(deliveredWood(100)).toBe('250')
+  })
+
+  it('mods.attackMult can turn a losing attack into a win with survivors (full cycle)', () => {
+    // 3 spearmen (attack 30) vs a lvl-1 wall (def 30): a tie → loss without tech.
+    const lose = armed()
+    const lv = lose.villages.v0
+    lv.units = army(3, 0, 0)
+    const target = barbarianById(lose.world, 'b0')!
+    const t = marchTime(lv, target, army(3, 0, 0)) // spearman speed 18, distance 3 → 54
+    sendAttack(lv, lose.world, lose.battleLog, 'b0', army(3, 0, 0))
+    advanceMarches(lv, lose.world, lose.battleLog, t) // no mods → loss
+    expect(lose.battleLog[0]).toMatchObject({ kind: 'attack', won: false })
+    expect(lv.units.spearman).toBe(0) // annihilated
+
+    // Same attack with a strong military multiplier wins it and brings survivors home.
+    const win = armed()
+    const wv = win.villages.v0
+    wv.units = army(3, 0, 0)
+    const m = mods({ attackMult: 5 }) // 30 * 5 = 150 >> 30
+    sendAttack(wv, win.world, win.battleLog, 'b0', army(3, 0, 0), m)
+    advanceMarches(wv, win.world, win.battleLog, t, m) // battle: win
+    expect(win.battleLog[0]).toMatchObject({ kind: 'attack', won: true })
+    // (30/150)^1.5 ≈ 0.089 loss → floor(3 * 0.911) = 2 survivors.
+    expect(wv.units.spearman).toBe(2)
+    expect(wv.marches[0].phase).toBe('returning')
+  })
+
+  it('NO_TECH_MODS on advanceMarches reproduces the bare resolution', () => {
+    const tech = armed()
+    const bare = armed()
+    for (const s of [tech, bare]) {
+      s.villages.v0.units = army(0, 0, 5)
+      sendAttack(s.villages.v0, s.world, s.battleLog, 'b0', army(0, 0, 5))
+    }
+    const t = 54
+    advanceMarches(tech.villages.v0, tech.world, tech.battleLog, t, NO_TECH_MODS)
+    advanceMarches(tech.villages.v0, tech.world, tech.battleLog, t, NO_TECH_MODS)
+    advanceMarches(bare.villages.v0, bare.world, bare.battleLog, t)
+    advanceMarches(bare.villages.v0, bare.world, bare.battleLog, t)
+    expect(tech.villages.v0.resources.wood.toString()).toBe(
+      bare.villages.v0.resources.wood.toString(),
+    )
+    expect(tech.villages.v0.units.axeman).toBe(bare.villages.v0.units.axeman)
   })
 })
 

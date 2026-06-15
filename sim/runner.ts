@@ -1,6 +1,5 @@
 import {
   createInitialState,
-  recomputeDerived,
   INITIAL_UNITS,
   type GameState,
   type BattleReport,
@@ -11,7 +10,7 @@ import { build } from '../src/systems/buildings'
 import { recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { foundVillage } from '../src/systems/villages'
-import { purchaseTech } from '../src/systems/tech'
+import { purchaseTech, aggregateTechMods } from '../src/systems/tech'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
@@ -124,36 +123,51 @@ function step(
   let actions = 0
   const v = state.villages[state.villageOrder[0]]
 
+  // M3.2: roll up the account-wide tech bonuses ONCE for this step and thread the SAME
+  // bag into every live mutation (build cost / recruit time / march power-loot-speed) AND
+  // into the bot's matching decision (chooseAction). state.tech only changes at the END of
+  // the step (purchaseTech below), so the build/recruit/attack actions correctly use the
+  // pre-purchase bonuses; simulate() re-derives its own mods from state.tech afterward, so
+  // a node bought this step lands on the next. mods is a pure function of state.tech →
+  // deterministic, identical across the continuous / split / repeat runs.
+  const mods = aggregateTechMods(state.tech)
+
   // M2.4 conquest pipeline FIRST, so the noble strike force gets first claim on the
   // reserved population and on resources before the per-village economy spends them.
   // One conquest move per step (train a noble OR march the force in); self-limited and
   // pure, so determinism / save-load continuation hold. Capital-scoped, like the loop.
+  // chooseConquest derives its own (identical) mods to project power; the live recruit /
+  // sendAttack here are charged with this step's `mods`.
   const conquest = chooseConquest(state)
   if (conquest !== null) {
     if (conquest.kind === 'recruit') {
-      if (recruit(v, conquest.unitId, conquest.count)) {
+      if (recruit(v, conquest.unitId, conquest.count, mods)) {
         recruited[conquest.unitId] += conquest.count
         rec += conquest.count
       }
-    } else if (sendAttack(v, state.world, state.battleLog, conquest.targetId, conquest.units)) {
+    } else if (sendAttack(v, state.world, state.battleLog, conquest.targetId, conquest.units, mods)) {
       attacked++
     }
   }
 
   while (actions < MAX_ACTIONS_PER_STEP) {
-    const action = chooseAction(v, state.world)
+    const action = chooseAction(v, state.world, mods)
     if (action === null) break
     if (action.kind === 'build') {
-      if (!build(v, action.id)) break
+      // build(v, id, mods): charged the tech-discounted cost AND re-derives the capital
+      // with the same mods, so its fresh level reflects the tree immediately (no separate
+      // re-fold needed — see below).
+      if (!build(v, action.id, mods)) break
       built++
     } else if (action.kind === 'recruit') {
-      if (!recruit(v, action.unitId, action.count)) break
+      if (!recruit(v, action.unitId, action.count, mods)) break
       recruited[action.unitId] += action.count
       rec += action.count
     } else if (action.kind === 'attack') {
       // attack: dispatch the home army at a CONCRETE barbarian village on the world
       // map (loot source + unit sink); travel time is the Euclidean distance to it.
-      if (!sendAttack(v, state.world, state.battleLog, action.targetId, action.units)) break
+      // mods carry the march-speed / attack / loot bonuses into resolution.
+      if (!sendAttack(v, state.world, state.battleLog, action.targetId, action.units, mods)) break
       attacked++
     } else {
       // 'found' is never emitted by chooseAction (it is a per-village decision); the
@@ -178,18 +192,13 @@ function step(
   const purchased = techId !== null && purchaseTech(state, techId)
   if (purchased) tech++
 
-  // Re-fold the tech multipliers into the capital BEFORE time advances, but ONLY when
-  // needed. A 2-arg build() above re-derives the capital with NO_TECH_MODS (dropping its
-  // tech bonus); nothing else in a step strips them — recruit / sendAttack never recompute,
-  // and foundVillage / applyConquest / purchaseTech each recomputeDerived(state) for ALL
-  // villages themselves. So the only uncovered case is a build with no purchase and no
-  // found this step; re-fold then so production/storage/population accrue with the tree.
-  // (A deterministic no-op when no tech is owned.) This keeps the common no-build step off
-  // the recompute path entirely — the whole-empire roll-up is far too costly per tick.
-  if (built > 0 && founded === 0 && !purchased && Object.keys(state.tech).length > 0) {
-    recomputeDerived(state)
-  }
-
+  // M3.2: no separate tech re-fold is needed before time advances. Every mutation that
+  // can change a village's derived stats already folds the current mods: build(v, id, mods)
+  // re-derives the capital with the tree bonus, and foundVillage / applyConquest /
+  // purchaseTech each recomputeDerived(state) for ALL villages. recruit / sendAttack don't
+  // touch production/storage/population, so they need no recompute. The capital therefore
+  // always enters simulate() with the correct tech-folded economy — and the costly
+  // whole-empire roll-up stays off the common no-purchase step.
   simulate(state, dt)
   return { built, recruited: rec, attacked, founded, tech }
 }

@@ -26,6 +26,7 @@ import {
   deadPerkNodes,
   nodeLevel,
   prerequisitesMet,
+  aggregateTechMods,
 } from '../src/systems/tech'
 import { layoutTree, techEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
@@ -612,11 +613,16 @@ export function checkNoSoftlock(
 ): InvariantResult {
   const grew = totalResources(state).gt(prevTotal)
 
+  // M3.2: the probe must judge availability with the SAME tech bonuses the bot uses, so a
+  // build affordable only at the discounted price (or an attack winnable only with the
+  // military bonus) still counts as an available action. Pure function of state.tech.
+  const mods = aggregateTechMods(state.tech)
+
   let hasAction = false
   let inFlight = false
   for (const vid of state.villageOrder) {
     const v = state.villages[vid]
-    if (!hasAction && chooseAction(v, state.world) !== null) hasAction = true
+    if (!hasAction && chooseAction(v, state.world, mods) !== null) hasAction = true
     if (!inFlight && (v.recruitQueue.length > 0 || v.marches.length > 0)) inFlight = true
   }
 

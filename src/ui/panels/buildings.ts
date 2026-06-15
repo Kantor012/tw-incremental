@@ -1,5 +1,11 @@
 import { D } from '../../engine/decimal'
-import { RESOURCE_IDS, type ResourceId, type Village } from '../../engine/state'
+import {
+  RESOURCE_IDS,
+  NO_TECH_MODS,
+  type ResourceId,
+  type Village,
+  type TechModifiers,
+} from '../../engine/state'
 import { formatNumber, formatInt, formatRate } from '../../engine/format'
 import {
   BUILDINGS,
@@ -9,6 +15,7 @@ import {
 } from '../../content/buildings'
 import { nextCostAffordable, costReduction } from '../../systems/buildings'
 import { recruitSpeedMult } from '../../systems/recruitment'
+import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
 import { h, RESOURCE_NAMES } from '../dom'
 
@@ -64,10 +71,15 @@ interface BuildingRefs {
  * the global effects (cost_reduction/recruit_speed) show the derived percentage from
  * the engine's own roll-up functions, so the card never disagrees with the engine.
  *
+ * `mods` are the account-wide tech modifiers (default {@link NO_TECH_MODS}); they are
+ * threaded into the global-effect lines so the "Koszt rozbudowy: -X%" / "Czas
+ * szkolenia: -X%" percentages reflect building + tech, consistent with the cost chips
+ * (which use nextCostAffordable(v, id, mods)) and the army tab (recruit time WITH tech).
+ *
  * EXHAUSTIVE over the BuildingEffect union: a new effect kind is a COMPILE error
  * here (the `never` in `default`), keeping the data-driven contract honest.
  */
-function effectText(v: Village, id: BuildingId): string {
+function effectText(v: Village, id: BuildingId, mods: TechModifiers = NO_TECH_MODS): string {
   const level = v.buildings[id]
   if (level <= 0) return 'Zbuduj poziom 1, aby aktywować.'
 
@@ -80,9 +92,9 @@ function effectText(v: Village, id: BuildingId): string {
     case 'population':
       return 'Limit populacji: +' + formatInt(D(e.perLevel).mul(level))
     case 'cost_reduction':
-      return 'Koszt rozbudowy: -' + Math.round((1 - costReduction(v).toNumber()) * 100) + '%'
+      return 'Koszt rozbudowy: -' + Math.round((1 - costReduction(v, mods).toNumber()) * 100) + '%'
     case 'recruit_speed':
-      return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(v)) * 100) + '%'
+      return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(v, mods)) * 100) + '%'
     case 'noble_unlock':
       return 'Odblokowuje szlachcica (przejmowanie wiosek)'
     default: {
@@ -202,20 +214,23 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
    */
   const update = (): void => {
     const v = ctx.store.state.villages[ctx.activeVillageId.value]
+    // Account-wide tech modifiers — folded into the displayed next-level cost so the
+    // shown amount matches what build() (onBuild threads the same mods) actually charges.
+    const mods = aggregateTechMods(ctx.store.state.tech)
     for (const id of BUILDING_IDS) {
       const ref = bRefs[id]
       const def = BUILDINGS[id]
       const level = v.buildings[id]
 
       ref.level.textContent = 'poz. ' + level + ' / ' + def.maxLevel
-      ref.effect.textContent = effectText(v, id)
+      ref.effect.textContent = effectText(v, id, mods)
 
       const lvlPct = pct(def.maxLevel > 0 ? level / def.maxLevel : 0)
       ref.barFill.style.width = lvlPct + '%'
       ref.bar.setAttribute('aria-valuenow', String(level))
       ref.bar.setAttribute('aria-valuetext', 'poziom ' + level + ' z ' + def.maxLevel)
 
-      const { cost, affordable, maxed } = nextCostAffordable(v, id)
+      const { cost, affordable, maxed } = nextCostAffordable(v, id, mods)
       ref.maxed.hidden = !maxed
       ref.cost.hidden = maxed
       ref.button.disabled = maxed || !affordable

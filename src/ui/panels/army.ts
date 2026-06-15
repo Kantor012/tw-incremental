@@ -11,6 +11,7 @@ import {
   usedPopulation,
   unitUnlocked,
 } from '../../systems/recruitment'
+import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon, RESOURCE_NAMES } from '../dom'
 
@@ -272,7 +273,9 @@ export function createArmyPanel(ctx: UiCtx): Panel {
 
     setBar(popBar, v.popCap.gt(0) ? pctOf(usedPop.div(v.popCap).mul(100).toNumber()) : 0)
 
-    const speedMult = recruitSpeedMult(v)
+    // Fold account-wide tech (training-speed) into the displayed per-unit time so it
+    // matches the snapshot recruit() takes (onRecruit threads the same mods).
+    const speedMult = recruitSpeedMult(v, aggregateTechMods(ctx.store.state.tech))
     for (const id of UNIT_IDS) {
       const ref = cards[id]
       // Per-unit unlock: the infantry triad gates on the barracks, the noble on the

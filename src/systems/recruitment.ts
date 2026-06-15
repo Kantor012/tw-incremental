@@ -1,5 +1,5 @@
 import { D, ZERO, type Decimal } from '../engine/decimal'
-import type { Village } from '../engine/state'
+import { NO_TECH_MODS, type TechModifiers, type Village } from '../engine/state'
 import { BUILDINGS, BUILDING_IDS, type ResourceCost } from '../content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
 
@@ -45,9 +45,17 @@ export function unitUnlocked(v: Village, unitId: UnitId): boolean {
  * building whose effect is `recruit_speed`, clamped to {@link RECRUIT_SPEED_FLOOR}
  * so training never becomes instant. Data-driven (mirrors costReduction): a second
  * speed building is a data entry with zero engine change. A unit's live training
- * time is `UnitDef.recruitSeconds * recruitSpeedMult(v)`.
+ * time is `UnitDef.recruitSeconds * recruitSpeedMult(v, mods)`.
+ *
+ * The GLOBAL tech training-speed reduction (M3.2, `mods.recruitSpeedFrac`, already
+ * capped at 0.75 by aggregateTechMods) is folded in as a final `* (1 - frac)` AFTER
+ * the per-barracks floor — tech is a SEPARATE reduction path, so it can shorten
+ * training below the building-only floor (which guards only against unbounded
+ * barracks stacking) without ever reaching zero. Defaults to {@link NO_TECH_MODS}
+ * (frac 0, a no-op), so callers that do not thread tech reproduce the building-only
+ * timeline byte-for-byte.
  */
-export function recruitSpeedMult(v: Village): number {
+export function recruitSpeedMult(v: Village, mods: TechModifiers = NO_TECH_MODS): number {
   let mult = 1
   for (const id of BUILDING_IDS) {
     const effect = BUILDINGS[id].effect
@@ -55,7 +63,8 @@ export function recruitSpeedMult(v: Village): number {
     const level = v.buildings[id]
     if (level > 0) mult *= Math.pow(1 - effect.perLevel, level)
   }
-  return mult < RECRUIT_SPEED_FLOOR ? RECRUIT_SPEED_FLOOR : mult
+  if (mult < RECRUIT_SPEED_FLOOR) mult = RECRUIT_SPEED_FLOOR
+  return mult * (1 - mods.recruitSpeedFrac)
 }
 
 /**
@@ -124,10 +133,18 @@ export function canRecruit(
 /**
  * Spend resources and enqueue a training order. No-op returning false when
  * {@link canRecruit} rejects. The order snapshots the current per-unit training
- * time (see {@link RecruitOrder}) so later barracks upgrades cannot perturb an
- * order already in flight — preserving deterministic offline/online replay.
+ * time (see {@link RecruitOrder}) — folding in the GLOBAL tech speed bonus via
+ * `mods` at snapshot time — so neither later barracks upgrades NOR later tech
+ * purchases can perturb an order already in flight, preserving deterministic
+ * offline/online replay. `mods` defaults to {@link NO_TECH_MODS} (no-op); the live
+ * caller threads `aggregateTechMods(state.tech)`.
  */
-export function recruit(v: Village, unitId: UnitId, count: number): boolean {
+export function recruit(
+  v: Village,
+  unitId: UnitId,
+  count: number,
+  mods: TechModifiers = NO_TECH_MODS,
+): boolean {
   if (!canRecruit(v, unitId, count).ok) return false
 
   const cost = recruitCost(unitId, count)
@@ -135,7 +152,7 @@ export function recruit(v: Village, unitId: UnitId, count: number): boolean {
   v.resources.clay = v.resources.clay.sub(cost.clay)
   v.resources.iron = v.resources.iron.sub(cost.iron)
 
-  const perUnitSeconds = UNITS[unitId].recruitSeconds * recruitSpeedMult(v)
+  const perUnitSeconds = UNITS[unitId].recruitSeconds * recruitSpeedMult(v, mods)
   v.recruitQueue.push({ unitId, count, remaining: perUnitSeconds, perUnitSeconds })
   return true
 }

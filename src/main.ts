@@ -91,7 +91,14 @@ mountApp(root, {
     return ok
   },
   onRecruit: (villageId: VillageId, id: UnitId, count: number) => {
-    const ok = recruit(store.state.villages[villageId], id, count)
+    // Recruit time snapshots the per-unit duration at queue time; fold in the
+    // account-wide tech recruit-speed bonus so the queued ETA reflects it.
+    const ok = recruit(
+      store.state.villages[villageId],
+      id,
+      count,
+      aggregateTechMods(store.state.tech),
+    )
     if (ok) {
       store.commit()
       saveToLocal(store.state)
@@ -99,12 +106,15 @@ mountApp(root, {
     return ok
   },
   onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => {
+    // March time + combat power for the dispatched army fold in the account-wide
+    // tech modifiers (march_speed / attack_mult / loot_mult).
     const ok = sendAttack(
       store.state.villages[villageId],
       store.state.world,
       store.state.battleLog,
       targetId,
       units,
+      aggregateTechMods(store.state.tech),
     )
     if (ok) {
       store.commit()
@@ -130,7 +140,7 @@ mountApp(root, {
     }
     return ok
   },
-  version: '0.9.0',
+  version: '0.10.0',
   offlineSeconds,
 })
 
