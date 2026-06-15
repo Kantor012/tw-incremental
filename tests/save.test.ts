@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { D } from '../src/engine/decimal'
 import {
   createInitialState,
+  recomputeDerived,
   INITIAL_UNITS,
   type GameState,
   type March,
@@ -17,6 +18,8 @@ import {
   loadFromLocal,
   SAVE_VERSION,
 } from '../src/engine/save'
+import { aggregateTechMods } from '../src/systems/tech'
+import { TECH_NODES } from '../src/content/tech'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
 import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { WORLD_CENTER } from '../src/systems/world'
@@ -33,6 +36,11 @@ import { WORLD_CENTER } from '../src/systems/world'
  *  2. validateState — accepts a well-formed v6 state and rejects a corrupted world or
  *     march, so a hand-edited/forward-compat save can never boot a half-initialised
  *     state (CLAUDE.md hard rule #3).
+ *
+ * The v8 additions (M3.1 global passive tree) get their own section at the bottom: a
+ * NON-EMPTY `state.tech` map round-trips verbatim, validateState accepts an in-band
+ * map and rejects an out-of-band / unknown / non-object one, and importSave folds the
+ * tech multipliers back into every village's derived stats (production = base * (1+Σ)).
  */
 
 /** A well-formed v6 march at a concrete barbarian target (new geometry fields set). */
@@ -359,5 +367,113 @@ describe('save — misc', () => {
 
   it('returns null from loadFromLocal when localStorage is unavailable', () => {
     expect(loadFromLocal()).toBe(null)
+  })
+})
+
+/**
+ * A fresh v8 state with a NON-EMPTY global passive tree (M3.1): one root in each arm
+ * — eco_root (production), sto_root (storage), set_root (population) — so all three
+ * multiplier kinds are active. The levels are set directly and `recomputeDerived` folds
+ * the tech multipliers into every village's derived stats. Roots have no prerequisites,
+ * so the map is a legitimate purchase state. Built fresh per test so the corruption
+ * mutations below never leak between cases.
+ */
+function techState(): GameState {
+  const s = createInitialState('save-v8-tech', 8888)
+  s.tech = { eco_root: 4, sto_root: 3, set_root: 2 }
+  recomputeDerived(s)
+  return s
+}
+
+describe('save — v8 tech round-trip', () => {
+  it('the tech multipliers lift the derived economy above the building-only base', () => {
+    const tech = techState()
+    // Same seed, EMPTY tech -> the pure-building baseline to compare against.
+    const base = createInitialState('save-v8-tech', 8888)
+    const v = tech.villages.v0
+    const b = base.villages.v0
+    expect(v.production.wood.gt(b.production.wood)).toBe(true)
+    expect(v.production.clay.gt(b.production.clay)).toBe(true)
+    expect(v.production.iron.gt(b.production.iron)).toBe(true)
+    expect(v.storageCap.gt(b.storageCap)).toBe(true)
+    expect(v.popCap.gt(b.popCap)).toBe(true)
+  })
+
+  it('serialize/deserialize preserves the tech map and the tech-boosted Decimals', () => {
+    const state = techState()
+    const json = serialize(state)
+    const back = deserialize(json)
+
+    expect(back.version).toBe(SAVE_VERSION)
+    // The sparse { nodeId: level } map round-trips verbatim (plain JSON numbers).
+    expect(back.tech).toEqual({ eco_root: 4, sto_root: 3, set_root: 2 })
+    // The boosted derived Decimals survive the {$d} tag exactly.
+    expect(back.villages.v0.production.wood.toString()).toBe(
+      state.villages.v0.production.wood.toString(),
+    )
+    expect(back.villages.v0.storageCap.toString()).toBe(
+      state.villages.v0.storageCap.toString(),
+    )
+    expect(back.villages.v0.popCap.toString()).toBe(state.villages.v0.popCap.toString())
+    // serialize is idempotent across the round-trip (stable key order, re-tagged).
+    expect(serialize(back)).toBe(json)
+  })
+
+  it('validateState accepts an in-band tech map and the recompute stays consistent', () => {
+    const state = techState()
+    expect(validateState(state)).toBe(state)
+    // Re-deriving from the same tech map changes nothing (already consistent), which is
+    // the invariant importSave relies on.
+    const wood = state.villages.v0.production.wood.toString()
+    recomputeDerived(state)
+    expect(state.villages.v0.production.wood.toString()).toBe(wood)
+  })
+
+  it('exportSave/importSave folds the tech multipliers back into the derived stats', () => {
+    const state = techState()
+    const restored = importSave(exportSave(state))
+
+    // The tech map survives the export/import (and migrate is a no-op at the current version).
+    expect(restored.tech).toEqual({ eco_root: 4, sto_root: 3, set_root: 2 })
+
+    // importSave re-derives from restored.tech, so the folded production matches the
+    // catalogue applied to the building-only baseline: production = base * (1 + Σ).
+    const mods = aggregateTechMods(restored.tech)
+    const baseline = createInitialState('save-v8-tech', 8888) // empty tech
+    const expectedWood = baseline.villages.v0.production.wood.mul(mods.productionMult.wood)
+    expect(restored.villages.v0.production.wood.toString()).toBe(expectedWood.toString())
+
+    // Byte-identical: the derived fields were already consistent before export, so
+    // importSave's recomputeDerived pass changes nothing.
+    expect(serialize(restored)).toBe(serialize(state))
+  })
+
+  it("rejects a tech level outside its node's [0, maxLevel] band, a non-integer or an unknown key", () => {
+    const over = techState()
+    over.tech.eco_root = TECH_NODES.eco_root.maxLevel + 1
+    expect(() => validateState(over)).toThrow()
+
+    const neg = techState()
+    neg.tech.eco_root = -1
+    expect(() => validateState(neg)).toThrow()
+
+    const frac = techState()
+    frac.tech.eco_root = 1.5
+    expect(() => validateState(frac)).toThrow()
+
+    // Unknown keys are REJECTED (fail loudly) rather than silently ignored.
+    const unknown = techState()
+    ;(unknown.tech as Record<string, number>).not_a_real_node = 1
+    expect(() => validateState(unknown)).toThrow()
+  })
+
+  it('rejects a missing or non-object tech field', () => {
+    const missing = techState()
+    delete (missing as { tech?: unknown }).tech
+    expect(() => validateState(missing)).toThrow()
+
+    const wrong = techState()
+    ;(wrong as { tech: unknown }).tech = 'nope'
+    expect(() => validateState(wrong)).toThrow()
   })
 })

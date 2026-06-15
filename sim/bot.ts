@@ -22,6 +22,8 @@ import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
 import { foundCost, findFoundingSpot, canFound, playerVillageCount } from '../src/systems/villages'
 import { raidPower } from '../src/systems/raids'
 import { nobleCount, LOYALTY_NOBLE_HIT } from '../src/systems/conquest'
+import { TECH_NODE_IDS } from '../src/content/tech'
+import { nodeAvailable, nodeLevel, techCost, globalResources } from '../src/systems/tech'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -595,4 +597,53 @@ export function chooseFounding(state: GameState): Extract<BotAction, { kind: 'fo
   if (spot === null) return null
   if (!canFound(state, payerId, spot.x, spot.y).ok) return null
   return { kind: 'found', x: spot.x, y: spot.y }
+}
+
+/**
+ * Reserve multiplier over a tech node's next-level cost the GLOBAL resource pool (summed
+ * across every village) must hold — in EVERY resource — before the bot buys it. A buffer
+ * above the bare price so a tech purchase only ever spends genuine surplus and never
+ * drains the empire below what the per-village economy / combat loop needs. Combined with
+ * the runner consulting {@link chooseTech} LAST in a step (after the per-village economy,
+ * founding AND conquest have taken their claim, so the capital is spent down to its
+ * unspendable residual), this makes the passive tree a sink for the resources that would
+ * otherwise sit pinned at the warehouse cap — exactly the "real sink that scales with the
+ * empire and is bought gradually" design goal (CLAUDE.md / DESIGN.md).
+ */
+const TECH_RESERVE = 1.25
+
+/**
+ * TECH decision (M3.1): the next passive-tree node the bot should buy from the GLOBAL
+ * pool this step, or null. Picks the CHEAPEST available node (prerequisites met, not yet
+ * maxed) whose next-level {@link techCost} the global pool covers with the
+ * {@link TECH_RESERVE} buffer in every resource — ranked by total cost across resources
+ * on Decimal, ties resolved to the first id in {@link TECH_NODE_IDS} order, so it is
+ * fully deterministic. Returns only the id; the runner performs the purchase via
+ * {@link import('../src/systems/tech').purchaseTech} (mirroring chooseFounding /
+ * foundVillage), which spends greedily across villages and re-derives every village so
+ * the new multiplier folds into production / storage / population before time advances.
+ *
+ * A pure function of `state` (catalogue scan + global pool), so two identical runs buy
+ * the same nodes in the same order — the determinism / save-load-continuation invariants
+ * hold with the tree in play. Kept OUT of {@link chooseAction} (the no-softlock probe) on
+ * purpose: like founding, "you can always buy another node" must not mask a genuine
+ * per-village economy stall.
+ */
+export function chooseTech(state: GameState): string | null {
+  const pool = globalResources(state)
+  let best: string | null = null
+  let bestSum: Decimal | null = null
+  for (const id of TECH_NODE_IDS) {
+    if (!nodeAvailable(state, id)) continue
+    const cost = techCost(id, nodeLevel(state, id))
+    if (pool.wood.lt(cost.wood.mul(TECH_RESERVE))) continue
+    if (pool.clay.lt(cost.clay.mul(TECH_RESERVE))) continue
+    if (pool.iron.lt(cost.iron.mul(TECH_RESERVE))) continue
+    const sum = cost.wood.add(cost.clay).add(cost.iron)
+    if (bestSum === null || sum.lt(bestSum)) {
+      bestSum = sum
+      best = id
+    }
+  }
+  return best
 }

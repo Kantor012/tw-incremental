@@ -88,6 +88,16 @@ export interface BalanceTargets {
    * (those live outside the harness — see manifest notes).
    */
   minVillagesConquered: number
+
+  // --- M3.1 tech (global passive tree) goal (warning) ---
+  /**
+   * The bot must BUY at least this many tech-node levels from the global pool over a run
+   * — proof the passive tree (M3.1) is a reachable resource sink and the purchase path is
+   * exercised. The bot spends only genuine surplus on tech (see sim/bot.chooseTech), so a
+   * healthy run buys steadily once the empire matures; if this cannot be hit without
+   * starving the M1/M2 targets the node costs (content/tech.ts) need tuning.
+   */
+  minTechPurchases: number
 }
 
 export const TARGETS: BalanceTargets = {
@@ -143,4 +153,13 @@ export const TARGETS: BalanceTargets = {
   // minimum proof-of-mechanic (the bot self-limits conquests so founding keeps room
   // under the village cap — see sim/bot.chooseConquest).
   minVillagesConquered: 1,
+
+  // M3.1: tech online. The global passive tree must be a reachable sink the bot buys
+  // into from its surplus. A matured empire buys the ENTIRE starter tree over the budget
+  // (measured 507 levels = every one of the 72 nodes maxed; production uplift ≈ x5 over
+  // the no-tech base), so this floor sits well below that — passing normal play but
+  // tripping a warning if a cost/heuristic regression leaves the tree mostly unbought.
+  // (The starter tree fully maxing by end-game is expected for M3.1; M3.2 adds breadth.)
+  // See CHANGELOG "Balance" for the before/after.
+  minTechPurchases: 200,
 }

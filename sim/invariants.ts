@@ -15,10 +15,19 @@ import {
 import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { MAX_TARGET_LEVEL } from '../src/content/barbarians'
+import { TECH_NODES, TECH_NODE_IDS, TECH_ROOTS } from '../src/content/tech'
 import { freePopulation, recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { WORLD_SIZE } from '../src/systems/world'
 import { LOYALTY_MAX } from '../src/systems/conquest'
+import {
+  techHasCycle,
+  orphanNodes,
+  deadPerkNodes,
+  nodeLevel,
+  prerequisitesMet,
+} from '../src/systems/tech'
+import { layoutTree, techEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
 /**
@@ -299,6 +308,201 @@ export function checkLoyalty(state: GameState): InvariantResult {
   }
   return {
     name: 'loyalty-range',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Smallest centre-to-centre distance two DISTINCT node positions may have in the computed
+ * layout before it counts as a "gross overlap". The radial layout keeps real neighbours
+ * far apart (the measured minimum across the M3.1 tree is 64 layout units), so this
+ * generous floor never false-fails the current data yet trips immediately if a topology /
+ * algorithm change ever stacks two nodes on the same spot.
+ */
+const TECH_MIN_NODE_SEP = 24
+
+/**
+ * STATIC tech-tree invariants (M3.1) — pure functions of the {@link TECH_NODES} catalogue
+ * + the computed {@link layoutTree}, independent of any {@link GameState}, so the runner
+ * asserts them ONCE per run (like determinism) rather than per sample. A single FAIL is a
+ * commit blocker: a malformed passive tree would mis-drive the whole tech economy and the
+ * constellation view. Checks (each aggregated to one PASS/FAIL):
+ *  - tech-acyclic:        the prerequisite graph is a DAG (no cycle) — {@link techHasCycle}.
+ *  - tech-no-orphans:     every node is reachable from a {@link TECH_ROOTS} root via
+ *                         prerequisite edges (nothing is unbuyable) — {@link orphanNodes}.
+ *  - tech-no-dead-perks:  every node has a real effect with perLevel > 0 — {@link deadPerkNodes}.
+ *  - tech-maxlevel-range: every maxLevel is an integer in [1, 10] (CLAUDE.md tree rule).
+ *  - tech-archetype-band: maxLevel matches the archetype band (gateway 1 / notable 2-3 /
+ *                         minor 7-10) — the authoring guard behind the level rule.
+ *  - tech-roots:          TECH_ROOTS is non-empty and every root exists and truly has no
+ *                         prerequisite (an always-available category entry).
+ *  - tech-layout-complete: {@link layoutTree} returns a FINITE position for every node id.
+ *  - tech-layout-no-overlap: no two distinct node centres are closer than
+ *                         {@link TECH_MIN_NODE_SEP} (no gross overlap in the constellation).
+ *  - tech-edges-valid:    every {@link techEdges} endpoint is a known node and the edge
+ *                         count equals the total number of (known) prerequisite links.
+ */
+export function checkTechTree(): InvariantResult[] {
+  const results: InvariantResult[] = []
+
+  const cycle = techHasCycle()
+  results.push({
+    name: 'tech-acyclic',
+    ok: !cycle,
+    detail: cycle ? 'prerequisite graph contains a cycle (must be a DAG)' : undefined,
+  })
+
+  const orphans = orphanNodes()
+  results.push({
+    name: 'tech-no-orphans',
+    ok: orphans.length === 0,
+    detail: orphans.length ? `unreachable from roots: ${orphans.join(', ')}` : undefined,
+  })
+
+  const dead = deadPerkNodes()
+  results.push({
+    name: 'tech-no-dead-perks',
+    ok: dead.length === 0,
+    detail: dead.length ? `no effect / perLevel<=0: ${dead.join(', ')}` : undefined,
+  })
+
+  const badLevel: string[] = []
+  const badBand: string[] = []
+  for (const id of TECH_NODE_IDS) {
+    const node = TECH_NODES[id]
+    const m = node.maxLevel
+    if (!Number.isInteger(m) || m < 1 || m > 10) badLevel.push(`${id}=${m}`)
+    const okBand =
+      node.archetype === 'gateway'
+        ? m === 1
+        : node.archetype === 'notable'
+          ? m >= 2 && m <= 3
+          : m >= 7 && m <= 10 // minor
+    if (!okBand) badBand.push(`${id}(${node.archetype})=${m}`)
+  }
+  results.push({
+    name: 'tech-maxlevel-range',
+    ok: badLevel.length === 0,
+    detail: badLevel.length ? `maxLevel out of [1,10]: ${badLevel.join(', ')}` : undefined,
+  })
+  results.push({
+    name: 'tech-archetype-band',
+    ok: badBand.length === 0,
+    detail: badBand.length ? `maxLevel off archetype band: ${badBand.join(', ')}` : undefined,
+  })
+
+  const rootIssues: string[] = []
+  if (TECH_ROOTS.length === 0) rootIssues.push('no roots')
+  for (const id of TECH_ROOTS) {
+    const node = TECH_NODES[id]
+    if (!node) rootIssues.push(`unknown root ${id}`)
+    else if (node.prerequisites.length > 0) rootIssues.push(`root ${id} has prerequisites`)
+  }
+  results.push({
+    name: 'tech-roots',
+    ok: rootIssues.length === 0,
+    detail: rootIssues.length ? rootIssues.join('; ') : undefined,
+  })
+
+  // Layout: a finite position for every node, and no two centres grossly overlapping.
+  const pos = layoutTree()
+  const missing: string[] = []
+  for (const id of TECH_NODE_IDS) {
+    const p = pos[id]
+    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) missing.push(id)
+  }
+  results.push({
+    name: 'tech-layout-complete',
+    ok: missing.length === 0,
+    detail: missing.length ? `no finite position for: ${missing.join(', ')}` : undefined,
+  })
+
+  let overlap: string | null = null
+  let minDist = Infinity
+  for (let i = 0; i < TECH_NODE_IDS.length && overlap === null; i++) {
+    const a = pos[TECH_NODE_IDS[i]]
+    if (!a) continue
+    for (let j = i + 1; j < TECH_NODE_IDS.length; j++) {
+      const b = pos[TECH_NODE_IDS[j]]
+      if (!b) continue
+      const d = Math.hypot(a.x - b.x, a.y - b.y)
+      if (d < minDist) minDist = d
+      if (d < TECH_MIN_NODE_SEP) {
+        overlap = `${TECH_NODE_IDS[i]} & ${TECH_NODE_IDS[j]} only ${d.toFixed(1)} apart`
+        break
+      }
+    }
+  }
+  results.push({
+    name: 'tech-layout-no-overlap',
+    ok: overlap === null,
+    detail: overlap ?? undefined,
+  })
+
+  // Edges: every endpoint known, and the count matches the total prerequisite links.
+  let expectedEdges = 0
+  for (const id of TECH_NODE_IDS) {
+    for (const pre of TECH_NODES[id].prerequisites) if (pre in TECH_NODES) expectedEdges += 1
+  }
+  const edges = techEdges()
+  const badEdge = edges.find((e) => !(e.from in TECH_NODES) || !(e.to in TECH_NODES))
+  const edgeOk = badEdge === undefined && edges.length === expectedEdges
+  results.push({
+    name: 'tech-edges-valid',
+    ok: edgeOk,
+    detail: edgeOk
+      ? undefined
+      : badEdge
+        ? `edge with unknown endpoint ${badEdge.from}->${badEdge.to}`
+        : `edge count ${edges.length} != prerequisite links ${expectedEdges}`,
+  })
+
+  return results
+}
+
+/**
+ * Runtime tech-state invariant (M3.1), checked per sample like the resource / army guards.
+ * The purchased-level map {@link GameState.tech} must stay structurally sound however the
+ * bot buys and however the save round-trips:
+ *  - it is an object,
+ *  - every KEY is a known node id (no stray keys leak in),
+ *  - every level is an INTEGER in [0, node.maxLevel] (a purchase never overshoots the
+ *    ceiling, never goes negative, never turns fractional / NaN),
+ *  - every OWNED node (level >= 1) has its prerequisites met — a node can never be bought
+ *    out of order, so the unlock DAG is always respected in the live state.
+ *
+ * Pairs with resources-non-negative (which catches the greedy global spend ever driving a
+ * village below 0): together they prove {@link import('../src/systems/tech').purchaseTech}
+ * keeps the books balanced. Each offending entry names the node.
+ */
+export function checkTechState(state: GameState): InvariantResult {
+  const tech = state.tech as Record<string, number> | undefined
+  if (tech === undefined || typeof tech !== 'object' || tech === null) {
+    return { name: 'tech-state', ok: false, detail: 'state.tech missing or not an object' }
+  }
+
+  const issues: string[] = []
+  for (const key of Object.keys(tech)) {
+    const node = TECH_NODES[key]
+    if (!node) {
+      issues.push(`unknown ${key}`)
+      continue
+    }
+    const lvl = tech[key]
+    if (!Number.isInteger(lvl) || lvl < 0 || lvl > node.maxLevel) {
+      issues.push(`${key}=${String(lvl)} (max ${node.maxLevel})`)
+    }
+  }
+  // Owned nodes must respect the unlock DAG (prerequisites at level >= 1).
+  for (const id of TECH_NODE_IDS) {
+    if (nodeLevel(state, id) >= 1 && !prerequisitesMet(state, id)) {
+      issues.push(`${id} owned with unmet prerequisites`)
+    }
+  }
+
+  return {
+    name: 'tech-state',
     ok: issues.length === 0,
     detail: issues.length ? issues.join('; ') : undefined,
   }

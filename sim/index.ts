@@ -106,6 +106,21 @@ function evalTargets(r: RunResult): TargetCheck[] {
       ok: m.villagesConquered >= TARGETS.minVillagesConquered,
       detail: `conquered ${m.villagesConquered} (own ${m.villagesOwned}, target conquered >= ${TARGETS.minVillagesConquered})`,
     },
+    {
+      name: 'tech-nodes-purchased',
+      ok: m.techPurchases >= TARGETS.minTechPurchases,
+      detail: `bought ${m.techPurchases} tech levels (${m.techNodesOwned} nodes, ${m.techLevelsOwned} levels; target >= ${TARGETS.minTechPurchases})`,
+    },
+    {
+      // Confirms the tree's economic multipliers actually fold into the simulation:
+      // when any tech is owned, end production must exceed the same buildings' no-tech base.
+      name: 'tech-production-uplift',
+      ok: m.techPurchases === 0 || m.techProductionMult > 1,
+      detail:
+        m.techPurchases === 0
+          ? 'no tech bought — uplift n/a'
+          : `production x${m.techProductionMult.toFixed(3)} over no-tech base (${m.productionBaseNoTech} -> ${m.productionEnd})`,
+    },
   ]
 }
 
@@ -198,6 +213,22 @@ function main(): void {
     console.log(
       `${m.seed.padEnd(8)} | ${String(m.villagesFounded).padStart(16)} | ` +
         `${String(m.villagesConquered).padStart(18)} | ${m.villagesOwned}`,
+    )
+  }
+  console.log('')
+
+  // --- Tech per seed (M3.1 global passive tree) ---
+  console.log('--- Tech (end) ---')
+  console.log('seed     | levels bought | nodes owned | total levels | production uplift (no-tech -> with-tech)')
+  for (const r of results) {
+    const m = r.metrics
+    const uplift =
+      m.techPurchases === 0
+        ? 'n/a (none bought)'
+        : `x${m.techProductionMult.toFixed(3)} (${m.productionBaseNoTech} -> ${m.productionEnd})`
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.techPurchases).padStart(13)} | ${String(m.techNodesOwned).padStart(11)} | ` +
+        `${String(m.techLevelsOwned).padStart(12)} | ${uplift}`,
     )
   }
   console.log('')

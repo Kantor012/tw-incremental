@@ -8,7 +8,9 @@ import {
 } from '../src/engine/state'
 import { BUILDING_IDS } from '../src/content/buildings'
 import { UNIT_IDS, type UnitId } from '../src/content/units'
+import { TECH_NODE_IDS } from '../src/content/tech'
 import { usedPopulation } from '../src/systems/recruitment'
+import { aggregateTechMods, nodeLevel } from '../src/systems/tech'
 
 /** The first (capital) village — the one the bot drives. */
 function firstVillage(state: GameState): Village {
@@ -103,6 +105,31 @@ export interface RunMetrics {
    * loop keeps the loop open without bound (see invariants.contentConsumed).
    */
   reachedContentFrontier: boolean
+
+  // --- M3.1 tech (global passive tree) ---
+  /**
+   * Successful tech-node level purchases the bot made over the run (one per accepted
+   * {@link import('./bot').chooseTech} → purchaseTech). The tech-nodes-purchased balance
+   * target wants this above a floor — proof the bot exercised the purchase path and the
+   * tree is a reachable resource sink.
+   */
+  techPurchases: number
+  /** Distinct nodes owned at level >= 1 at run end (breadth bought across the tree). */
+  techNodesOwned: number
+  /** Σ owned levels across the tree at run end (cross-check for {@link techPurchases}). */
+  techLevelsOwned: number
+  /**
+   * Total production/second at run end with EVERY tech multiplier stripped — the pure
+   * building economy that the same buildings/villages would yield with no tree. Paired
+   * with {@link productionEnd}: when tech was bought, productionEnd MUST exceed this, i.e.
+   * the economic multipliers actually fold into the simulation (the tech-uplift target).
+   */
+  productionBaseNoTech: string
+  /**
+   * Effective production uplift from tech at run end: productionEnd / productionBaseNoTech
+   * (1 when no tech is owned). > 1 confirms the tree's multipliers are live.
+   */
+  techProductionMult: number
 }
 
 /** Per-run counters the runner threads into {@link collect}. */
@@ -118,6 +145,8 @@ export interface RunStats {
   contentFrontierTick: number | null
   /** Cumulative combat tally over the whole run (see {@link CombatStats}). */
   combat: CombatStats
+  /** Successful tech-node level purchases over the run (M3.1). */
+  techPurchases: number
 }
 
 /**
@@ -272,6 +301,28 @@ export function collect(
   // a fresh state reproduces it deterministically without retaining run history.
   const start = createInitialState(seed, 0)
 
+  // M3.1 tech roll-up. Breadth (distinct nodes >= 1) and depth (Σ levels) of the tree
+  // bought, plus the no-tech production baseline: production[r] = buildingProd[r] ×
+  // productionMult[r], so dividing by the multiplier recovers the pure building economy
+  // — its sum vs productionEnd is the effective uplift that proves the tree is live.
+  const mods = aggregateTechMods(state.tech)
+  let techNodesOwned = 0
+  let techLevelsOwned = 0
+  for (const id of TECH_NODE_IDS) {
+    const lvl = nodeLevel(state, id)
+    if (lvl > 0) {
+      techNodesOwned += 1
+      techLevelsOwned += lvl
+    }
+  }
+  const prodEnd = totalProduction(state)
+  let prodBase = ZERO
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    for (const r of RESOURCE_IDS) prodBase = prodBase.add(v.production[r].div(mods.productionMult[r]))
+  }
+  const techProductionMult = prodBase.gt(0) ? prodEnd.div(prodBase).toNumber() : 1
+
   return {
     seed,
     ticks,
@@ -304,5 +355,11 @@ export function collect(
     unitsLost: stats.combat.unitsLost,
     finalArmyTotal,
     reachedContentFrontier: stats.contentFrontierTick !== null,
+
+    techPurchases: stats.techPurchases,
+    techNodesOwned,
+    techLevelsOwned,
+    productionBaseNoTech: prodBase.toString(),
+    techProductionMult,
   }
 }

@@ -52,6 +52,14 @@ export interface UiCtx {
    * panel checks `canFound`/`foundCost` from systems/villages directly for cues).
    */
   onFound: (payerVillageId: VillageId, x: number, y: number) => VillageId | null
+  /**
+   * Purchase the NEXT level of the global tech node `nodeId`, paid from the GLOBAL
+   * resource pool (summed across all villages); returns true on success (cost spent,
+   * `state.tech[nodeId]` incremented, derived multipliers recomputed, committed +
+   * persisted). The tech panel reads `canPurchaseTech` (systems/tech) itself for the
+   * disabled/affordability cue — this callback is the commit, not the validation.
+   */
+  onPurchaseTech: (nodeId: string) => boolean
   /** Serialize the current run to a save code string. */
   onExport: () => string
   /** Load a save code; returns true when it parsed and was applied. */

@@ -18,6 +18,7 @@ import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
 import { sendAttack } from './systems/marches'
 import { foundVillage } from './systems/villages'
+import { aggregateTechMods, purchaseTech } from './systems/tech'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -80,7 +81,9 @@ mountApp(root, {
     location.reload()
   },
   onBuild: (villageId, id) => {
-    const ok = build(store.state.villages[villageId], id)
+    // Fold the global tech multipliers into the post-build recompute so a freshly
+    // upgraded building immediately reflects the account-wide bonuses.
+    const ok = build(store.state.villages[villageId], id, aggregateTechMods(store.state.tech))
     if (ok) {
       store.commit()
       saveToLocal(store.state)
@@ -117,7 +120,17 @@ mountApp(root, {
     }
     return id
   },
-  version: '0.8.0',
+  onPurchaseTech: (nodeId: string) => {
+    // purchaseTech spends from the GLOBAL resource pool and recomputes derived
+    // multipliers internally; we only persist + commit on success.
+    const ok = purchaseTech(store.state, nodeId)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
+  version: '0.9.0',
   offlineSeconds,
 })
 

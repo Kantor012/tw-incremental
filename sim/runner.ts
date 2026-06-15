@@ -1,5 +1,6 @@
 import {
   createInitialState,
+  recomputeDerived,
   INITIAL_UNITS,
   type GameState,
   type BattleReport,
@@ -10,6 +11,7 @@ import { build } from '../src/systems/buildings'
 import { recruit } from '../src/systems/recruitment'
 import { sendAttack } from '../src/systems/marches'
 import { foundVillage } from '../src/systems/villages'
+import { purchaseTech } from '../src/systems/tech'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
@@ -22,11 +24,13 @@ import {
   checkNoSoftlock,
   checkOfflineDeterminism,
   checkMarchesTerminate,
+  checkTechTree,
+  checkTechState,
   contentConsumed,
   totalResources,
   type InvariantResult,
 } from './invariants'
-import { chooseAction, chooseFounding, chooseConquest } from './bot'
+import { chooseAction, chooseFounding, chooseConquest, chooseTech } from './bot'
 import {
   collect,
   emptyCombatStats,
@@ -63,12 +67,24 @@ const OFFLINE_CHECK_SECONDS = 3600
  */
 const MAX_ACTIONS_PER_STEP = 8
 
-/** What one {@link step} did: building upgrades bought, units ordered, attacks sent, villages founded. */
+/**
+ * Consult the tech decision (and its per-node Decimal cost scan) only every N steps. The
+ * passive tree is a SLOW sink — the surplus it spends accumulates over many ticks — so a
+ * once-per-N cadence still buys the whole tree well within the budget (measured: every
+ * node maxed) while keeping the costly {@link chooseTech} scan (a Decimal `pow` per
+ * available node) off the hot per-tick path. Deterministic: gated on the absolute step
+ * index, identical across the continuous / split / repeat runs, so the determinism and
+ * save-load-continuation invariants are unaffected.
+ */
+const TECH_DECIDE_EVERY = 8
+
+/** What one {@link step} did: building upgrades bought, units ordered, attacks sent, villages founded, tech levels bought. */
 interface StepResult {
   built: number
   recruited: number
   attacked: number
   founded: number
+  tech: number
 }
 
 /** Prefix invariant names with the phase that produced them, for the report. */
@@ -94,11 +110,17 @@ function emptyUnitCounts(): Record<UnitId, number> {
  * advances EVERY village on the fixed grid (see tick.ts). With the single M2.1
  * village this reproduces the old single-village run exactly.
  */
-function step(state: GameState, dt: number, recruited: Record<UnitId, number>): StepResult {
+function step(
+  state: GameState,
+  dt: number,
+  recruited: Record<UnitId, number>,
+  tick: number,
+): StepResult {
   let built = 0
   let rec = 0
   let attacked = 0
   let founded = 0
+  let tech = 0
   let actions = 0
   const v = state.villages[state.villageOrder[0]]
 
@@ -149,8 +171,27 @@ function step(state: GameState, dt: number, recruited: Record<UnitId, number>): 
     founded++
   }
 
+  // M3.1 global passive tree, consulted LAST so it spends only the surplus the
+  // per-village economy, founding and conquest left idle (chooseTech gates on a global
+  // reserve; the greedy spend in purchaseTech draws across villages and re-derives them).
+  const techId = tick % TECH_DECIDE_EVERY === 0 ? chooseTech(state) : null
+  const purchased = techId !== null && purchaseTech(state, techId)
+  if (purchased) tech++
+
+  // Re-fold the tech multipliers into the capital BEFORE time advances, but ONLY when
+  // needed. A 2-arg build() above re-derives the capital with NO_TECH_MODS (dropping its
+  // tech bonus); nothing else in a step strips them — recruit / sendAttack never recompute,
+  // and foundVillage / applyConquest / purchaseTech each recomputeDerived(state) for ALL
+  // villages themselves. So the only uncovered case is a build with no purchase and no
+  // found this step; re-fold then so production/storage/population accrue with the tree.
+  // (A deterministic no-op when no tech is owned.) This keeps the common no-build step off
+  // the recompute path entirely — the whole-empire roll-up is far too costly per tick.
+  if (built > 0 && founded === 0 && !purchased && Object.keys(state.tech).length > 0) {
+    recomputeDerived(state)
+  }
+
   simulate(state, dt)
-  return { built, recruited: rec, attacked, founded }
+  return { built, recruited: rec, attacked, founded, tech }
 }
 
 /** What a continuous run yields: the final state, sampled invariants, counters. */
@@ -183,6 +224,7 @@ function runContinuous(
   let upgradesBought = 0
   let totalRecruited = 0
   let villagesFounded = 0
+  let techPurchases = 0
   const unitsRecruited = emptyUnitCounts()
   // Progress actions (builds + recruits + attacks) since the last sample — a window
   // with any action counts as progress even if the spend left the resource sum lower.
@@ -198,11 +240,12 @@ function runContinuous(
   let prevLog: BattleReport[] = state.battleLog.slice()
 
   for (let i = 0; i < ticks; i++) {
-    const { built, recruited, attacked, founded } = step(state, dt, unitsRecruited)
+    const { built, recruited, attacked, founded, tech } = step(state, dt, unitsRecruited, i)
     upgradesBought += built
     totalRecruited += recruited
     villagesFounded += founded
-    actedInWindow += built + recruited + attacked + founded
+    techPurchases += tech
+    actedInWindow += built + recruited + attacked + founded + tech
     combat.attacksSent += attacked
 
     // Fold any battle / raid reports the step produced into the running tally.
@@ -217,6 +260,7 @@ function runContinuous(
       invariants.push(...tag([checkWorldConsistency(state)], phase))
       invariants.push(...tag([checkVillagePlacement(state)], phase))
       invariants.push(...tag([checkLoyalty(state)], phase))
+      invariants.push(...tag([checkTechState(state)], phase))
       invariants.push(...tag([checkRoundTrip(state)], phase))
       invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
 
@@ -237,6 +281,7 @@ function runContinuous(
     invariants.push(...tag([checkWorldConsistency(state)], 'final'))
     invariants.push(...tag([checkVillagePlacement(state)], 'final'))
     invariants.push(...tag([checkLoyalty(state)], 'final'))
+    invariants.push(...tag([checkTechState(state)], 'final'))
     invariants.push(...tag([checkRoundTrip(state)], 'final'))
     // Whole-run progress: any action ever taken, or resources above the start.
     invariants.push(
@@ -257,6 +302,7 @@ function runContinuous(
       unitsRecruited,
       contentFrontierTick,
       combat,
+      techPurchases,
     },
   }
 }
@@ -272,9 +318,9 @@ function runSplit(seed: string, ticks: number, dt: number): GameState {
   // continuation), so a single scratch accumulator is reused and discarded.
   const scratch = emptyUnitCounts()
   let state = createInitialState(seed, 0)
-  for (let i = 0; i < half; i++) step(state, dt, scratch)
+  for (let i = 0; i < half; i++) step(state, dt, scratch, i)
   state = importSave(exportSave(state))
-  for (let i = half; i < ticks; i++) step(state, dt, scratch)
+  for (let i = half; i < ticks; i++) step(state, dt, scratch, i)
   return state
 }
 
@@ -321,6 +367,11 @@ export function runOne(seed: string, ticks: number): RunResult {
   // Marches always terminate: a dispatched army resolves and clears within bounded
   // time, with finite non-negative `remaining` throughout (no stuck/looping march).
   invariants.push(checkMarchesTerminate(seed))
+
+  // M3.1 static passive-tree invariants (catalogue + layout, state-independent): a DAG
+  // with no orphans / dead perks, archetype-banded maxLevels, a complete non-overlapping
+  // layout and well-formed edges. Asserted once per run (tagged 'tech').
+  invariants.push(...tag(checkTechTree(), 'tech'))
 
   const metrics = collect(seed, ticks, ticks * dt, primary.state, primary.stats)
   const ok = invariants.every((r) => r.ok)

@@ -5,6 +5,12 @@ import { signal, type Signal } from './store'
 import { BUILDINGS, BUILDING_IDS, type BuildingId } from '../content/buildings'
 import { UNIT_IDS, type UnitId } from '../content/units'
 import { generateWorld, WORLD_CENTER } from '../systems/world'
+// VALUE import that closes a 2-way edge with systems/tech.ts (which imports
+// recomputeDerived + the types below back from here). It is SAFE from an
+// initialisation cycle because `aggregateTechMods` is referenced ONLY inside the
+// body of `recomputeDerived` (never at module top level), so by the time it is
+// actually called both modules are fully evaluated regardless of load order.
+import { aggregateTechMods } from '../systems/tech'
 
 /**
  * The single source of truth. Everything the simulation needs lives here so it
@@ -275,6 +281,37 @@ export interface GameState {
    * {@link BattleReport.villageId}.
    */
   battleLog: BattleReport[]
+  /**
+   * GLOBAL passive tree (M3.1): purchased level per node id (absent key = level 0).
+   * The single account-wide tech state — its economic effects are TRANSIENT
+   * multipliers recomputed from this map by {@link aggregateTechMods} and folded
+   * into every village's derived stats in {@link recomputeDerived}; no derived tech
+   * field is ever stored on the state (only this raw `{ id: level }` map serializes).
+   */
+  tech: Record<string, number>
+}
+
+/**
+ * Global, account-wide tech multipliers (M3.1) — the TRANSIENT roll-up of the
+ * passive tree's economic effects, recomputed from {@link GameState.tech} by
+ * `aggregateTechMods` (systems/tech.ts) and threaded into
+ * {@link recomputeVillageDerived}. Each field is a plain `number` factor where
+ * `1` means "no bonus": `productionMult[r]` scales resource `r`'s production,
+ * `storageMult` the storage cap, `popMult` the population cap. Never stored on the
+ * state — it is derived on demand and discarded after each recompute.
+ */
+export interface TechModifiers {
+  productionMult: Record<ResourceId, number>
+  storageMult: number
+  popMult: number
+}
+
+/** Identity tech multipliers (everything 1 = no bonus). The default for any village
+ * recompute that runs before/without tech (createVillage, plain build, the sim). */
+export const NO_TECH_MODS: TechModifiers = {
+  productionMult: { wood: 1, clay: 1, iron: 1 },
+  storageMult: 1,
+  popMult: 1,
 }
 
 /** Base storage cap before any warehouse levels. Storage scales with warehouse. */
@@ -292,8 +329,15 @@ const BASE_POP_CAP = D(10)
  * `cost_reduction` effects are intentionally NOT applied here: they affect build
  * costs and are consumed by buildingCost (src/systems/buildings.ts), not the
  * tick. The switch is exhaustive over BuildingEffect['kind'].
+ *
+ * `mods` are the GLOBAL tech multipliers (M3.1), applied AFTER the per-building
+ * roll-up: production[r] *= mods.productionMult[r], storageCap *= mods.storageMult,
+ * popCap *= mods.popMult. They default to {@link NO_TECH_MODS} (all 1), so a village
+ * with no tech — or a caller that does not thread tech (createVillage, the sim) —
+ * reproduces the pure building economy byte-for-byte. `recomputeDerived` computes the
+ * real `mods` once and passes them to every village.
  */
-export function recomputeVillageDerived(v: Village): void {
+export function recomputeVillageDerived(v: Village, mods: TechModifiers = NO_TECH_MODS): void {
   const production: Record<ResourceId, Decimal> = { wood: D(0), clay: D(0), iron: D(0) }
   let storageCap = BASE_STORAGE_CAP
   let popCap = BASE_POP_CAP
@@ -323,6 +367,14 @@ export function recomputeVillageDerived(v: Village): void {
     }
   }
 
+  // Fold in the GLOBAL tech multipliers (M3.1). On Decimal (.mul) so the bonuses
+  // compound with the economy past 2^53; with NO_TECH_MODS every factor is 1, a no-op.
+  for (const r of RESOURCE_IDS) {
+    production[r] = production[r].mul(mods.productionMult[r])
+  }
+  storageCap = storageCap.mul(mods.storageMult)
+  popCap = popCap.mul(mods.popMult)
+
   v.production = production
   v.storageCap = storageCap
   v.popCap = popCap
@@ -334,7 +386,12 @@ export function recomputeVillageDerived(v: Village): void {
  * all cached fields are consistent with the building levels they derive from.
  */
 export function recomputeDerived(state: GameState): void {
-  for (const id of state.villageOrder) recomputeVillageDerived(state.villages[id])
+  // Compute the GLOBAL tech multipliers once and apply them to every village. This is
+  // the ONLY call site of aggregateTechMods inside state.ts and it lives in the
+  // function body (not module top level), which is what keeps the systems/tech.ts
+  // value import free of an initialisation cycle (see the import note above).
+  const mods = aggregateTechMods(state.tech)
+  for (const id of state.villageOrder) recomputeVillageDerived(state.villages[id], mods)
 }
 
 /**
@@ -401,6 +458,7 @@ export function createInitialState(seed: string, now: number): GameState {
     villageOrder: ['v0'],
     world: generateWorld(seed),
     battleLog: [],
+    tech: {},
   }
 }
 

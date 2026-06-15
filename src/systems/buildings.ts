@@ -1,6 +1,6 @@
 import { D, type Decimal } from '../engine/decimal'
-import type { Village } from '../engine/state'
-import { recomputeVillageDerived } from '../engine/state'
+import type { Village, TechModifiers } from '../engine/state'
+import { recomputeVillageDerived, NO_TECH_MODS } from '../engine/state'
 import { BUILDINGS, BUILDING_IDS, type BuildingId, type ResourceCost } from '../content/buildings'
 
 /**
@@ -71,10 +71,15 @@ export function canAfford(v: Village, cost: ResourceCost): boolean {
 /**
  * Attempt to upgrade `id` by one level in `v`. Returns false (no mutation) when the
  * building is already maxed or the village cannot afford the next level; otherwise
- * spends the cost, increments the level, re-derives that village's cached stats and
- * returns true.
+ * spends the cost, increments the level, re-derives that village's cached stats
+ * (folding the account-wide tech multipliers `mods` so the fresh level reflects
+ * them immediately) and returns true.
  */
-export function build(v: Village, id: BuildingId): boolean {
+export function build(
+  v: Village,
+  id: BuildingId,
+  mods: TechModifiers = NO_TECH_MODS,
+): boolean {
   const def = BUILDINGS[id]
   if (v.buildings[id] >= def.maxLevel) return false
 
@@ -85,7 +90,7 @@ export function build(v: Village, id: BuildingId): boolean {
   v.resources.clay = v.resources.clay.sub(cost.clay)
   v.resources.iron = v.resources.iron.sub(cost.iron)
   v.buildings[id] += 1
-  recomputeVillageDerived(v)
+  recomputeVillageDerived(v, mods)
   return true
 }
 

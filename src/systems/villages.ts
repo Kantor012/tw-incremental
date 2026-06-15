@@ -1,6 +1,6 @@
 import { D, type Decimal } from '../engine/decimal'
 import type { GameState, VillageId } from '../engine/state'
-import { createVillage, nextVillageId } from '../engine/state'
+import { createVillage, nextVillageId, recomputeDerived } from '../engine/state'
 import type { ResourceCost } from '../content/buildings'
 import { distance, WORLD_SIZE } from './world'
 
@@ -206,6 +206,10 @@ export function foundVillage(
   const v = createVillage(id, 'Wioska ' + (count + 1), x, y)
   state.villages[id] = v
   state.villageOrder.push(id)
+  // Reconcile derived fields ACROSS the empire so the freshly-planted village
+  // inherits the current global tech multipliers (createVillage rolls it up with
+  // NO_TECH_MODS only).
+  recomputeDerived(state)
   return id
 }
 

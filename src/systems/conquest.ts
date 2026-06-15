@@ -1,6 +1,7 @@
 import {
   createVillage,
   nextVillageId,
+  recomputeDerived,
   type GameState,
   type World,
   type VillageId,
@@ -123,6 +124,11 @@ export function applyConquest(
     newVillageId,
   }
   state.battleLog.push(report)
+
+  // Reconcile derived fields ACROSS the empire so the captured village inherits
+  // the current global tech multipliers (createVillage rolls it up with
+  // NO_TECH_MODS only).
+  recomputeDerived(state)
 
   return newVillageId
 }

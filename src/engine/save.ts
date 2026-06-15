@@ -4,6 +4,7 @@ import { recomputeDerived, INITIAL_BUILDINGS, INITIAL_UNITS, RAID_BASE_INTERVAL 
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
+import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
 /**
@@ -22,13 +23,16 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  *   those functions can run. The v5→v6 migration additionally pulls in
  *   `generateWorld` / `WORLD_CENTER` (systems/world.ts) and `barbarianTarget`
  *   (content/barbarians.ts); those too are read ONLY inside `migrate`, so the wider
- *   value cycle (save → world → barbarians → state → save) stays benign.
+ *   value cycle (save → world → barbarians → state → save) stays benign. The tech
+ *   catalogue (`TECH_NODES` / `TECH_NODE_IDS`, content/tech.ts, used by the v8
+ *   validation) is PURE DATA that imports only the erased `ResourceId` type from
+ *   state.ts, so it adds no runtime edge and can never form an initialisation cycle.
  * - Everything here must run headless (Node + browser): localStorage access is
  *   always feature-detected and wrapped in try/catch.
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 7
+export const SAVE_VERSION = 8
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -275,6 +279,15 @@ export function migrate(raw: any): any {
       const world = isObject(s.world) ? { ...s.world, barbarians } : s.world
       return { ...s, villages, world, version: 7 }
     },
+    // v7 -> v8: global passive tree (M3.1). A v7 save predates the account-wide tech
+    // map, so backfill the single new field — `tech`, a sparse `{ nodeId: level }` map
+    // (absent key = level 0) — as empty. Its economic multipliers are TRANSIENT (folded
+    // by aggregateTechMods in recomputeDerived), so nothing else is stored or seeded
+    // here. A forward-compat save that already carries an object `tech` keeps it
+    // verbatim; any non-object (corrupt/missing) is reset to {}. Nothing is recomputed
+    // here; importSave's recomputeDerived pass runs afterwards exactly as for every
+    // other migration (and now also folds in the — empty — tech mods).
+    7: (s) => ({ ...s, tech: isObject(s.tech) ? s.tech : {}, version: 8 }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -444,8 +457,10 @@ function validateVillage(v: unknown, id: string): void {
  * never references a missing entry), every village passes {@link validateVillage},
  * the spatial `world` (M2.2) is checked (its `barbarians` list, each with a finite
  * coordinate, a level in [1, MAX_TARGET_LEVEL] and — since M2.4 — a `loyalty` in
- * [0, 100]), and the GLOBAL battle log is validated (each report's `villageId`, plus
- * the M2.4 `conquer` variant alongside the existing `attack` / `raid`).
+ * [0, 100]), the GLOBAL battle log is validated (each report's `villageId`, plus the
+ * M2.4 `conquer` variant alongside the existing `attack` / `raid`), and finally the
+ * M3.1 `tech` map is checked (an object whose every present key is a known node id at
+ * an integer level within that node's [0, maxLevel] band; unknown keys are rejected).
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -568,6 +583,40 @@ export function validateState(s: unknown): GameState {
       }
     } else if (typeof r.looted !== 'string') {
       throw new Error('save: invalid raid report looted')
+    }
+  }
+
+  // GLOBAL passive tree (M3.1) — a sparse `{ nodeId: level }` map (absent key = level
+  // 0). It is the ONLY tech field that serializes; the economic multipliers it drives
+  // are TRANSIENT (recomputeDerived re-derives them via aggregateTechMods after import),
+  // so there is nothing else to check. Every PRESENT key must be a KNOWN node id whose
+  // level is an integer inside that node's [0, maxLevel] band — an out-of-band level
+  // would mis-scale the whole economy and then get autosaved (CLAUDE.md hard rule #3).
+  //
+  // Unknown keys are REJECTED (fail loudly) rather than silently ignored. The contract
+  // leaves the choice to this module; rejecting is the safer one here: tech is a
+  // free-form account-wide map written ONLY by onPurchaseTech (known ids), unlike the
+  // dense, fully-keyed buildings/units rosters, so a key outside TECH_NODE_IDS is never
+  // a benign omission — it means a corrupt/tampered/forward-version save, and importSave
+  // runs over arbitrary pasted input. Trade-off: a save from a FUTURE version that added
+  // nodes will not load on this build (downgrade is best-effort, like the rest of
+  // forward-compat). An empty `{}` always passes, which the v7->v8 migration guarantees.
+  const { tech } = s
+  if (!isObject(tech)) throw new Error('save: missing tech')
+  const knownNodeIds = TECH_NODE_IDS as readonly string[]
+  for (const nodeId of Object.keys(tech)) {
+    if (!knownNodeIds.includes(nodeId)) {
+      throw new Error(`save: unknown tech node ${nodeId}`)
+    }
+    const level = tech[nodeId]
+    const maxLevel = TECH_NODES[nodeId].maxLevel
+    if (
+      typeof level !== 'number' ||
+      !Number.isInteger(level) ||
+      level < 0 ||
+      level > maxLevel
+    ) {
+      throw new Error(`save: invalid tech level ${nodeId}`)
     }
   }
 
