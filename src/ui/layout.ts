@@ -410,6 +410,15 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
       en.tab.classList.toggle('is-active', on)
       en.panelWrap.hidden = !on
     }
+    // Wejście panelu: ponownie odpalamy animację wjazdu na świeżo odsłoniętym
+    // panelu. Toggle klasy z wymuszonym reflowem restartuje @keyframes przy
+    // KAŻDEJ zmianie zakładki (selectTab jest wołany wyłącznie na zdarzenia:
+    // montaż, klik, klawiatura — nigdy per-frame). animationend sprząta klasę.
+    const p = entries[index].panelWrap
+    p.classList.remove('tabpanel-enter')
+    void p.offsetWidth /* wymuszony reflow restartuje animację CSS */
+    p.classList.add('tabpanel-enter')
+    p.addEventListener('animationend', () => p.classList.remove('tabpanel-enter'), { once: true })
     if (moveFocus) entries[index].tab.focus()
     persistTabId(entries[index].id)
     entries[index].panel.update()
@@ -457,6 +466,12 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   // Show the initial tab (also runs its first update), then subscribe a single
   // effect that refreshes the HUD + ONLY the active panel on every revision.
   selectTab(activeIndex, false)
+  // Puls "nowy raport": tani, O(1) cache ostatniego wpisu battleLog. battleLog to
+  // ograniczone okno przesuwne (długość się nasyca), więc porównujemy TOŻSAMOŚĆ
+  // ostatniego elementu — przy każdym nowym raporcie to świeży obiekt, więc
+  // referencja zmienia się niezawodnie. Brak porównania długości, brak iteracji.
+  let lastReportTop = ctx.store.state.battleLog.at(-1)
+  const reportsEntry = entries.find((e) => e.id === 'reports')
   effect(() => {
     // Track BOTH the store revision and the active-village selection: a tick OR a
     // village switch refreshes the switcher, the HUD and the active panel. Reading
@@ -464,6 +479,23 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     // without rebuilding the shell.
     void ctx.store.rev.value
     void ctx.activeVillageId.value
+    // Tani compare per-frame: jeśli przybył nowy raport, a użytkownik jest na innej
+    // zakładce niż Raporty, pulsujemy złotem przycisk Raporty (augmentuje wpis,
+    // nie zastępuje go). Dodanie klasy tylko na rzadkim zdarzeniu wzrostu;
+    // animationend usuwa klasę, więc .tab-pulse nigdy się nie kumuluje. Seria
+    // raportów (horda / wiele wiosek) NIE restartuje trwającego pulsu — pomijamy
+    // gdy klasa już wisi, więc strumień wyników daje jeden spokojny błysk, nie
+    // stutter; kolejny puls dopiero po wygaśnięciu poprzedniego.
+    const log = ctx.store.state.battleLog
+    const top = log[log.length - 1]
+    if (top !== undefined && top !== lastReportTop && reportsEntry && entries[activeIndex].id !== 'reports') {
+      const t = reportsEntry.tab
+      if (!t.classList.contains('tab-pulse')) {
+        t.classList.add('tab-pulse')
+        t.addEventListener('animationend', () => t.classList.remove('tab-pulse'), { once: true })
+      }
+    }
+    lastReportTop = top
     rebuildVillageSwitch()
     updateVillageActive()
     updateHud()

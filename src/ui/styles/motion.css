@@ -1,0 +1,212 @@
+/* ============================================================================
+ * TW Incremental — Ruch i mikro-interakcje (M11.3)
+ * --------------------------------------------------------------------------
+ * Warstwa CZYSTO prezentacyjna: ożywia interfejs subtelnym ruchem, NIE dotykając
+ * stanu gry ani logiki. Wszystkie animacje to CSS @keyframes/transition (zero JS
+ * w pętli klatkowej, zero zewnętrznych assetów — twarde ograniczenia projektu).
+ *
+ * Kontrakt wczytywania: ten plik MUSI iść PO base.css i layout.css (main.ts), bo
+ * świadomie NADPISUJE ich pojedyncze reguły (skrócone przejście paska, docisk
+ * karty). Równa swoistość + późniejsza pozycja w kaskadzie → te reguły wygrywają.
+ *
+ * Zasady wydajności (bramka jakości CLAUDE.md):
+ *  - Animujemy WYŁĄCZNIE transform/opacity (kompozytor) oraz — punktowo, w
+ *    JEDNORAZOWYCH animacjach zdarzeniowych — box-shadow (poświata pulsu). Żadnej
+ *    z tych animacji nie odpalamy w pętli ticka: wejście panelu i puls zakładki
+ *    włącza JS klasą TYLKO na zdarzenie (zmiana zakładki / nowy raport), a klasa
+ *    sama się sprząta na `animationend` (nie kumuluje się).
+ *  - Skrócone przejście .bar > i to nadpisanie szerokości (setBar pisze width co
+ *    klatkę) — krótkie (~160ms), żeby paski „doganiały" wartość płynnie, ale wciąż
+ *    czytały się jako żywe, nie ślamazarne.
+ *
+ * Dostępność (WCAG 2.3.3 / 2.2.2 / 1.4.1):
+ *  - KAŻDA animacja nieistotna jest wyłączana w bloku
+ *    @media (prefers-reduced-motion: reduce) na końcu pliku. Dodatkowo działa
+ *    globalny wyłącznik z base.css (zeruje czasy) — nasze klatki KOŃCZĄ się w
+ *    stanie spoczynku (opacity:1; transform:none; scaleX(1)), więc „przeskok" nie
+ *    zostawia żadnego przesunięcia.
+ *  - Ruch NIGDY nie jest jedynym nośnikiem informacji: puls zakładki wzmacnia
+ *    już wyrenderowany wiersz raportu + samą listę, podkreślenie aktywnej zakładki
+ *    dubluje istniejący border-bottom + aria-selected + pogrubienie.
+ * ========================================================================== */
+
+/* ----------------------------------------------------------------------------
+ * @keyframes
+ * -------------------------------------------------------------------------- */
+
+/* Wejście panelu zakładki: delikatne wynurzenie się — fade + drobny zjazd w górę
+ * i ledwie wyczuwalne skalowanie. Kończy się w naturalnym spoczynku (opacity:1,
+ * transform:none), więc usunięcie klasy po animacji jest bezszwowe. */
+@keyframes tabpanel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Wskaźnik aktywnej zakładki: złote podkreślenie „rozkwita" ze środka
+ * (scaleX 0 → 1 + fade). Spoczynek = scaleX(1)/opacity:1, więc bez ruchu (reduced
+ * motion / brak animacji) listwa po prostu jest widoczna na miejscu. */
+@keyframes tab-underline-in {
+  from {
+    opacity: 0;
+    transform: scaleX(0);
+  }
+  to {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+/* Wejście wiersza raportu: świeży wynik łagodnie się wnosi (fade + lekki dojazd
+ * w górę), żeby „przyleciał", a nie mrugnął na miejscu. Kończy w spoczynku. */
+@keyframes report-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Puls zdarzenia: gdy na NIEAKTYWNEJ zakładce (np. Raporty) pojawia się nowy
+ * raport, zakładka raz rozbłyska złotą poświatą i gaśnie — przyciąga wzrok jednym
+ * spojrzeniem, nie natarczywie. Szczyt poświaty zestrojony z --glow-accent-soft
+ * (0.32), więc błysk harmonizuje z podkreśleniem aktywnej zakładki. Zaczyna i
+ * kończy w spoczynku (poświata przezroczysta ≈ brak cienia), więc po usunięciu
+ * klasy nie zostaje żaden ślad. Animowany box-shadow jest tu OK: to jednorazowe
+ * zdarzenie na jednym elemencie (a nie pętla klatkowa). */
+@keyframes tab-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0);
+  }
+  35% {
+    box-shadow: 0 0 14px 2px rgba(var(--accent-rgb), 0.32);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0);
+  }
+}
+
+/* ----------------------------------------------------------------------------
+ * Klasy narzędziowe (włączane JS-em wyłącznie na ZDARZENIE; samo-sprzątane)
+ * -------------------------------------------------------------------------- */
+
+/* Wejście panelu — klasę dokłada selectTab() po odsłonięciu panelu (z wymuszonym
+ * reflow, by restartować animację przy każdym wyborze), zdejmuje ją listener
+ * `animationend` (once). `both` trzyma stan początkowy do startu i końcowy po
+ * zakończeniu — końcowy == spoczynek, więc zdjęcie klasy nic nie szarpie. */
+.tabpanel-enter {
+  animation: tabpanel-enter var(--dur-base) var(--ease-out) both;
+}
+
+/* Puls zakładki — klasę dokłada pętla efektu na WYKRYCIE nowego raportu (tani
+ * porównawczy test referencji), zdejmuje `animationend` (once). JEDEN spokojny
+ * przebieg (~220ms) — krótki błysk „spójrz tu", a nie nachalne miganie; serie
+ * raportów sklejają się w jedną poświatę (layout.ts nie restartuje już trwającego
+ * pulsu). Spoczynek bez cienia. */
+.tab-pulse {
+  animation: tab-pulse var(--dur-base) var(--ease) 1;
+}
+
+/* Wejście wiersza raportu — klasę dostaje TYLKO najnowsza karta przy przebudowie
+ * listy (świeży <li>, więc animacja rusza sama, bez sztuczki z reflow); zdejmuje
+ * ją `animationend` (once). */
+.report-enter {
+  animation: report-enter var(--dur-base) var(--ease-out) both;
+}
+
+/* ----------------------------------------------------------------------------
+ * Wskaźnik aktywnej zakładki — pseudo-element rysowany kodem (zero JS)
+ * -------------------------------------------------------------------------- */
+
+/* Kotwica dla podkreślenia: pozycjonujemy ::after względem zakładki. relative bez
+ * offsetów nie rusza układu. */
+.tab {
+  position: relative;
+}
+
+/* Złota świecąca listwa nad istniejącym border-bottom aktywnej zakładki. Animacja
+ * `tab-underline-in` odpala się SAMA z chwilą, gdy zakładka dostaje .is-active
+ * (toggle w selectTab) — żadnego dodatkowego JS. Podkreślenie jest DODATKIEM do
+ * trwałego border-bottom + koloru + pogrubienia + aria-selected (ruch nie jest
+ * jedynym nośnikiem stanu). */
+.tab.is-active::after {
+  content: "";
+  position: absolute;
+  left: var(--space-3);
+  right: var(--space-3);
+  bottom: 0;
+  height: 2px;
+  background-image: var(--grad-progress);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--glow-accent-soft);
+  transform-origin: center;
+  animation: tab-underline-in var(--dur-base) var(--ease-out) both;
+}
+
+/* ----------------------------------------------------------------------------
+ * Wygładzenie pasków postępu — NADPISANIE base.css (.bar > i było var(--dur-base))
+ * -------------------------------------------------------------------------- */
+
+/* setBar pisze fill.style.width co klatkę; skracamy przejście do ~160ms, by
+ * magazyn/populacja/poziom „doganiały" nową wartość płynnie, ale wciąż żywo
+ * (dłuższe = laggy odczyt). Bez klasy, bez JS — czysta kaskada. */
+.bar > i {
+  transition: width 160ms var(--ease);
+}
+
+/* ----------------------------------------------------------------------------
+ * Docisk karty (mikro-interakcja) — CSS-only :active, dobudowane na hover-lift M11.1
+ * -------------------------------------------------------------------------- */
+
+/* Wciśnięcie karty: drobne skurczenie (scale) zamiast uniesienia hover — czytelny
+ * „klik". Reguła jest PÓŹNIEJ w kaskadzie niż .card:hover (layout.css), więc przy
+ * jednoczesnym hover+active wygrywa transform docisku; tło/cień hover zostają.
+ * Karty mają już transition na transform (layout.css), więc docisk łagodnie ease.
+ * (Przyciski mają własny :active w base.css — tu ich NIE ruszamy, by nie dublować.) */
+.card:active,
+.building-card:active,
+.unit-card:active,
+.target:active,
+.save-card:active {
+  transform: scale(0.985);
+}
+
+/* ----------------------------------------------------------------------------
+ * Ograniczony ruch — JEDEN zbiorczy wyłącznik (WCAG 2.3.3 / 2.2.2)
+ * --------------------------------------------------------------------------
+ * Pas i szelki: globalny blok base.css już zeruje czasy, ale tu jawnie znosimy
+ * KAŻDĄ nieistotną animację dodaną w tym pliku (jak istniejące jawne bloki w
+ * base.css/layout.css). Wszystkie nasze klatki kończą w spoczynku, więc po
+ * wyłączeniu element po prostu jest w stanie docelowym — bez resztkowego ruchu.
+ * -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .tabpanel-enter,
+  .tab-pulse,
+  .report-enter,
+  .tab.is-active::after {
+    animation: none;
+  }
+
+  /* Pasek bez płynnego dojazdu — width nadal aktualizuje się co klatkę, tyle że
+   * skokowo (żywy odczyt, zero easingu). */
+  .bar > i {
+    transition: none;
+  }
+
+  /* Docisk karty bez ruchu — by wciśnięcie nie „utknęło" przeskalowane. */
+  .card:active,
+  .building-card:active,
+  .unit-card:active,
+  .target:active,
+  .save-card:active {
+    transform: none;
+  }
+}

@@ -1,6 +1,9 @@
 import './ui/styles/tokens.css'
 import './ui/styles/base.css'
 import './ui/styles/layout.css'
+// Ruch + mikro-interakcje (M11.3): wczytany PO layout.css, by mógł nadpisywać
+// pojedyncze reguły (skrócone przejście paska, docisk karty). Czysto prezentacyjny.
+import './ui/styles/motion.css'
 
 import { createInitialState, GameStore, type GameState, type VillageId } from './engine/state'
 import { signal } from './engine/store'
@@ -329,7 +332,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.28.0',
+  version: '0.29.0',
   offlineSeconds,
 })
 

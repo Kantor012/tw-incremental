@@ -346,7 +346,15 @@ export function createReportsPanel(ctx: UiCtx): Panel {
 
     // Newest first: iterate the log (oldest→newest, append order) in reverse.
     for (let i = log.length - 1; i >= 0; i--) {
-      list.appendChild(reportCard(log[i], originOf(log[i])))
+      const card = reportCard(log[i], originOf(log[i]))
+      // Tylko najnowsza karta (pierwsza iteracja) dostaje animację wejścia, by
+      // przebudowa siatki nie animowała ponownie starych wierszy. Samosprzątanie
+      // na animationend zdejmuje klasę, więc kolejne re-rendery jej nie wznawiają.
+      if (i === log.length - 1) {
+        card.classList.add('report-enter')
+        card.addEventListener('animationend', () => card.classList.remove('report-enter'), { once: true })
+      }
+      list.appendChild(card)
     }
   }
 
