@@ -13,6 +13,7 @@ import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
 import { ERA_NODES, ERA_NODE_IDS } from '../content/era'
+import { DYNASTY_NODES, DYNASTY_NODE_IDS } from '../content/dynasty'
 import { ACHIEVEMENT_IDS } from '../content/achievements'
 import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
@@ -35,10 +36,12 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  *   value cycle (save → world → barbarians → state → save) stays benign. The tech
  *   catalogue (`TECH_NODES` / `TECH_NODE_IDS`, content/tech.ts, used by the v8
  *   validation), the prestige catalogue (`PRESTIGE_NODES` / `PRESTIGE_NODE_IDS`,
- *   content/prestige.ts, used by the v9 validation) and the era catalogue (`ERA_NODES` /
- *   `ERA_NODE_IDS`, content/era.ts, used by the v15 validation) are PURE DATA that import
- *   only the erased `ResourceId` type from state.ts (era.ts imports nothing at all), so
- *   they add no runtime edge and can never form an initialisation cycle. The achievements
+ *   content/prestige.ts, used by the v9 validation), the era catalogue (`ERA_NODES` /
+ *   `ERA_NODE_IDS`, content/era.ts, used by the v15 validation) and the dynasty catalogue
+ *   (`DYNASTY_NODES` / `DYNASTY_NODE_IDS`, content/dynasty.ts, used by the v16 validation)
+ *   are PURE DATA that import only the erased `ResourceId` type from state.ts (era.ts /
+ *   dynasty.ts import nothing at all), so they add no runtime edge and can never form an
+ *   initialisation cycle. The achievements
  *   id list (`ACHIEVEMENT_IDS`,
  *   content/achievements.ts, used by the v13 validation) is the same: that module imports
  *   ONLY erased types (`GameState` / `Stats` from state.ts, `BuildingId` from
@@ -48,7 +51,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 15
+export const SAVE_VERSION = 16
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -483,6 +486,26 @@ export function migrate(raw: any): any {
       ...s,
       era: isObject(s.era) ? s.era : { points: 0, totalEarned: 0, eras: 0, nodes: {} },
       version: 15,
+    }),
+    // v15 -> v16: dynasty / great-great reset (M6.2). A v15 save predates the permanent,
+    // account-wide dynasty tree (the THIRD meta-layer above era), so backfill the single new
+    // field — `dynasty`, the persistent { points, totalEarned, dynasties, nodes } record
+    // (current DP balance, lifetime DP earned, dynasty count and a sparse { nodeId: level }
+    // map). The dynasty multipliers it drives are TRANSIENT (folded by aggregateDynastyMods
+    // inside effectiveMods in recomputeDerived, plus dynastyEpMult on the EP yield), so
+    // nothing else is stored or seeded here. A forward-compat save that already carries an
+    // object `dynasty` keeps it verbatim; any non-object (corrupt/missing) is reset to the
+    // zero state. Nothing is recomputed here; importSave's recomputeDerived pass runs
+    // afterwards exactly as for every other migration (and now also folds in the — empty —
+    // dynasty mods, an identity bag, so the result is byte-identical to the pre-M6.2 derived
+    // stats — and automations stay locked, since the gateway is unowned). Mirrors the v14->v15
+    // era backfill.
+    15: (s) => ({
+      ...s,
+      dynasty: isObject(s.dynasty)
+        ? s.dynasty
+        : { points: 0, totalEarned: 0, dynasties: 0, nodes: {} },
+      version: 16,
     }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
@@ -922,6 +945,43 @@ export function validateState(s: unknown): GameState {
     const maxLevel = ERA_NODES[nodeId].maxLevel
     if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
       throw new Error(`save: invalid era level ${nodeId}`)
+    }
+  }
+
+  // PERMANENT dynasty record (M6.2) — the THIRD meta-layer account, which SURVIVES every
+  // reset (and which a Nowa Dynastia wipes the era AND prestige accounts in favour of).
+  // `points` (current DP balance), `totalEarned` (lifetime DP earned) and `dynasties`
+  // (great-great-reset count) are finite, non-negative numbers; a NaN/Infinity/negative would
+  // poison the DP economy and the dynasty maths and then get autosaved (CLAUDE.md hard rule
+  // #3). `nodes` is a sparse `{ nodeId: level }` map exactly like `era.nodes` (absent key =
+  // level 0): the multipliers it drives are TRANSIENT (re-derived by aggregateDynastyMods
+  // inside effectiveMods in recomputeDerived after import, plus dynastyEpMult on the EP yield
+  // and the automation gateway), so only the levels persist. Every PRESENT key must be a KNOWN
+  // dynasty node id whose level is an integer inside that node's [0, maxLevel] band; unknown
+  // keys are REJECTED for the same reason as the tech/prestige/era maps — `nodes` is a
+  // free-form account-wide map written ONLY by onPurchaseDynasty (known ids), so a key outside
+  // DYNASTY_NODE_IDS means a corrupt/tampered/forward-version save (downgrade is best-effort,
+  // like the rest of forward-compat). An empty `{}` always passes, which the v15->v16
+  // migration guarantees.
+  const { dynasty } = s
+  if (!isObject(dynasty)) throw new Error('save: missing dynasty')
+  for (const key of ['points', 'totalEarned', 'dynasties'] as const) {
+    const n = dynasty[key]
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+      throw new Error(`save: invalid dynasty ${key}`)
+    }
+  }
+  const dynastyNodes = dynasty.nodes
+  if (!isObject(dynastyNodes)) throw new Error('save: invalid dynasty nodes')
+  const knownDynastyIds = DYNASTY_NODE_IDS as readonly string[]
+  for (const nodeId of Object.keys(dynastyNodes)) {
+    if (!knownDynastyIds.includes(nodeId)) {
+      throw new Error(`save: unknown dynasty node ${nodeId}`)
+    }
+    const level = dynastyNodes[nodeId]
+    const maxLevel = DYNASTY_NODES[nodeId].maxLevel
+    if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
+      throw new Error(`save: invalid dynasty level ${nodeId}`)
     }
   }
 

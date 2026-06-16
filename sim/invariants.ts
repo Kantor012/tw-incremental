@@ -64,6 +64,12 @@ import {
   prestigeNodeLevel,
 } from '../src/systems/prestige'
 import { eraHasCycle, orphanEraNodes, deadEraNodes, newEra } from '../src/systems/era'
+import {
+  dynastyHasCycle,
+  orphanDynastyNodes,
+  deadDynastyNodes,
+  newDynasty,
+} from '../src/systems/dynasty'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
@@ -1105,6 +1111,141 @@ export function checkEraNoSoftlock(seed: string): InvariantResult {
     detail: ok
       ? undefined
       : `fresh post-era capital has no available build/recruit/attack action within ${ERA_PLAYABILITY_HORIZON}s of idle production`,
+  }
+}
+
+// --- M6.2 dynasty (great-great reset / third meta-layer) invariants ----------------------------
+
+/**
+ * STATIC dynasty-tree TOPOLOGY (M6.2) — pure functions of the {@link import('../src/content/dynasty').DYNASTY_NODES}
+ * catalogue, independent of any {@link GameState}, so the runner asserts it ONCE per run (like
+ * {@link checkEraTree}). A single FAIL is a commit blocker: a malformed dynasty tree would
+ * mis-drive the third meta-layer. Aggregates the three structural facts into one PASS/FAIL,
+ * mirroring the era topology helpers:
+ *  - acyclic:       the prerequisite graph is a DAG (no cycle) — {@link dynastyHasCycle}.
+ *  - no orphans:    every node reachable from a {@link import('../src/content/dynasty').DYNASTY_ROOTS}
+ *                   root via prerequisite edges — {@link orphanDynastyNodes}.
+ *  - no dead perks: every node has a real effect ({@link deadDynastyNodes} treats the binary
+ *                   `automation_unlock` gateway as a REAL effect, not dead).
+ */
+export function checkDynastyTopology(): InvariantResult {
+  const issues: string[] = []
+  if (dynastyHasCycle()) issues.push('prerequisite graph contains a cycle (must be a DAG)')
+  const orphans = orphanDynastyNodes()
+  if (orphans.length) issues.push(`unreachable from roots: ${orphans.join(', ')}`)
+  const dead = deadDynastyNodes()
+  if (dead.length) issues.push(`no effect / perLevel<=0: ${dead.join(', ')}`)
+  return {
+    name: 'dynasty-topology',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/** True when two dynasty node maps hold the same keys at the same levels (order-independent). */
+function sameDynastyNodes(a: Record<string, number>, b: Record<string, number>): boolean {
+  const ak = Object.keys(a)
+  const bk = Object.keys(b)
+  if (ak.length !== bk.length) return false
+  for (const k of ak) if (a[k] !== b[k]) return false
+  return true
+}
+
+/**
+ * Dynasty round-trip (M6.2): the PERMANENT dynasty account ({@link GameState.dynasty} — DP
+ * balance, lifetime totals, dynasty count and the purchased dynasty-tree levels) must survive the
+ * real export/import (base64) path byte-for-byte. The whole-state {@link checkRoundTrip} already
+ * proves serialize/deserialize is loss-free; this is the targeted proof that the v16 save carries
+ * the dynasty account specifically — the bit that SURVIVES every reset of any kind (CLAUDE.md hard
+ * rule #3). Compares the four fields (nodes order-independently). Mirrors {@link checkEraRoundTrip}.
+ */
+export function checkDynastyRoundTrip(state: GameState): InvariantResult {
+  const restored = importSave(exportSave(state))
+  const a = state.dynasty
+  const b = restored.dynasty
+  const ok =
+    a.points === b.points &&
+    a.totalEarned === b.totalEarned &&
+    a.dynasties === b.dynasties &&
+    sameDynastyNodes(a.nodes, b.nodes)
+  return {
+    name: 'dynasty-round-trip',
+    ok,
+    detail: ok
+      ? undefined
+      : `dynasty account changed across export/import: ` +
+        `{points:${a.points},totalEarned:${a.totalEarned},dynasties:${a.dynasties}} -> ` +
+        `{points:${b.points},totalEarned:${b.totalEarned},dynasties:${b.dynasties}}`,
+  }
+}
+
+/**
+ * Game-seconds the post-dynasty capital is advanced by idle production before it MUST offer a
+ * progress action, and the coarse step between availability probes. Mirrors the era playability
+ * horizon: a just-reset capital starts at the bare starting pool, below even the cheapest build,
+ * so it only unlocks its first action after a few seconds of accrual — the horizon is a generous,
+ * bounded multiple of that, catching a PERMANENT dead-end without reading a FALSE stall on the
+ * normal "wait for the first tick of production" instant.
+ */
+const DYNASTY_PLAYABILITY_HORIZON = 600
+const DYNASTY_PLAYABILITY_STEP = 5
+
+/**
+ * No softlock after a Nowa Dynastia (M6.2): the great-great reset rebuilds the run as ONE fresh
+ * capital (mirroring a fresh {@link createInitialState} start, which runContinuous already proves
+ * playable), so it must never land in a PERMANENT stall. Seeds enough ERA-account progress that
+ * {@link newDynasty} banks DP and fires, then asserts the reset run reaches a state with at least
+ * one available progress action ({@link chooseAction} non-null) under the EFFECTIVE mods (tech ×
+ * prestige × era × dynasty).
+ *
+ * Crucially it does NOT probe the BARE just-reset instant: a just-reset capital has accrued nothing
+ * yet and sits at the bare starting pool, below the cheapest build, so NO action is affordable for
+ * the first few seconds — exactly like a brand-new game and exactly the FALSE stall the runner's
+ * runDynasty skips. Instead we advance the reset run by idle production over a BOUNDED horizon
+ * ({@link DYNASTY_PLAYABILITY_HORIZON}) and pass the moment an action appears; only a capital that
+ * NEVER unlocks one within the horizon is a genuine softlock. The surviving dynasty multipliers can
+ * only HELP (production accrues faster, and the automation gate — if owned — would also drive it),
+ * so this is the "a Nowa Dynastia leaves the game grywalny" guard the dynasty layer needs.
+ * Deterministic (the advance draws only the seeded rngState newDynasty installed) and self-contained.
+ * Mirrors {@link checkEraNoSoftlock}.
+ */
+export function checkDynastyNoSoftlock(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  // Enough account-wide era progress that a Nowa Dynastia can actually be banked.
+  state.era.totalEarned = 100
+  state.era.eras = 4
+  const dp = newDynasty(state)
+  if (dp <= 0) {
+    return {
+      name: 'dynasty-no-softlock',
+      ok: false,
+      detail: 'newDynasty banked no DP from a seeded era account (cannot test post-dynasty playability)',
+    }
+  }
+
+  // True iff SOME village offers a progress action right now under the effective mods.
+  const hasAction = (): boolean => {
+    const mods = effectiveMods(state)
+    for (const vid of state.villageOrder) {
+      if (chooseAction(state.villages[vid], state.world, mods) !== null) return true
+    }
+    return false
+  }
+
+  // Probe immediately (a dynasty start-resource head-start can make it playable at once), then let
+  // idle production accrue in coarse steps until an action unlocks or the horizon is exhausted.
+  let ok = hasAction()
+  for (let t = 0; !ok && t < DYNASTY_PLAYABILITY_HORIZON; t += DYNASTY_PLAYABILITY_STEP) {
+    simulate(state, DYNASTY_PLAYABILITY_STEP)
+    ok = hasAction()
+  }
+
+  return {
+    name: 'dynasty-no-softlock',
+    ok,
+    detail: ok
+      ? undefined
+      : `fresh post-dynasty capital has no available build/recruit/attack action within ${DYNASTY_PLAYABILITY_HORIZON}s of idle production`,
   }
 }
 

@@ -149,6 +149,37 @@ export interface BalanceTargets {
    */
   requireEraPpUplift: boolean
 
+  // --- M6.2 dynasty (great-great reset / third meta-layer) goals (warnings) ---
+  /**
+   * The bot must found at least this many dynasties (great-great resets) over the (separate)
+   * dynasty run — proof the third meta-layer is reachable within a reasonable session AND repeats
+   * deterministically. >= 1 is the contract floor; the bot self-limits dynasties (see
+   * sim/bot.BOT_MAX_DYNASTIES) so this never runs away. Reaching it requires the era loop to
+   * accumulate enough account-wide progress that {@link import('../src/systems/dynasty').pendingDynastyPoints}
+   * (a cube root of the era score) clears {@link import('./bot').DYN_MIN_DP}; if it cannot be hit,
+   * DP_SCALE / dynastyScore (systems/dynasty.ts) or the DYN_MIN_DP heuristic need tuning.
+   */
+  minDynasties: number
+  /**
+   * The bot must BUY at least this many dynasty-node levels from banked DP over the dynasty run —
+   * proof the dynasty tree is a reachable DP sink and the purchase path is exercised. Sized at the
+   * proof-of-mechanic floor; a regression that leaves the (rare) DP unspendable trips a warning.
+   */
+  minDynastyPurchases: number
+  /**
+   * The signature `ep_mult` dynasty effect must actually FOLD INTO era-point gain: a maxed ep_mult
+   * dynasty node must raise pendingEraPoints for a fixed era score (dynastyEpUplift > 1). True turns
+   * this into a (warning) target — the confirmation that each new dynasty accelerates the whole era loop.
+   */
+  requireDynastyEpUplift: boolean
+  /**
+   * The dynasty `automation_unlock` gateway must actually UNLOCK all three idle automations
+   * account-wide: with the gateway node owned, effectiveMods(state).automations must be all true
+   * (dynastyAutomationUnlocked). True turns this into a (warning) target — the confirmation that the
+   * gated mechanic is live (every routine unlocked from the start, the M6.2 signature gate).
+   */
+  requireDynastyAutomationUnlock: boolean
+
   // --- M5.1 automation (idle routines) goals (HARD — see runner.runAutomationCoverage) ---
   // These are proof-of-mechanic floors for the SEPARATE automation coverage run (automation
   // ON), NOT balance-curve warnings: with the deterministic seeded scenario each routine
@@ -255,6 +286,20 @@ export const TARGETS: BalanceTargets = {
   minEras: 1,
   minEraPurchases: 1,
   requireEraPpUplift: true,
+
+  // M6.2: dynasty online. A matured era loop should accumulate enough account-wide progress
+  // (lifetime EP + eras + era nodes) that its CUBE-root DP yield clears the dynasty floor, letting
+  // the bot found a Nowa Dynastia (the great-great reset that WIPES the era AND prestige accounts
+  // but banks permanent dynasty points) and spend DP on the dynasty tree. Measured by a SEPARATE
+  // dynasty-driving run (see sim/runner.runDynasty) so the M1–M6.1 targets stay measured on
+  // un-reset accounts. Floors at the proof-of-mechanic level (>= 1 dynasty / >= 1 dynasty level);
+  // the ep_mult uplift confirms each dynasty accelerates the era loop, and the automation-unlock
+  // gate confirms the M6.2 signature mechanic is live. If these cannot be hit without changing the
+  // tree, tune DP_SCALE / dynastyScore (systems/dynasty.ts) — see manifest notes.
+  minDynasties: 1,
+  minDynastyPurchases: 1,
+  requireDynastyEpUplift: true,
+  requireDynastyAutomationUnlock: true,
 
   // M5.1: automation online. With the three gateways unlocked and every toggle ON, the
   // SEPARATE coverage run (automation OFF in the main run, so the goals above are untouched)

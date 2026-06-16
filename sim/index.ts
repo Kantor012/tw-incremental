@@ -232,6 +232,32 @@ function evalTargets(r: RunResult): TargetCheck[] {
       ok: !TARGETS.requireEraPpUplift || m.eraPpUplift > 1,
       detail: `pp gain x${m.eraPpUplift.toFixed(3)} with a maxed pp_mult era node (fixed prestige score)`,
     },
+    {
+      // M6.2: the bot must found at least minDynasties dynasties in the separate dynasty run.
+      name: 'dynasties-founded',
+      ok: m.dynasties >= TARGETS.minDynasties,
+      detail: `founded ${m.dynasties} dynasty/dynasties (target >= ${TARGETS.minDynasties})`,
+    },
+    {
+      // M6.2: the bot must buy at least minDynastyPurchases dynasty-node levels from banked DP.
+      name: 'dynasty-nodes-purchased',
+      ok: m.dynastyPurchases >= TARGETS.minDynastyPurchases,
+      detail: `bought ${m.dynastyPurchases} dynasty levels (${m.dynastyNodesOwned} nodes, ${m.dynastyLevelsOwned} levels; target >= ${TARGETS.minDynastyPurchases})`,
+    },
+    {
+      // M6.2: confirms the signature ep_mult dynasty effect lifts era-point gain.
+      name: 'dynasty-ep-uplift',
+      ok: !TARGETS.requireDynastyEpUplift || m.dynastyEpUplift > 1,
+      detail: `ep gain x${m.dynastyEpUplift.toFixed(3)} with a maxed ep_mult dynasty node (fixed era score)`,
+    },
+    {
+      // M6.2: confirms the automation_unlock gateway turns on all three idle automations.
+      name: 'dynasty-automation-unlock',
+      ok: !TARGETS.requireDynastyAutomationUnlock || m.dynastyAutomationUnlocked,
+      detail: m.dynastyAutomationUnlocked
+        ? 'automations unlocked account-wide by the dynasty gateway (build + recruit + attack)'
+        : 'dynasty automation_unlock gateway did NOT unlock all three automations',
+    },
   ]
 }
 
@@ -368,6 +394,19 @@ async function main(): Promise<void> {
     console.log(
       `${m.seed.padEnd(8)} | ${String(m.eras).padStart(12)} | ${String(m.eraPurchases).padStart(13)} | ` +
         `${String(m.eraNodesOwned).padStart(11)} | ${String(m.eraLevelsOwned).padStart(12)} | x${m.eraPpUplift.toFixed(3)}`,
+    )
+  }
+  console.log('')
+
+  // --- Dynasty per seed (M6.2 third meta-layer; separate dynasty-driving run) ---
+  console.log('--- Dynasty (end) ---')
+  console.log('seed     | dynasties founded | levels bought | nodes owned | total levels | ep-gain uplift | automations from start')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.dynasties).padStart(17)} | ${String(m.dynastyPurchases).padStart(13)} | ` +
+        `${String(m.dynastyNodesOwned).padStart(11)} | ${String(m.dynastyLevelsOwned).padStart(12)} | x${m.dynastyEpUplift.toFixed(3)} | ` +
+        `${m.dynastyAutomationUnlocked ? 'unlocked' : 'locked'}`,
     )
   }
   console.log('')

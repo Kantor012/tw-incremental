@@ -108,6 +108,25 @@ export interface UiCtx {
    */
   onPurchaseEra: (nodeId: string) => boolean
   /**
+   * NOWA DYNASTIA (M6.2): bank the pending DYNASTY POINTS and perform the GREAT-GREAT RESET —
+   * WIPE the ENTIRE era account (EP, all era nodes, eras) AND the ENTIRE prestige account (PP,
+   * all prestige nodes, ascensions) and reset the run to a fresh capital (world regenerated
+   * from a per-dynasty seed, tech/battle log cleared, dynasty start bonuses applied). Returns
+   * the number of DP awarded — `0` when founding a dynasty was a no-op (no pending points). On
+   * a positive result the new dynasty is already committed + persisted. The panel confirms the
+   * destructive reset with the player itself; this callback is the commit, not the prompt. The
+   * PERMANENT dynasty tree + banked DP and the lifetime stats/achievements survive.
+   */
+  onNewDynasty: () => number
+  /**
+   * Purchase the NEXT level of the dynasty node `nodeId`, paid from banked DYNASTY POINTS;
+   * returns true on success (DP spent, `state.dynasty.nodes[nodeId]` incremented, derived
+   * multipliers recomputed, committed + persisted). The dynasty panel reads
+   * `canPurchaseDynasty` (systems/dynasty) itself for the disabled/affordability cue — this
+   * callback is the commit, not the validation.
+   */
+  onPurchaseDynasty: (nodeId: string) => boolean
+  /**
    * Patch the idle automation toggles / policy (M5.1): merge `patch` into
    * `store.state.automation`, then commit + persist (no recompute — the automation
    * state is read directly by the tick, not folded into derived stats). The

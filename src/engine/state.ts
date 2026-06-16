@@ -347,6 +347,33 @@ export interface EraState {
 }
 
 /**
+ * The PERMANENT dynasty account state (M6.2) — the THIRD meta-layer, sitting ABOVE
+ * era. Survives every great-great reset (`newDynasty`): you bank {@link points} (DP)
+ * by founding a Nowa Dynastia — which WIPES the whole era account AND the whole
+ * prestige account and resets the run — and spend them in the dynasty tree, whose
+ * purchased levels live in {@link nodes}. The economic effect of those nodes is
+ * TRANSIENT (rolled up by `aggregateDynastyMods` and combined onto the tech × prestige
+ * × era bag by `effectiveMods`), plus the signature `ep_mult` that multiplies era-point
+ * gain and the binary `automation_unlock` gate that unlocks all idle automations
+ * account-wide from the start; only this raw account state serializes. Mirrors
+ * {@link EraState} exactly.
+ */
+export interface DynastyState {
+  /** Unspent dynasty points (DP) available to buy nodes. Plain finite number >= 0. */
+  points: number
+  /** Lifetime DP ever earned across all dynasties (monotonic; stats/UI). >= 0. */
+  totalEarned: number
+  /** Number of dynasties founded so far (great-great resets). >= 0. */
+  dynasties: number
+  /**
+   * Purchased level per dynasty node id (absent key = level 0). The single permanent
+   * dynasty-tree state — its effects are recomputed from this map by
+   * `aggregateDynastyMods` and never stored derived (mirrors {@link EraState.nodes}).
+   */
+  nodes: Record<string, number>
+}
+
+/**
  * The three routines the idle layer can run for the player (M5.1). Each is
  * UNLOCKED via the tech tree (a binary `automation_unlock` gateway) and then TOGGLED
  * on by the player; both must be true for the routine to fire in the deterministic
@@ -474,6 +501,16 @@ export interface GameState {
    * {@link EraState}.
    */
   era: EraState
+  /**
+   * PERMANENT dynasty account state (M6.2) — the THIRD meta-layer above era: banked
+   * dynasty points (DP), lifetime totals, dynasty count and the purchased dynasty-tree
+   * levels. SURVIVES every great-great reset (`newDynasty`, which itself WIPES the era
+   * AND prestige accounts and the run); its node effects combine onto the tech × prestige
+   * × era bag via `effectiveMods`, its signature `ep_mult` multiplies era-point gain, and
+   * its `automation_unlock` gateway unlocks all idle automations account-wide from the
+   * start. See {@link DynastyState}.
+   */
+  dynasty: DynastyState
   /**
    * Idle automation toggles + policy (M5.1). The routines themselves are gated by
    * the tech tree (see {@link TechModifiers.automations}); this is the player's
@@ -730,6 +767,7 @@ export function createInitialState(seed: string, now: number): GameState {
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
     era: { points: 0, totalEarned: 0, eras: 0, nodes: {} },
+    dynasty: { points: 0, totalEarned: 0, dynasties: 0, nodes: {} },
     automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
     stats: createInitialStats(),
     achievements: {},

@@ -9,6 +9,13 @@ import {
 } from '../engine/state'
 import { generateWorld, WORLD_CENTER } from './world'
 import { ERA_NODES, ERA_NODE_IDS, ERA_ROOTS } from '../content/era'
+// VALUE import of the dynasty (M6.2) roll-ups — used ONLY inside function bodies below
+// (`pendingEraPoints`, `newEra`), never at module top level, so the systems/dynasty.ts <->
+// here cycle stays benign exactly like the state.ts edge: by the time any of these run, both
+// modules are fully evaluated. dynasty.ts does NOT import back from this module. The
+// signature `dynastyEpMult` scales EP gain (so each new dynasty accelerates the era loop),
+// and `dynastyStartResourceBonus` extends the run head-start.
+import { dynastyEpMult, dynastyStartResourceBonus } from './dynasty'
 
 /**
  * Era engine (M6.1) — the SECOND meta-layer, sitting ABOVE prestige/ascension.
@@ -225,15 +232,18 @@ export function eraScore(state: GameState): number {
 }
 
 /**
- * EP awarded for starting a Nowa Era RIGHT NOW: `floor(cbrt(eraScore) * EP_SCALE)`,
- * always >= 0 (0 only when there is no prestige progress to bank). The cube root makes
- * each successive era worth proportionally less per unit of raw prestige progress, and
- * is harsher than the prestige sqrt — EP is the rare, top-tier currency.
+ * EP awarded for starting a Nowa Era RIGHT NOW: `floor(cbrt(eraScore) * EP_SCALE *
+ * dynastyEpMult)`, always >= 0 (0 only when there is no prestige progress to bank). The
+ * cube root makes each successive era worth proportionally less per unit of raw prestige
+ * progress, and is harsher than the prestige sqrt — EP is the rare, top-tier currency. The
+ * dynasty tree's signature `ep_mult` (M6.2) scales the whole yield, so each new dynasty
+ * accelerates the era loop. With no dynasty nodes `dynastyEpMult` is 1, a no-op (so M6.1 era
+ * behaviour is byte-identical).
  */
 export function pendingEraPoints(state: GameState): number {
   const score = eraScore(state)
   if (!(score > 0)) return 0
-  return Math.floor(Math.cbrt(score) * EP_SCALE)
+  return Math.floor(Math.cbrt(score) * EP_SCALE * dynastyEpMult(state))
 }
 
 /** Purchased level of era node `id` (absent / non-positive / non-finite = 0). */
@@ -347,8 +357,10 @@ export function newEra(state: GameState): number {
 
   // Fresh single capital at the world centre (mirrors createInitialState's 'v0').
   const capital = createVillage('v0', 'Stolica', WORLD_CENTER.x, WORLD_CENTER.y)
-  // Permanent head-start from the era tree: +bonus to EACH starting resource.
-  const bonus = eraStartResourceBonus(state)
+  // Permanent head-start from the era AND dynasty (M6.2) trees: +bonus to EACH starting
+  // resource. With no dynasty nodes dynastyStartResourceBonus is 0, so M6.1 era behaviour is
+  // unchanged.
+  const bonus = eraStartResourceBonus(state) + dynastyStartResourceBonus(state)
   if (bonus > 0) {
     for (const r of RESOURCE_IDS) capital.resources[r] = capital.resources[r].add(bonus)
   }

@@ -22,8 +22,15 @@ import {
   pendingPrestigePoints,
 } from '../src/systems/prestige'
 import { PRESTIGE_NODE_IDS } from '../src/content/prestige'
-import { newEra, purchaseEra, canPurchaseEra, eraNodeLevel } from '../src/systems/era'
+import { newEra, purchaseEra, canPurchaseEra, eraNodeLevel, pendingEraPoints } from '../src/systems/era'
 import { ERA_NODES, ERA_NODE_IDS } from '../src/content/era'
+import {
+  newDynasty,
+  purchaseDynasty,
+  canPurchaseDynasty,
+  dynastyNodeLevel,
+} from '../src/systems/dynasty'
+import { DYNASTY_NODES, DYNASTY_NODE_IDS } from '../src/content/dynasty'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
@@ -64,6 +71,9 @@ import {
   checkEraRoundTrip,
   checkNewEraDeterminism,
   checkEraNoSoftlock,
+  checkDynastyTopology,
+  checkDynastyRoundTrip,
+  checkDynastyNoSoftlock,
   type InvariantResult,
 } from './invariants'
 import {
@@ -74,6 +84,7 @@ import {
   chooseAscend,
   choosePrestige,
   chooseEra,
+  chooseDynasty,
 } from './bot'
 import {
   collect,
@@ -86,6 +97,7 @@ import {
   type RunStats,
   type PrestigeRunStats,
   type EraRunStats,
+  type DynastyRunStats,
   type AutomationRunStats,
 } from './metrics'
 
@@ -148,6 +160,20 @@ const PRESTIGE_TICKS = 6000
  * terminates regardless of the budget.
  */
 const ERA_TICKS = 12000
+
+/**
+ * Step budget for the SEPARATE dynasty (great-great-reset) run (M6.2). Longer than {@link ERA_TICKS}
+ * because each dynasty is a THIRD-order reset: the bot must drive the prestige loop (several
+ * ascensions) AND the era loop (at least one Nowa Era) until the era account scores enough that the
+ * CUBE-root DP yield clears the dynasty floor, then found a Nowa Dynastia — which WIPES the era AND
+ * prestige accounts back to a 0 score. A SINGLE era already scores DYN_ERA_WEIGHT=10 (cbrt ≈ 2 ≥
+ * {@link import('./bot').DYN_MIN_DP}), so the dynasty fires the same step the first era lands (the era
+ * sim measures that around tick ~3-4k); the generous headroom both keeps the run robust to seed
+ * variation AND puts the half-mark (used by {@link runDynastySplit}) comfortably PAST the first
+ * dynasty so the save/load continuation actually crosses the great-great reset. Bounded by the
+ * dynasty + era + ascension caps, so the loop always terminates regardless of the budget.
+ */
+const DYNASTY_TICKS = 16000
 
 /**
  * Span (game-seconds) of the SEPARATE M5.1 automation coverage run. One hour is long enough
@@ -778,6 +804,206 @@ function runEraSplit(seed: string, ticks: number, dt: number): GameState {
   return state
 }
 
+// --- M6.2 dynasty (great-great reset / third meta-layer) run ----------------------------------
+//
+// A SEPARATE run from every measurement above, mirroring the era run's rationale: newDynasty
+// performs the GREAT-GREAT RESET — it WIPES the ENTIRE era account (EP, era nodes, eras) AND the
+// ENTIRE prestige account (PP, prestige nodes, ascensions) and resets the run to one fresh capital,
+// banking permanent DYNASTY POINTS (DP). Folding it into the primary / prestige / era run would zero
+// out the cumulative progression those targets measure. Here the bot plays normally via the same
+// {@link step}, ascends via {@link prestigeDrive} AND starts eras via {@link eraDrive} so the era
+// account ACCUMULATES (eras feed dynastyScore), and once that account scores enough that the
+// cube-root DP yield clears the dynasty floor it founds a Nowa Dynastia ({@link dynastyDrive}) and
+// spends the banked DP on the dynasty tree — repeating up to the dynasty cap. The PERMANENT dynasty
+// account (DP / totals / dynasty count / node levels) survives every reset, AND its multipliers fold
+// into every future run (effectiveMods) — exactly what {@link checkDynastyTopology} /
+// {@link checkDynastyRoundTrip} and the dynasty balance targets verify.
+
+/**
+ * The dynasty loop for ONE step's worth of decision, AFTER {@link step} + {@link prestigeDrive} +
+ * {@link eraDrive} have advanced the economy and banked prestige + era progress: if
+ * {@link chooseDynasty} says it's worthwhile, perform the great-great reset ({@link newDynasty},
+ * banking the pending DP and wiping the era + prestige accounts) then spend the banked DP greedily on
+ * the dynasty tree — buying each node in {@link DYNASTY_NODE_IDS} order up to its ceiling / the DP on
+ * hand ({@link canPurchaseDynasty} -> {@link purchaseDynasty}). A source-order forward pass suffices
+ * because prerequisites always precede their dependents in DYNASTY_NODE_IDS (append discipline).
+ * Returns whether a dynasty was founded and the number of dynasty-node levels bought this step.
+ * Pure-ish — it only mutates `state` through the engine's own newDynasty / purchaseDynasty, so two
+ * identical runs found dynasties and buy identically (the determinism / save-load invariants hold
+ * across the reset). Mirrors {@link eraDrive}.
+ */
+function dynastyDrive(state: GameState): { founded: boolean; purchases: number } {
+  if (!chooseDynasty(state)) return { founded: false, purchases: 0 }
+  newDynasty(state)
+  let purchases = 0
+  for (const id of DYNASTY_NODE_IDS) {
+    while (canPurchaseDynasty(state, id).ok) {
+      if (!purchaseDynasty(state, id)) break
+      purchases += 1
+    }
+  }
+  return { founded: true, purchases }
+}
+
+/** What a dynasty run yields: the final state, sampled invariants, and the dynasty tally. */
+interface DynastyRun {
+  state: GameState
+  invariants: InvariantResult[]
+  stats: DynastyRunStats
+}
+
+/**
+ * Run a fresh state forward for `ticks` steps WITH the prestige loop, the era loop AND the dynasty
+ * loop active. Each step plays normally ({@link step}), then {@link prestigeDrive} ascends + buys so
+ * the prestige account accumulates, then {@link eraDrive} converts a worthwhile account into a Nowa
+ * Era + era buys (so the era account — which feeds dynastyScore — accumulates), then
+ * {@link dynastyDrive} converts a worthwhile ERA account into a Nowa Dynastia + dynasty buys. After
+ * every dynasty reset, when `withInvariants`, the post-reset state is asserted valid and playable
+ * (resource / army / world / placement / loyalty — both the prestige AND era accounts now WIPED but
+ * valid — dynasty round-trip / whole-state round-trip). At the end the ep_mult uplift is MEASURED on
+ * a fixed era score and the automation-unlock gate is probed — the proof a dynasty accelerates the
+ * era loop AND turns on the idle routines from the start.
+ */
+function runDynasty(seed: string, ticks: number, dt: number, withInvariants: boolean): DynastyRun {
+  const state = createInitialState(seed, 0)
+  const scratch = emptyUnitCounts()
+  const invariants: InvariantResult[] = []
+  let purchases = 0
+  let firstDynastyTick: number | null = null
+
+  for (let i = 0; i < ticks; i++) {
+    step(state, dt, scratch, i)
+    // Prestige first so the account accumulates, then convert worthwhile progress to an era (which
+    // accumulates the era account), then convert a worthwhile era account to a dynasty.
+    prestigeDrive(state)
+    eraDrive(state)
+    const { founded, purchases: bought } = dynastyDrive(state)
+    if (!founded) continue
+    purchases += bought
+    if (firstDynastyTick === null) firstDynastyTick = i
+
+    if (withInvariants) {
+      // Assert the RESET ITSELF left a valid, playable single-capital state with WIPED era + prestige
+      // accounts and a surviving dynasty account. As in runEra we do NOT sample no-softlock at this
+      // instant: a just-reset capital has accrued nothing this tick, so checkNoSoftlock (which ignores
+      // production) would read a false stall — checkDynastyNoSoftlock covers post-dynasty playability
+      // structurally, and the run REACHING the cap proves it progresses.
+      const phase = `dyn${state.dynasty.dynasties}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkLoyalty(state)], phase))
+      invariants.push(...tag([checkPrestigeState(state)], phase))
+      invariants.push(...tag([checkDynastyRoundTrip(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+    }
+  }
+
+  if (withInvariants) {
+    invariants.push(...tag(runInvariants(state), 'dynfinal'))
+    invariants.push(...tag([checkArmyConsistency(state)], 'dynfinal'))
+    invariants.push(...tag([checkWorldConsistency(state)], 'dynfinal'))
+    invariants.push(...tag([checkPrestigeState(state)], 'dynfinal'))
+    invariants.push(...tag([checkDynastyRoundTrip(state)], 'dynfinal'))
+    invariants.push(...tag([checkRoundTrip(state)], 'dynfinal'))
+    // Lifetime stats + achievements SURVIVE every dynasty reset (newDynasty leaves them untouched).
+    invariants.push(...tag([checkStats(state)], 'dynfinal'))
+    invariants.push(...tag([checkAchievementsValid(state)], 'dynfinal'))
+    // Whole-run no-softlock (mirrors runEra's efinal): the dynasty run made progress iff it founded a
+    // dynasty / bought at least once, so the run never stalled overall.
+    invariants.push(
+      ...tag([checkNoSoftlock(state, totalResources(state), purchases > 0 || firstDynastyTick !== null)], 'dynfinal'),
+    )
+  }
+
+  // dynastyEpUplift: CONSTRUCTED proof that an ep_mult dynasty node lifts era-point gain for a FIXED
+  // era score — independent of whether the bot's greedy source-order buy reached the ep_mult node this
+  // run (DP is rare, so it usually fills the first root first). Seed a fresh state with a large,
+  // FIXED prestige account (so the era score — and thus pendingEraPoints — clears the cube-root
+  // floor), measure pendingEraPoints with no dynasty nodes, then again with the ep_mult node maxed;
+  // the ratio > 1 is the proof. Data-driven: finds the ep_mult node rather than hard-coding the root.
+  const epNodeId = DYNASTY_NODE_IDS.find((id) => DYNASTY_NODES[id].effect.kind === 'ep_mult')
+  let epUplift = 1
+  if (epNodeId !== undefined) {
+    const probe = createInitialState(seed, 0)
+    probe.prestige.totalEarned = 100000
+    probe.prestige.ascensions = 50
+    const before = pendingEraPoints(probe)
+    probe.dynasty.nodes = { [epNodeId]: DYNASTY_NODES[epNodeId].maxLevel }
+    const after = pendingEraPoints(probe)
+    epUplift = before > 0 ? after / before : 1
+  }
+
+  // dynastyAutomationUnlocked: the GATED MECHANIC. The dynasty bag is the ONLY aggregate that can
+  // flip the automation flags on, so owning the single automation_unlock gateway must make
+  // effectiveMods(state).automations all true. Data-driven: finds the gateway node.
+  const autoNodeId = DYNASTY_NODE_IDS.find((id) => DYNASTY_NODES[id].effect.kind === 'automation_unlock')
+  let automationUnlocked = false
+  if (autoNodeId !== undefined) {
+    const probe = createInitialState(seed, 0)
+    probe.dynasty.nodes = { [autoNodeId]: DYNASTY_NODES[autoNodeId].maxLevel }
+    const a = effectiveMods(probe).automations
+    automationUnlocked = a.build && a.recruit && a.attack
+  }
+
+  let nodesOwned = 0
+  let levelsOwned = 0
+  for (const id of DYNASTY_NODE_IDS) {
+    const lvl = dynastyNodeLevel(state, id)
+    if (lvl > 0) {
+      nodesOwned += 1
+      levelsOwned += lvl
+    }
+  }
+
+  return {
+    state,
+    invariants,
+    stats: {
+      dynasties: state.dynasty.dynasties,
+      purchases,
+      nodesOwned,
+      levelsOwned,
+      epUplift,
+      automationUnlocked,
+    },
+  }
+}
+
+/**
+ * Dynasty run to the halfway point, persisted via the real export/import (base64) path — crossing at
+ * least one Nowa Dynastia (the first lands shortly after the first era, well before the half mark) —
+ * then continued. The total step count matches the continuous dynasty run, so any divergence is a
+ * save/load fault. This is the proof the GREAT-GREAT RESET survives a save/load ACROSS the reset
+ * byte-identically — the highest-risk save/load path under CLAUDE.md hard rule #3: newDynasty
+ * regenerates the world + rngState, WIPES the era AND prestige accounts and banks DP, so a
+ * deserialize-then-diverge of the freshly-installed rngState / world would strand the run. The
+ * per-dynasty {@link checkDynastyRoundTrip} / {@link checkRoundTrip} only prove the post-reset
+ * SNAPSHOT round-trips byte-identically; only CONTINUING the loaded post-dynasty save (here) proves
+ * it then runs identically to the continuous dynasty run. The PERMANENT dynasty account (banked DP +
+ * purchased node levels) rides through the v16 save. Mirrors {@link runEraSplit}.
+ */
+function runDynastySplit(seed: string, ticks: number, dt: number): GameState {
+  const half = Math.floor(ticks / 2)
+  const scratch = emptyUnitCounts()
+  let state = createInitialState(seed, 0)
+  for (let i = 0; i < half; i++) {
+    step(state, dt, scratch, i)
+    prestigeDrive(state)
+    eraDrive(state)
+    dynastyDrive(state)
+  }
+  state = importSave(exportSave(state))
+  for (let i = half; i < ticks; i++) {
+    step(state, dt, scratch, i)
+    prestigeDrive(state)
+    eraDrive(state)
+    dynastyDrive(state)
+  }
+  return state
+}
+
 // --- M5.1 automation (idle routines) coverage --------------------------------------------
 //
 // A SEPARATE run from the main economy/combat/tech/expansion/prestige measurement. It must
@@ -1046,6 +1272,53 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkNewEraDeterminism(seed))
   invariants.push(checkEraNoSoftlock(seed))
 
+  // M6.2 dynasty (great-great reset / third meta-layer) — a SEPARATE run so the M1–M6.1 + prestige +
+  // era targets stay measured on un-reset accounts (newDynasty WIPES the whole era AND prestige
+  // accounts). Drives the bot through ascensions + eras + dynasties (the era account, which feeds
+  // dynastyScore, must accumulate before the cube-root DP yield clears the dynasty floor), banks +
+  // spends DP on the dynasty tree, and asserts the reset stays valid/playable.
+  const dynasty = runDynasty(seed, DYNASTY_TICKS, dt, true)
+  invariants.push(...dynasty.invariants)
+  const dynSerA = serialize(dynasty.state)
+
+  // Determinism: a second identical dynasty run must be byte-equal. This covers the FULL dynasty loop
+  // end-to-end (step + prestigeDrive + eraDrive + the chooseDynasty gate + the DYNASTY_NODE_IDS
+  // purchase pass across the great-great reset), not just a newDynasty primitive. Named
+  // 'dynasty-run-determinism' to stay distinct from any newDynasty-primitive check and to mirror
+  // 'era-run-determinism'.
+  const dynastyRepeat = runDynasty(seed, DYNASTY_TICKS, dt, false)
+  const dynSerB = serialize(dynastyRepeat.state)
+  invariants.push({
+    name: 'dynasty-run-determinism',
+    ok: dynSerA === dynSerB,
+    detail: dynSerA === dynSerB ? undefined : 'two identical dynasty runs of the same seed diverged',
+  })
+
+  // Save-load continuation ACROSS a Nowa Dynastia: a mid-run export/import — crossing the GREAT-GREAT
+  // RESET (regenerated world + rngState, wiped era + prestige, banked DP) — must not change the
+  // outcome. The proof the highest-risk save/load path (CLAUDE.md hard rule #3) carries the run
+  // losslessly and CONTINUES identically, which the per-dynasty post-reset snapshot round-trip cannot
+  // show. Mirrors 'era-save-load-continuation'.
+  const dynastySplit = runDynastySplit(seed, DYNASTY_TICKS, dt)
+  const dynSerC = serialize(dynastySplit)
+  invariants.push({
+    name: 'dynasty-save-load-continuation',
+    ok: dynSerA === dynSerC,
+    detail:
+      dynSerA === dynSerC
+        ? undefined
+        : 'split dynasty run with mid save/load diverged from the continuous dynasty run',
+  })
+
+  // M6.2 static dynasty-tree topology (catalogue, state-independent): a DAG with no orphans / dead
+  // perks (the binary automation_unlock gateway counts as a real effect). Asserted once per run.
+  invariants.push(checkDynastyTopology())
+
+  // M6.2 post-dynasty playability (self-contained, no clock / no RNG): a fresh post-dynasty capital
+  // always has an available progress action within a bounded idle horizon (the great-great reset
+  // never softlocks).
+  invariants.push(checkDynastyNoSoftlock(seed))
+
   // M5.1 automation (idle routines) — a SEPARATE coverage run with the three gateways
   // unlocked and every toggle ON (the main run keeps automation OFF, so the targets above are
   // untouched). Asserts each routine demonstrably fires (auto build/recruit/attack) and that
@@ -1143,6 +1416,7 @@ export function runOne(seed: string, ticks: number): RunResult {
     primary.stats,
     prestige.stats,
     era.stats,
+    dynasty.stats,
     automation.stats,
   )
   const ok = invariants.every((r) => r.ok)

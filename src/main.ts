@@ -21,6 +21,7 @@ import { foundVillage } from './systems/villages'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
+import { newDynasty, purchaseDynasty } from './systems/dynasty'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -215,6 +216,34 @@ mountApp(root, {
     }
     return ok
   },
+  onNewDynasty: () => {
+    // newDynasty (M6.2) banks the pending DP and performs the GREAT-GREAT RESET in place: it
+    // WIPES the ENTIRE era account (EP, era nodes, eras) AND the ENTIRE prestige account (PP,
+    // prestige nodes, ascensions) and rebuilds the run from a per-dynasty seed (fresh capital,
+    // world regenerated, tech/log cleared, dynasty start bonus applied); the dynasty account +
+    // lifetime stats/achievements survive. No-op (returns 0) when there is nothing to bank.
+    // The active village is gone after the reset, so resnap to the new run's first village
+    // before committing so the selection stays valid (mirrors onNewEra).
+    const dp = newDynasty(store.state)
+    if (dp > 0) {
+      if (store.state.villages[activeVillageId.value] === undefined) {
+        activeVillageId.value = store.state.villageOrder[0]
+      }
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return dp
+  },
+  onPurchaseDynasty: (nodeId: string) => {
+    // purchaseDynasty spends banked DP and recomputes derived multipliers internally (the new
+    // permanent bonus folds into every village); persist + commit on success.
+    const ok = purchaseDynasty(store.state, nodeId)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onSetAutomation: (patch) => {
     // Merge the partial toggle/policy patch into state.automation, then commit +
     // persist. No recompute: the automation settings are read directly each sub-step
@@ -223,7 +252,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.19.0',
+  version: '0.20.0',
   offlineSeconds,
 })
 

@@ -45,6 +45,7 @@ import {
   prestigeNodeCost,
 } from '../src/systems/prestige'
 import { pendingEraPoints } from '../src/systems/era'
+import { pendingDynastyPoints } from '../src/systems/dynasty'
 
 /**
  * Bot-player heuristic. The runner consults it once per simulated step so the
@@ -835,4 +836,41 @@ export const BOT_MAX_ERAS = 2
 export function chooseEra(state: GameState, maxEras: number = BOT_MAX_ERAS): boolean {
   if (state.era.eras >= maxEras) return false
   return pendingEraPoints(state) >= ERA_MIN_EP
+}
+
+/**
+ * Profitability floor for founding a Nowa Dynastia (M6.2): the bot performs the GREAT-GREAT
+ * RESET only once doing so RIGHT NOW would bank at least this many dynasty points — enough for
+ * a meaningful dynasty purchase (a couple of baseCost-1 root levels). DP is rarer still than EP
+ * (the DP yield is a CUBE root of the ERA-account score, exactly as the EP yield is a cube root
+ * of the PRESTIGE-account score), so this threshold paces the dynasty loop the way
+ * {@link ERA_MIN_EP} paces eras: a just-founded dynasty wipes the ENTIRE era account, so
+ * {@link pendingDynastyPoints} collapses to 0 and the bot must rebuild — and re-era — the era
+ * account before it could ever found another dynasty. There is no degenerate "Nowa Dynastia for
+ * nothing" cycle. A single era (eras=1 alone scores DYN_ERA_WEIGHT=10 → cbrt ≈ 2) already clears
+ * it, so the dynasty fires shortly after the era run banks its first era.
+ */
+export const DYN_MIN_DP = 2
+
+/**
+ * Hard cap on dynasties the bot founds in one harness run (M6.2), mirroring
+ * {@link BOT_MAX_ERAS}. Each Nowa Dynastia is itself a (greatest) reset, so an unbounded loop
+ * would never terminate the headless sim; this bounds it while still proving the mechanic is
+ * reachable (>= 1). The {@link DYN_MIN_DP} threshold already paces it; this is the
+ * belt-and-suspenders runtime guard.
+ */
+export const BOT_MAX_DYNASTIES = 1
+
+/**
+ * NOWA DYNASTIA decision (M6.2): true when the bot should perform the great-great reset for
+ * dynasty points THIS step. Gated on (a) the dynasty cap {@link BOT_MAX_DYNASTIES} (so the
+ * resetting loop always terminates) and (b) the {@link DYN_MIN_DP} profitability floor on
+ * {@link pendingDynastyPoints} (so a reset always banks a worthwhile, spendable amount — and so a
+ * just-founded dynasty, whose era account is wiped to a 0 score, can never immediately re-fire).
+ * A pure function of `state`, so two identical runs found dynasties at the same ticks — the
+ * determinism / save-load invariants hold across the reset. `maxDynasties` is overridable for tests.
+ */
+export function chooseDynasty(state: GameState, maxDynasties: number = BOT_MAX_DYNASTIES): boolean {
+  if (state.dynasty.dynasties >= maxDynasties) return false
+  return pendingDynastyPoints(state) >= DYN_MIN_DP
 }

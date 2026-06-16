@@ -18,6 +18,15 @@ import { PRESTIGE_NODES, PRESTIGE_NODE_IDS, PRESTIGE_ROOTS } from '../content/pr
 // COMBINES onto the tech × prestige bag (so all three trees fold into derived stats),
 // `eraPpMult` scales PP gain, and `eraStartResourceBonus` extends the run head-start.
 import { aggregateEraMods, eraPpMult, eraStartResourceBonus } from './era'
+// VALUE import of the dynasty (M6.2) roll-ups — used ONLY inside function bodies below
+// (`effectiveMods`, `ascend`), never at module top level, so the systems/dynasty.ts <->
+// here cycle stays benign exactly like the era edge above: by the time any of these run,
+// both modules are fully evaluated. dynasty.ts does NOT import back from this module, so
+// this is the single direction of the edge. The dynasty bag COMBINES onto the tech ×
+// prestige × era bag (so all four trees fold into derived stats, and its
+// `automation_unlock` gateway is the one place automations are unlocked), and
+// `dynastyStartResourceBonus` extends the run head-start.
+import { aggregateDynastyMods, dynastyStartResourceBonus } from './dynasty'
 
 /**
  * Prestige (ascension) engine (M4.1) — the PERMANENT meta-layer on top of tech.
@@ -198,10 +207,16 @@ export function effectiveMods(state: GameState): TechModifiers {
   const techMods = aggregateTechMods(state.tech ?? {})
   const prestigeNodes = state.prestige ? state.prestige.nodes : {}
   const eraNodes = state.era ? state.era.nodes : {}
-  // Fold all THREE trees: (tech × prestige) × era. `combine(x, identityBag) === x`
-  // byte-for-byte, and aggregateEraMods({}) IS the identity bag, so a no-era save folds
-  // to exactly the pre-M6.1 value — the M1-M5 balance targets stay byte-identical.
-  return combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes))
+  const dynastyNodes = state.dynasty ? state.dynasty.nodes : {}
+  // Fold all FOUR trees: ((tech × prestige) × era) × dynasty. `combine(x, identityBag) ===
+  // x` byte-for-byte, and aggregateEraMods({}) / aggregateDynastyMods({}) ARE the identity
+  // bag, so a no-era / no-dynasty save folds to exactly the pre-M6.x value — the earlier
+  // balance targets stay byte-identical. The dynasty bag is the ONLY one whose
+  // `automation_unlock` gateway can set the automation flags true (combine ORs them).
+  return combine(
+    combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
+    aggregateDynastyMods(dynastyNodes),
+  )
 }
 
 /**
@@ -367,10 +382,12 @@ export function ascend(state: GameState): number {
 
   // Fresh single capital at the world centre (mirrors createInitialState's 'v0').
   const capital = createVillage('v0', 'Stolica', WORLD_CENTER.x, WORLD_CENTER.y)
-  // Permanent head-start from BOTH meta-trees: the prestige start-resources plus the era
-  // start-resources (M6.1), so a deeper era tree speeds up every ordinary ascension too.
-  // With no era nodes eraStartResourceBonus is 0, so a pre-M6.1 run is unchanged.
-  const bonus = startResourceBonus(state) + eraStartResourceBonus(state)
+  // Permanent head-start from ALL THREE meta-trees: the prestige start-resources plus the
+  // era (M6.1) and dynasty (M6.2) start-resources, so a deeper era / dynasty tree speeds up
+  // every ordinary ascension too. With no era / dynasty nodes both bonuses are 0, so a
+  // pre-M6.x run is unchanged.
+  const bonus =
+    startResourceBonus(state) + eraStartResourceBonus(state) + dynastyStartResourceBonus(state)
   if (bonus > 0) {
     for (const r of RESOURCE_IDS) capital.resources[r] = capital.resources[r].add(bonus)
   }

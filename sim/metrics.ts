@@ -185,6 +185,35 @@ export interface RunMetrics {
    */
   eraPpUplift: number
 
+  // --- M6.2 dynasty (great-great reset / third meta-layer) ---
+  // Measured by a SEPARATE run (see runner.runDynasty) that drives ascensions AND eras AND
+  // dynasties so era progress accumulates and CONVERTS to a dynasty — kept apart from the main +
+  // prestige + era runs, which never found a dynasty (newDynasty WIPES the whole era AND prestige
+  // accounts), so those metrics stay measured on un-reset accounts.
+  /** Dynasties the bot founded (great-great resets) over the dynasty run — the loop fired N times. */
+  dynasties: number
+  /** Successful dynasty-node level purchases over the dynasty run (one per accepted purchaseDynasty). */
+  dynastyPurchases: number
+  /** Distinct dynasty nodes owned at level >= 1 at the end of the dynasty run. */
+  dynastyNodesOwned: number
+  /** Σ owned dynasty-node levels at the end of the dynasty run. */
+  dynastyLevelsOwned: number
+  /**
+   * BONUS CONFIRMATION: the signature `ep_mult` dynasty effect actually FOLDS INTO era-point gain.
+   * The ratio pendingEraPoints(with a maxed ep_mult dynasty node) / pendingEraPoints(none), measured
+   * on a FIXED prestige (era) score — independent of whether the bot's greedy source-order buy
+   * reached the ep_mult node this run. > 1 proves each new dynasty accelerates the whole era loop
+   * (the dynasty's reason to exist; mirrors {@link eraPpUplift}).
+   */
+  dynastyEpUplift: number
+  /**
+   * GATED MECHANIC: whether the dynasty `automation_unlock` gateway unlocks ALL THREE idle
+   * automations account-wide — measured as `effectiveMods(fresh + the gateway node).automations`
+   * all true. The dynasty bag is the ONLY aggregate that can flip the automation flags on, so true
+   * proves the gate is live (every routine unlocked from the start once a dynasty owns it).
+   */
+  dynastyAutomationUnlocked: boolean
+
   // --- M5.1 automation (idle routines) ---
   // Measured by a SEPARATE coverage run (see runner.runAutomationCoverage) with the three
   // automation gateways unlocked and every toggle ON — kept apart from the MAIN run, which
@@ -289,6 +318,28 @@ export interface EraRunStats {
   levelsOwned: number
   /** pp_mult uplift on prestige-point gain at a fixed prestige score (bonus proof; > 1 = live). */
   ppUplift: number
+}
+
+/**
+ * Dynasty (M6.2) counters from the SEPARATE dynasty-driving run (see runner.runDynasty). Kept
+ * apart from {@link RunStats} / {@link PrestigeRunStats} / {@link EraRunStats} because it is
+ * produced by a different run — the only one that ever founds a Nowa Dynastia (newDynasty WIPES
+ * the era AND prestige accounts), so the main + prestige + era targets stay measured on un-reset
+ * accounts. {@link collect} folds these straight into the matching {@link RunMetrics} dynasty fields.
+ */
+export interface DynastyRunStats {
+  /** Dynasties founded (great-great resets) over the run. */
+  dynasties: number
+  /** Successful dynasty-node level purchases over the run. */
+  purchases: number
+  /** Distinct dynasty nodes owned at level >= 1 at run end. */
+  nodesOwned: number
+  /** Σ owned dynasty-node levels at run end. */
+  levelsOwned: number
+  /** ep_mult uplift on era-point gain at a fixed era score (bonus proof; > 1 = live). */
+  epUplift: number
+  /** Whether the automation_unlock gateway flips all three automations on (gated mechanic; true = live). */
+  automationUnlocked: boolean
 }
 
 /**
@@ -422,6 +473,7 @@ export function collect(
   stats: RunStats,
   prestige: PrestigeRunStats,
   era: EraRunStats,
+  dynasty: DynastyRunStats,
   automation: AutomationRunStats,
 ): RunMetrics {
   const first = firstVillage(state)
@@ -538,6 +590,13 @@ export function collect(
     eraNodesOwned: era.nodesOwned,
     eraLevelsOwned: era.levelsOwned,
     eraPpUplift: era.ppUplift,
+
+    dynasties: dynasty.dynasties,
+    dynastyPurchases: dynasty.purchases,
+    dynastyNodesOwned: dynasty.nodesOwned,
+    dynastyLevelsOwned: dynasty.levelsOwned,
+    dynastyEpUplift: dynasty.epUplift,
+    dynastyAutomationUnlocked: dynasty.automationUnlocked,
 
     automationBuilt: automation.built,
     automationRecruited: automation.recruited,
