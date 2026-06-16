@@ -56,8 +56,10 @@ function army(
   scout = 0,
   ram = 0,
   catapult = 0,
+  light_cavalry = 0,
+  heavy_cavalry = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult, light_cavalry, heavy_cavalry }
 }
 
 /** A barbarian village descriptor at a chosen tier and map position (full loyalty, unscouted). */
@@ -572,7 +574,7 @@ describe('migration v12 -> v13', () => {
   it('backfills an all-zero stats record + an empty achievements map, preserving everything else', () => {
     const m = migrate(rawV12())
 
-    expect(m.version).toBe(20)
+    expect(m.version).toBe(21)
     expect(m.version).toBe(SAVE_VERSION)
 
     // stats: every counter zero, lootHauled a Decimal zero.

@@ -35,8 +35,10 @@ function army(
   scout = 0,
   ram = 0,
   catapult = 0,
+  light_cavalry = 0,
+  heavy_cavalry = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult, light_cavalry, heavy_cavalry }
 }
 
 /**

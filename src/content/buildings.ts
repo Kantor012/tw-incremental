@@ -26,10 +26,11 @@ export type BuildingId =
   | 'academy'
   | 'wall'
   | 'market'
+  | 'stable'
 
 /**
  * Stable iteration order for derived-stat recompute and UI listing. New buildings are
- * APPENDED (here `market`, after `wall`) so older saves' building key order is never
+ * APPENDED (here `stable`, after `market`) so older saves' building key order is never
  * disturbed, keeping migration and round-trip deterministic.
  */
 export const BUILDING_IDS: readonly BuildingId[] = [
@@ -43,6 +44,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'academy',
   'wall',
   'market',
+  'stable',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -274,6 +276,29 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     initialLevel: 0,
     // Player-managed logistics: auto-build must NOT spend on the Rynek (its merchant
     // capacity is dead weight without a deliberately chosen transport). See autoBuildOnce.
+    autoBuildable: false,
+  },
+  stable: {
+    id: 'stable',
+    name: 'Stajnia',
+    desc: 'Szkoli i utrzymuje kawalerię. Każdy poziom nieco skraca czas szkolenia wojsk.',
+    category: 'military',
+    maxLevel: 15,
+    // ~koszary-tier baseCost scaled a bit higher (cavalry is a later military build).
+    // provisional — the Balance phase tunes cost/factor/perLevel against the harness.
+    baseCost: { wood: 260, clay: 220, iron: 140 },
+    costFactor: 1.28,
+    // -2% training time per level (multiplicative), floored in recruitSpeedMult — a MINOR
+    // GLOBAL training-speed bonus that REUSES the existing recruit_speed kind (no new effect
+    // kind). The building exists mainly to GATE the cavalry via unit.requires, so its own
+    // effect is deliberately small. Consumed by the recruitment system, not by recompute.
+    effect: { kind: 'recruit_speed', perLevel: 0.02 },
+    // Starts at 0: building it to level 1 is what UNLOCKS the cavalry roster (M10).
+    initialLevel: 0,
+    // Player-managed military: auto-build must NOT spend on the Stajnia. Keeping it off the
+    // auto-build/MAIN-run path is what keeps a no-Stajnia run BYTE-IDENTICAL to pre-M10 —
+    // the cavalry it gates never unlocks, so the bot/auto-build never recruit it. See
+    // autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
     autoBuildable: false,
   },
 }

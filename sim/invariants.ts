@@ -1,5 +1,5 @@
 import { D, ZERO, isFiniteDecimal, type Decimal } from '../src/engine/decimal'
-import { serialize, deserialize, exportSave, importSave } from '../src/engine/save'
+import { serialize, deserialize, exportSave, importSave, migrate } from '../src/engine/save'
 import { simulate } from '../src/engine/tick'
 import { applyOffline } from '../src/engine/offline'
 import {
@@ -36,7 +36,7 @@ import {
 } from '../src/content/era'
 import { ACHIEVEMENT_IDS } from '../src/content/achievements'
 import { checkAchievements } from '../src/systems/achievements'
-import { freePopulation, recruit } from '../src/systems/recruitment'
+import { freePopulation, recruit, canRecruit, unitUnlocked } from '../src/systems/recruitment'
 import { sendAttack, sendScout } from '../src/systems/marches'
 import {
   armyAttackPower,
@@ -3941,5 +3941,213 @@ export function checkMarketSaveLoad(seed: string): InvariantResult {
       : a !== b
         ? 'state with in-flight shipments changed across export/import'
         : 'in-flight shipments did not survive export/import',
+  }
+}
+
+// --- M10 cavalry (KAWALERIA — Stajnia-gated mounted units) proof-of-mechanic checks --------------
+//
+// Deterministic, self-contained checks for the M10 cavalry pair (light_cavalry / heavy_cavalry),
+// each gated behind the new Stajnia (stable). They isolate the guarantees the contract pins for the
+// addition: the cavalry is GATED on the Stajnia (no Stajnia → unrecruitable, Stajnia → recruitable),
+// the keys are INERT in a no-Stajnia run (a pre-M10-shaped save round-trips to byte-identical state),
+// the cavalry's population upkeep is counted exactly, and a roster + in-flight march carrying cavalry
+// survives the real save/load path. No bot, no clock, no RNG (beyond the seeded world) — pure of the
+// main run, so the 17 core + meta targets stay byte-identical to pre-M10.
+
+/** The two M10 cavalry unit ids (Stajnia-gated). Local so a catalogue edit never desyncs these checks. */
+const CAVALRY_IDS = ['light_cavalry', 'heavy_cavalry'] as const
+
+/**
+ * The cavalry is GATED on the Stajnia (M10): from one fixed, well-stocked capital that differs ONLY by
+ * the Stajnia level, each cavalry unit must be UNRECRUITABLE with no Stajnia (stable level 0 — a fresh
+ * capital) and RECRUITABLE once a Stajnia stands (stable level 1). Resources + population are set far
+ * above any unit's cost so the ONLY thing that can gate recruitment is `unit.requires` resolving the
+ * Stajnia — exactly the gate the MAIN run never opens (the bot/auto-build never build the Stajnia, which
+ * is autoBuildable:false), keeping a no-Stajnia run byte-identical to pre-M10. Pure / deterministic.
+ */
+export function checkCavalryGated(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  // Stock coffers + population headroom so the Stajnia is the SOLE gate (not money / pop).
+  v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  v.popCap = D(1000)
+
+  const issues: string[] = []
+  // No Stajnia (a fresh capital has stable:0) — the cavalry must be locked AND unrecruitable.
+  if (v.buildings.stable !== 0) issues.push(`fresh capital has stable=${v.buildings.stable} (expected 0)`)
+  for (const id of CAVALRY_IDS) {
+    if (unitUnlocked(v, id)) issues.push(`${id} unlocked with NO Stajnia`)
+    if (canRecruit(v, id, 1).ok) issues.push(`${id} recruitable with NO Stajnia (gate open)`)
+  }
+  // Raise the Stajnia to level 1 — the gate opens and the cavalry becomes recruitable.
+  v.buildings.stable = 1
+  for (const id of CAVALRY_IDS) {
+    if (!unitUnlocked(v, id)) issues.push(`${id} still locked WITH a Stajnia`)
+    const can = canRecruit(v, id, 1)
+    if (!can.ok) issues.push(`${id} not recruitable WITH a Stajnia: ${can.reason ?? 'unknown'}`)
+  }
+
+  return {
+    name: 'cavalry-gated',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? 'cavalry locked at Stajnia level 0 and unlocked at level 1 (the gate the main run never opens)'
+        : issues.join('; '),
+  }
+}
+
+/**
+ * The M10 additions are INERT in a no-Stajnia run (CLAUDE.md hard rule #3 / the contract's byte-identity
+ * pin): a state that never builds the Stajnia nor trains cavalry carries the three appended keys
+ * (`buildings.stable`, `units.light_cavalry`, `units.heavy_cavalry` — in every village AND every in-flight
+ * march) at their inert zero defaults, so removing them yields exactly the PRE-M10 save shape. Proven two
+ * ways on a realistic state ({@link seedRecruitment}: a live training queue + an in-flight (non-cavalry)
+ * march + active raids, advanced a little):
+ *  - INERTNESS: every appended key is 0 across all villages and marches, AND
+ *  - ROUND-TRIP EQUALITY: serialize → strip the three appended keys → stamp version 20 (the pre-M10 save
+ *    shape) → {@link migrate} (the real v20→v21 backfill re-adds them at 0) → re-serialize must be
+ *    byte-identical to the original M10 serialization, proving the additions are EXACTLY the inert
+ *    zero-backfill at the tail of the id arrays and nothing more.
+ * Pure / deterministic.
+ */
+export function checkCavalryInert(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  seedRecruitment(state) // a live army + in-flight march + queue, NO Stajnia, NO cavalry
+  simulate(state, 120) // advance the clocks while the (far) tier-6 march is still outbound
+
+  // INERTNESS: the appended keys stayed at their zero defaults everywhere (no Stajnia, no cavalry).
+  const issues: string[] = []
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    if (v.buildings.stable !== 0) issues.push(`${vid}.buildings.stable=${v.buildings.stable}`)
+    for (const id of CAVALRY_IDS) {
+      if (v.units[id] !== 0) issues.push(`${vid}.units.${id}=${v.units[id]}`)
+      for (const m of v.marches) {
+        if ((m.units[id] ?? 0) !== 0) issues.push(`${vid}.march.units.${id}=${m.units[id]}`)
+      }
+    }
+  }
+
+  // ROUND-TRIP EQUALITY: build the pre-M10 save shape (strip the appended keys, stamp v20), migrate it
+  // (the v20→v21 zero-backfill), and require the re-serialization to be byte-identical to the M10 form.
+  const full = serialize(state)
+  const obj = JSON.parse(full) as {
+    version: number
+    villageOrder: string[]
+    villages: Record<string, { buildings: Record<string, number>; units: Record<string, number>; marches: { units: Record<string, number> }[] }>
+  }
+  obj.version = 20
+  for (const vid of obj.villageOrder) {
+    const v = obj.villages[vid]
+    delete v.buildings.stable
+    for (const id of CAVALRY_IDS) {
+      delete v.units[id]
+      for (const m of v.marches) delete m.units[id]
+    }
+  }
+  const preM10 = JSON.stringify(obj)
+  const migrated = JSON.stringify(migrate(JSON.parse(preM10)))
+  // The stripped (pre-M10) form must not mention the appended keys anywhere, and the migrated form must
+  // be byte-identical to the M10 serialization.
+  const strippedClean = !CAVALRY_IDS.some((id) => preM10.includes(`"${id}"`)) && !preM10.includes('"stable"')
+  const roundTripOk = migrated === full
+
+  const ok = issues.length === 0 && strippedClean && roundTripOk
+  return {
+    name: 'cavalry-inert',
+    ok,
+    detail: ok
+      ? 'no-Stajnia state carries the cavalry/stable keys at inert 0; the pre-M10-stripped save migrates back byte-identically'
+      : issues.length > 0
+        ? `appended keys not inert: ${issues.join('; ')}`
+        : !strippedClean
+          ? 'stripped pre-M10 save still references the cavalry/stable keys'
+          : 'pre-M10-stripped save did NOT migrate back to a byte-identical M10 state',
+  }
+}
+
+/**
+ * Cavalry population upkeep is COUNTED (M10): recruiting cavalry must drop a village's free population by
+ * exactly `Σ unit.pop × count` (trained OR still queued — {@link usedPopulation} counts both), so the
+ * heavy mounts genuinely draw on the farm budget like every other unit. From a Stajnia-unlocked,
+ * well-stocked capital, measures {@link freePopulation} before and after recruiting both cavalry units and
+ * requires the drop to equal the exact pop sum. Pure / deterministic — uses the real {@link recruit}.
+ */
+export function checkCavalryUpkeep(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.stable = 1 // unlock the cavalry
+  v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  v.popCap = D(1000)
+
+  const N_LIGHT = 5
+  const N_HEAVY = 3
+  const before = freePopulation(v)
+  const okLight = recruit(v, 'light_cavalry', N_LIGHT)
+  const okHeavy = recruit(v, 'heavy_cavalry', N_HEAVY)
+  const after = freePopulation(v)
+  const expectedDrop = D(UNITS.light_cavalry.pop * N_LIGHT + UNITS.heavy_cavalry.pop * N_HEAVY)
+  const actualDrop = before.sub(after)
+  const ok = okLight && okHeavy && actualDrop.eq(expectedDrop)
+
+  return {
+    name: 'cavalry-upkeep',
+    ok,
+    detail: ok
+      ? `recruiting ${N_LIGHT} light + ${N_HEAVY} heavy cavalry drew ${actualDrop.toString()} population (= Σ pop×count)`
+      : !okLight || !okHeavy
+        ? 'recruit refused a valid cavalry order (gate / cost / population)'
+        : `free population dropped ${actualDrop.toString()}, expected ${expectedDrop.toString()}`,
+  }
+}
+
+/**
+ * A roster + in-flight march carrying cavalry SURVIVES save/load (M10, CLAUDE.md hard rule #3): from a
+ * Stajnia-unlocked capital with cavalry owned, an attack INCLUDING cavalry is dispatched at a barbarian
+ * camp (so the march's `units` carry the new keys), advanced one step so `remaining` is partial, then the
+ * real export/import (base64) path must reproduce a byte-identical state with cavalry still in BOTH the
+ * standing roster AND the in-flight march. Mirrors {@link checkMarketSaveLoad} / {@link checkFortressSaveLoad}.
+ */
+export function checkCavalrySaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const vid = state.villageOrder[0]
+  const v = state.villages[vid]
+  // Proven economy (mirrors seedMarket): every building at its data max — which BUILDS the Stajnia
+  // (unlocking the cavalry) and the barracks (canAttack gates on it), and leaves the DERIVED stats
+  // (storageCap / popCap) consistent with the levels so importSave's recomputeDerived reproduces them
+  // and the round-trip stays byte-identical. Resources at the (now maxed) cap; popCap easily holds the stack.
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  // Own a cavalry stack directly, then send a cavalry-bearing attack at a low camp it crushes.
+  v.units.light_cavalry = 20
+  v.units.heavy_cavalry = 10
+  const army = zeroArmy()
+  army.light_cavalry = 10
+  army.heavy_cavalry = 5
+  if (!sendAttack(v, state.world, state.battleLog, targetOfLevel(state.world, 2).id, army)) {
+    return { name: 'cavalry-save-load', ok: false, detail: 'sendAttack refused a valid cavalry attack' }
+  }
+  simulate(state, 1) // advance one step so the march's `remaining` is a partial (non-initial) value
+
+  const restored = importSave(exportSave(state))
+  const a = serialize(state)
+  const b = serialize(restored)
+  const rv = restored.villages[vid]
+  const rosterOk = rv !== undefined && rv.units.light_cavalry >= 1 && rv.units.heavy_cavalry >= 1
+  const marchOk =
+    rv !== undefined &&
+    rv.marches.some((m) => (m.units.light_cavalry ?? 0) + (m.units.heavy_cavalry ?? 0) >= 1)
+  const ok = a === b && rosterOk && marchOk
+
+  return {
+    name: 'cavalry-save-load',
+    ok,
+    detail: ok
+      ? 'cavalry in the roster AND in an in-flight march survived export/import byte-identically'
+      : a !== b
+        ? 'state with cavalry (roster + in-flight march) changed across export/import'
+        : 'cavalry did not survive export/import in the roster and/or the in-flight march',
   }
 }

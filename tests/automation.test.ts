@@ -323,7 +323,7 @@ describe('autoAttackOnce', () => {
         s.world,
         s.battleLog,
         nearest!.id,
-        { spearman: 0, swordsman: 0, axeman: 1, noble: 0, scout: 0, ram: 0, catapult: 0 },
+        { spearman: 0, swordsman: 0, axeman: 1, noble: 0, scout: 0, ram: 0, catapult: 0, light_cavalry: 0, heavy_cavalry: 0 },
         NO_TECH_MODS,
       ),
     ).toBe(true)
@@ -402,8 +402,10 @@ function roster(
   scout = 0,
   ram = 0,
   catapult = 0,
+  light_cavalry = 0,
+  heavy_cavalry = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult, light_cavalry, heavy_cavalry }
 }
 
 /** A barbarian camp descriptor at a chosen tier, placed 3 fields east of the capital. */

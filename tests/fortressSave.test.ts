@@ -46,8 +46,10 @@ function army(
   scout = 0,
   ram = 0,
   catapult = 0,
+  light_cavalry = 0,
+  heavy_cavalry = 0,
 ): Record<UnitId, number> {
-  return { spearman, swordsman, axeman, noble, scout, ram, catapult }
+  return { spearman, swordsman, axeman, noble, scout, ram, catapult, light_cavalry, heavy_cavalry }
 }
 
 /**
@@ -90,7 +92,7 @@ describe('fortress save — v16 -> v17 migration backfill (M7)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(20)
+    expect(m.version).toBe(21)
 
     // Fortresses are regenerated DETERMINISTICALLY from the seed (own rng stream).
     expect(Array.isArray(m.world.fortresses)).toBe(true)

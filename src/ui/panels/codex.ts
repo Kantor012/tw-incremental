@@ -145,11 +145,7 @@ function buildingEffectText(effect: BuildingEffect): string {
     case 'cost_reduction':
       return 'Koszt budowy wszystkich budynków: −' + pct(effect.perLevel) + ' na poziom.'
     case 'recruit_speed':
-      return (
-        'Czas szkolenia jednostek: −' +
-        pct(effect.perLevel) +
-        ' na poziom. Poziom 1 odblokowuje rekrutację.'
-      )
+      return 'Czas szkolenia jednostek: −' + pct(effect.perLevel) + ' na poziom.'
     case 'noble_unlock':
       return 'Odblokowuje szkolenie szlachcica i przejmowanie wiosek barbarzyńskich.'
     case 'defense_bonus':

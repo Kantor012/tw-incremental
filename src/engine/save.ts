@@ -54,7 +54,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 20
+export const SAVE_VERSION = 21
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -631,6 +631,54 @@ export function migrate(raw: any): any {
         }
       }
       return { ...s, villages, version: 20 }
+    },
+    // v20 -> v21: stable + cavalry (M10 — KAWALERIA). A v20 save predates the new 'stable'
+    // BUILDING key (appended to BUILDING_IDS after 'market') and the two cavalry UNIT keys
+    // (`light_cavalry` / `heavy_cavalry`, appended to UNIT_IDS after 'catapult'), so backfill
+    // all three to 0 WITHOUT disturbing the player's progress:
+    //  - every village's `buildings` gains stable:0 and `units` gains light_cavalry:0 /
+    //    heavy_cavalry:0 by spreading INITIAL_BUILDINGS / INITIAL_UNITS *first*, so the save's
+    //    own levels/counts win over the seed and existing progress is preserved (exactly as the
+    //    v2->v3 / v6->v7 / v10->v11 / v11->v12 / v19->v20 backfills did). Without this,
+    //    validateVillage — which iterates the now-longer BUILDING_IDS / UNIT_IDS — would reject
+    //    the save;
+    //  - every in-flight march gets the light_cavalry:0 / heavy_cavalry:0 unit slots the same way
+    //    (over the zero full roster), so its dispatched subset has the M10 key order and the
+    //    per-march UNIT_IDS validation (which would otherwise reject a march omitting the new
+    //    keys) passes.
+    // The stable's recruit_speed effect is a MINOR training-speed bonus that touches NO
+    // production/storage/pop/combat stat, and the cavalry it gates can never unlock at stable
+    // level 0, so a migrated run with no Stajnia is byte-identical to pre-M10. M10 adds NO new
+    // march kind, barbarian/fortress field or economic currency, so nothing else is touched.
+    // Malformed entries are left as-is so validateState rejects them loudly. Nothing is
+    // recomputed here; importSave's recomputeDerived pass runs afterwards exactly as for every
+    // other migration (the stable's recruit_speed is a no-op for derived stats, like the barracks).
+    20: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        const marches = Array.isArray(v.marches)
+          ? v.marches.map((m: any) =>
+              isObject(m)
+                ? { ...m, units: { ...INITIAL_UNITS, ...(isObject(m.units) ? m.units : {}) } }
+                : m,
+            )
+          : v.marches
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+          units: { ...INITIAL_UNITS, ...(isObject(v.units) ? v.units : {}) },
+          marches,
+        }
+      }
+      return { ...s, villages, version: 21 }
     },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0

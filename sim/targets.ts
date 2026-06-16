@@ -242,6 +242,23 @@ export interface BalanceTargets {
    */
   minShipmentsDelivered: number
 
+  // --- M10 cavalry (KAWALERIA — Stajnia-gated mounted units) goal (warning) ---
+  /**
+   * The bot must TRAIN at least this many cavalry (light + heavy) in the SEPARATE cavalry-driving run
+   * (runner.runCavalry) — proof the M10 cavalry pipeline (build the Stajnia, which UNLOCKS the cavalry
+   * roster, recruit BOTH mounted units on the proven endgame economy, then march a cavalry strike force
+   * to a barbarian camp) is reachable within the budget. Measured APART from the main run on purpose: the
+   * Stajnia is autoBuildable:false, so neither the in-game auto-build nor the MAIN-run bot ever build it —
+   * the cavalry therefore never unlocks in the main run (cheapestRecruit can never pick a gated unit) and
+   * a no-Stajnia run is BYTE-IDENTICAL to pre-M10 (every existing balance target untouched). The dedicated
+   * run instead hands a fresh capital the proven economy, builds the Stajnia explicitly and trains the
+   * cavalry honestly within the real popCap. >= 1 confirms the recruit pipeline actually completes;
+   * mirrors {@link minFortressesRazed} (a dedicated-run reachability floor). If it cannot be hit, the
+   * cavalry cost / recruitSeconds / Stajnia knobs (content/units.ts / content/buildings.ts) need tuning —
+   * see CHANGELOG "Balance".
+   */
+  minCavalryRecruited: number
+
   // --- M5.1 automation (idle routines) goals (HARD — see runner.runAutomationCoverage) ---
   // These are proof-of-mechanic floors for the SEPARATE automation coverage run (automation
   // ON), NOT balance-curve warnings: with the deterministic seeded scenario each routine
@@ -395,6 +412,15 @@ export const TARGETS: BalanceTargets = {
   // cannot be hit, tune the merchant_capacity / travel-time knobs (content/buildings.ts /
   // systems/market.ts) — see CHANGELOG "Balance".
   minShipmentsDelivered: 1,
+
+  // M10: cavalry online. The dedicated run builds the Stajnia (UNLOCKING the cavalry roster — the gate the
+  // main run never opens, since the Stajnia is autoBuildable:false), recruits BOTH mounted units on the
+  // proven endgame economy and marches a cavalry strike force to win a barbarian-camp attack. Floor at the
+  // proof-of-mechanic level (>= 1 cavalry trained). Measured by a SEPARATE run (see sim/runner.runCavalry)
+  // so the M1–M9 + meta targets stay BYTE-IDENTICAL to pre-M10 (a no-Stajnia run never unlocks the cavalry,
+  // so it folds into nothing in the main + meta runs). If it cannot be hit, tune the cavalry cost /
+  // recruitSeconds / Stajnia knobs (content/units.ts / content/buildings.ts) — see CHANGELOG "Balance".
+  minCavalryRecruited: 1,
 
   // M5.1: automation online. With the three gateways unlocked and every toggle ON, the
   // SEPARATE coverage run (automation OFF in the main run, so the goals above are untouched)

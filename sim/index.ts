@@ -298,6 +298,16 @@ function evalTargets(r: RunResult): TargetCheck[] {
       ok: m.shipmentsDelivered >= TARGETS.minShipmentsDelivered,
       detail: `delivered ${m.shipmentsDelivered} shipment(s) carrying ${m.resourcesTransported} resources in the dedicated market run (target >= ${TARGETS.minShipmentsDelivered})`,
     },
+    {
+      // M10: the bot must TRAIN at least minCavalryRecruited cavalry in the separate cavalry run. Added
+      // ALONGSIDE the 17 core + prestige/era/dynasty/fortress/horde/challenge/market targets above (all of
+      // which STILL evaluate here, unchanged): the cavalry is Stajnia-gated and the Stajnia is
+      // autoBuildable:false, so the main + meta runs never build it, never unlock the cavalry, and stay
+      // BYTE-IDENTICAL to pre-M10 (the cavalry identity the contract pins) — see the per-seed report below.
+      name: 'cavalry-recruited',
+      ok: m.cavalryRecruited >= TARGETS.minCavalryRecruited,
+      detail: `trained ${m.cavalryRecruited} cavalry (Stajnia lvl ${m.stableBuilt}) in the dedicated run (target >= ${TARGETS.minCavalryRecruited})`,
+    },
   ]
 }
 
@@ -555,6 +565,44 @@ async function main(): Promise<void> {
     console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
     // Surface each detail so a passing conservation / capacity / determinism / round-trip check is visible.
     for (const name of m9Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
+  // --- Cavalry per seed (M10 KAWALERIA; SEPARATE Stajnia-gated cavalry run) ---
+  console.log('--- Cavalry (end) ---')
+  console.log('seed     | cavalry trained | Stajnia level reached')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.cavalryRecruited).padStart(15)} | ${String(m.stableBuilt).padStart(21)}`,
+    )
+  }
+  console.log('')
+
+  // --- M10 cavalry coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M10 cavalry: KAWALERIA (coverage) ---')
+  const m10Names = [
+    'cavalry-recruited',
+    'cavalry-attack-won',
+    'cavalry-gated',
+    'cavalry-inert',
+    'cavalry-upkeep',
+    'cavalry-save-load',
+  ]
+  for (const r of results) {
+    const line = m10Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing gate / inertness / upkeep / save-load check is visible.
+    for (const name of m10Names) {
       const inv = r.invariants.find((i) => i.name === name)
       if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
     }

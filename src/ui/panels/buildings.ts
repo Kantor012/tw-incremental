@@ -14,7 +14,6 @@ import {
   type BuildingDef,
 } from '../../content/buildings'
 import { nextCostAffordable, costReduction, villageDefenseMult } from '../../systems/buildings'
-import { recruitSpeedMult } from '../../systems/recruitment'
 import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
 import { h, RESOURCE_NAMES } from '../dom'
@@ -94,7 +93,10 @@ function effectText(v: Village, id: BuildingId, mods: TechModifiers = NO_TECH_MO
     case 'cost_reduction':
       return 'Koszt rozbudowy: -' + Math.round((1 - costReduction(v, mods).toNumber()) * 100) + '%'
     case 'recruit_speed':
-      return 'Czas szkolenia: -' + Math.round((1 - recruitSpeedMult(v, mods)) * 100) + '%'
+      // This building's OWN training-speed cut (multiplicative per level: 1-(1-perLevel)^level).
+      // recruitSpeedMult folds EVERY recruit_speed building (Koszary + Stajnia) + tech, so showing
+      // the combined total on each card would double-count once both stand — isolate per card here.
+      return 'Czas szkolenia: -' + Math.round((1 - Math.pow(1 - e.perLevel, level)) * 100) + '%'
     case 'noble_unlock':
       return 'Odblokowuje szlachcica (przejmowanie wiosek)'
     case 'defense_bonus':

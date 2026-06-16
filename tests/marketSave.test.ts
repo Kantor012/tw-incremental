@@ -66,7 +66,7 @@ describe('market save — v19 -> v20 migration backfill (M9)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(20)
+    expect(m.version).toBe(21)
 
     for (const id of m.villageOrder) {
       expect(m.villages[id].buildings.market).toBe(0)

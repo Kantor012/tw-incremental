@@ -209,6 +209,24 @@ export function unitIcon(id: UnitId): SVGSVGElement {
       const stone = svg('circle', { cx: '18', cy: '6', r: '1.2', fill: '#6b7682' })
       return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [base, wheelL, wheelR, arm, bucket, stone])
     }
+    case 'light_cavalry': {
+      // The Lekka kawaleria is the fast high-carry raider (M10) — a galloping horse
+      // head reads as "mounted speed/loot" and sets the cavalry apart from the
+      // infantry's weapon glyphs. Light tone, a flowing mane to signal pace.
+      const head = svg('path', { d: 'M6 20 7 12 10 8 14 7 17 4 18 6 16 9 19 11 18 15 14 13 12 16 13 20Z', fill: '#b98b54' })
+      const mane = svg('path', { d: 'M14 7 10 8 9 12', stroke: '#7e5a30', 'stroke-width': '1.4', fill: 'none' })
+      const eye = svg('circle', { cx: '15.5', cy: '7.5', r: '0.9', fill: '#16202b' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [head, mane, eye])
+    }
+    case 'heavy_cavalry': {
+      // The Ciężka kawaleria is the armoured mounted hammer (M10) — the same horse
+      // head as the light cavalry but barded with iron plate (steel tones) to read as
+      // "heavy charge", the offensive counterpart to its lighter sibling.
+      const head = svg('path', { d: 'M6 20 7 12 10 8 14 7 17 4 18 6 16 9 19 11 18 15 14 13 12 16 13 20Z', fill: '#9aa3ad' })
+      const plate = svg('path', { d: 'M10 8 14 7 16 9 13 12Z', fill: '#c6cdd5' })
+      const eye = svg('circle', { cx: '15.5', cy: '7.5', r: '0.9', fill: '#16202b' })
+      return svgIcon('0 0 24 24', UNITS[id].name, 'unit-icon', [head, plate, eye])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla jednostki: ' + String(_exhaustive))

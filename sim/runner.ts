@@ -18,6 +18,7 @@ import { sendShipment } from '../src/systems/market'
 import { purchaseTech } from '../src/systems/tech'
 import { TECH_NODES, TECH_NODE_IDS } from '../src/content/tech'
 import { fortressTarget } from '../src/content/fortresses'
+import { barbarianTarget } from '../src/content/barbarians'
 import { UNIT_IDS, UNITS } from '../src/content/units'
 import {
   armyAttackPower,
@@ -111,6 +112,10 @@ import {
   checkMarketDeterminism,
   checkMarketNoSoftlock,
   checkMarketSaveLoad,
+  checkCavalryGated,
+  checkCavalryInert,
+  checkCavalryUpkeep,
+  checkCavalrySaveLoad,
   type InvariantResult,
 } from './invariants'
 import {
@@ -138,6 +143,7 @@ import {
   type DynastyRunStats,
   type ChallengeRunStats,
   type MarketRunStats,
+  type CavalryRunStats,
   type AutomationRunStats,
 } from './metrics'
 
@@ -1624,6 +1630,191 @@ export function runMarket(seed: string, ticks: number = MARKET_TICKS): MarketRun
   }
 }
 
+// --- M10 cavalry (KAWALERIA — Stajnia-gated mounted units) run ----------------------------------
+//
+// A SEPARATE run from every measurement above, mirroring the fortress/market rationale: the cavalry is
+// gated behind the Stajnia (stable), which is autoBuildable:false — so neither the in-game auto-build nor
+// the MAIN-run bot ever build it (MAIN_BUILD_IDS filters it out), the cavalry never UNLOCKS in the main
+// run (cheapestRecruit can never pick a gated unit), and a run that never builds the Stajnia is BYTE-
+// IDENTICAL to pre-M10 (every existing balance target untouched). This dedicated run hands a fresh seeded
+// capital the PROVEN endgame economy (every building + tech at its data max — the very state the main run
+// reaches, which BUILDS the Stajnia along with everything else), recruits BOTH cavalry units honestly
+// within the real popCap, then marches a cavalry strike force to win a barbarian-camp attack. The cavalry
+// uses the EXISTING combat model (its `attack` drives offence), so no resolver change is needed. Pure +
+// deterministic (combat draws only the seeded luck, frozen to worst-case for target selection).
+
+/**
+ * Step budget for the SEPARATE M10 cavalry run. Sized so a maxed capital can train the full cavalry
+ * strike force (both mounts, sequential on the recruit queue — the heavy cavalry's ~430s base, shortened
+ * by the maxed Stajnia + tech training bonuses) AND march it to the nearest barbarian camp and resolve
+ * the attack, with headroom. The run STOPS the moment the cavalry strike wins (single pass — it measures
+ * REACHABILITY, not save fidelity, which {@link checkCavalrySaveLoad} pins), so the budget bounds the
+ * worst case rather than the common one.
+ */
+const CAVALRY_TICKS = 12000
+
+/** Light cavalry the run trains before striking — a proper raiding stack within the maxed popCap. */
+const CAVALRY_LIGHT = 20
+
+/** Heavy cavalry the run trains before striking — the mounted hammer alongside the light raiders. */
+const CAVALRY_HEAVY = 10
+
+/** Σ owned cavalry (light + heavy) across villages — rises ONLY on training completion (dispatch keeps them owned). */
+function cavalryTotal(state: GameState): number {
+  let n = 0
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    n += v.units.light_cavalry + v.units.heavy_cavalry
+  }
+  return n
+}
+
+/** What a cavalry run yields: the final state, sampled invariants, and the cavalry tally. */
+interface CavalryRun {
+  state: GameState
+  invariants: InvariantResult[]
+  metrics: CavalryRunStats
+}
+
+/**
+ * Drive a fresh seeded capital through the M10 cavalry loop and prove the mounted pipeline is reachable.
+ * Hands the capital the PROVEN endgame economy (every building + tech maxed — DIRECTLY, the dedicated-run
+ * helper pattern, NOT via the main bot build candidates, so the main run stays byte-identical and the
+ * Stajnia stays excluded there). Maxing the buildings BUILDS the Stajnia (autoBuildable:false — the gate
+ * the main run never opens), UNLOCKING the cavalry roster. The driver then recruits BOTH cavalry units
+ * toward their targets, HOLDING them home (no churn), and once the full strike force stands sends ONE
+ * attack INCLUDING cavalry at the nearest barbarian camp the stack beats even at WORST luck — winning it
+ * via the EXISTING combat model. Raids + the global horde are frozen so the ONLY combat is the cavalry
+ * strike (isolating the mechanic from raid/horde attrition, exactly as runFortress/runMarket freeze them).
+ * Samples the hard invariants periodically + at the end, plus bare 'cavalry-recruited' / 'cavalry-attack-
+ * won' proofs. Records the cavalry trained + the Stajnia level reached. Deterministic.
+ */
+export function runCavalry(seed: string, ticks: number = CAVALRY_TICKS): CavalryRun {
+  const dt = TARGETS.tickSeconds
+  const state = createInitialState(seed, 0)
+  const invariants: InvariantResult[] = []
+  const v = state.villages[state.villageOrder[0]]
+
+  // Proven endgame economy (mirrors runFortress/runMarket): every building + tech at its data max. This
+  // BUILDS the Stajnia (which the MAIN bot/auto-build never raise — it is autoBuildable:false), UNLOCKING
+  // the cavalry roster the dedicated run trains and fights. Direct set is the dedicated-run helper pattern.
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  for (const nodeId of TECH_NODE_IDS) state.tech[nodeId] = TECH_NODES[nodeId].maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  // Freeze raids + the global horde so the ONLY combat is the cavalry strike (isolate the mechanic).
+  v.raidTimer = ticks * dt + 1e9
+  state.horde.timer = ticks * dt + 1e9
+  const mods = effectiveMods(state)
+
+  const stableBuilt = v.buildings.stable // the gate the main run never opens (maxed here).
+
+  let cavalryRecruited = 0
+  // Peak per-type roster (capital): proves BOTH cavalry types were trained to their targets,
+  // so the 'cavalry-recruited' invariant does not lean solely on the attack-send gate (M10 review).
+  let lightPeak = 0
+  let heavyPeak = 0
+  let prevCav = cavalryTotal(state)
+  let attackSent = false
+  let attackWon = false
+  let prevLog: BattleReport[] = state.battleLog.slice()
+  let prevTotal = totalResources(state)
+  let actedInWindow = 0
+
+  for (let i = 0; i < ticks; i++) {
+    // Train BOTH cavalry units toward their targets (held at home — no churn until the strike).
+    recruitToward(v, 'light_cavalry', CAVALRY_LIGHT, mods)
+    recruitToward(v, 'heavy_cavalry', CAVALRY_HEAVY, mods)
+
+    // Once the FULL cavalry strike force stands at home and nothing is already marching, send ONE attack
+    // INCLUDING both cavalry units at the nearest barbarian camp the stack beats even at WORST luck.
+    if (!attackSent && v.marches.length === 0) {
+      const home = stationedUnits(v)
+      if (home.light_cavalry >= CAVALRY_LIGHT && home.heavy_cavalry >= CAVALRY_HEAVY) {
+        const strike = zeroRoster()
+        strike.light_cavalry = home.light_cavalry
+        strike.heavy_cavalry = home.heavy_cavalry
+        const atkWorst = armyAttackPower(strike, mods) * WORST_LUCK
+        // Camps are tier-ascending in generation order, so the first beatable is the weakest/nearest.
+        for (const b of state.world.barbarians) {
+          const outcome = battleOutcome(atkWorst, barbarianTarget(b.level).defensePower)
+          if (!outcome.attackerWins) continue
+          if (armyCarry(applyLosses(strike, outcome.attackerLossFrac)) <= 0) continue
+          if (sendAttack(v, state.world, state.battleLog, b.id, strike, mods)) attackSent = true
+          break
+        }
+      }
+    }
+
+    simulate(state, dt)
+
+    // Cavalry trained = cumulative POSITIVE roster deltas (mirrors the automation run's axemanTotal): the
+    // roster rises only on training completion (a dispatch keeps the unit owned, only casualties remove it).
+    const cav = cavalryTotal(state)
+    if (cav > prevCav) {
+      cavalryRecruited += cav - prevCav
+      actedInWindow += cav - prevCav
+    }
+    prevCav = cav
+    // Track each type's peak owned count (v.units counts away units too, so a dispatch never lowers
+    // it — only casualties do, which the peak ignores).
+    lightPeak = Math.max(lightPeak, v.units.light_cavalry)
+    heavyPeak = Math.max(heavyPeak, v.units.heavy_cavalry)
+
+    // Fold the rolling battle log for a WON cavalry attack (the only attacks this run sends are cavalry).
+    for (const r of newBattleReports(prevLog, state.battleLog)) {
+      if (r.kind === 'attack') {
+        actedInWindow += 1
+        if (r.won) attackWon = true
+      }
+    }
+    prevLog = state.battleLog.slice()
+
+    if ((i + 1) % SAMPLE_EVERY === 0) {
+      const phase = `cav t${i + 1}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
+      prevTotal = totalResources(state)
+      actedInWindow = 0
+    }
+
+    // STOP once the cavalry strike has resolved with a win — reachability proven.
+    if (attackWon) break
+  }
+
+  // Final pass (mirrors the other dedicated runs): the post-strike state stays valid + playable.
+  invariants.push(...tag(runInvariants(state), 'cavfinal'))
+  invariants.push(...tag([checkArmyConsistency(state)], 'cavfinal'))
+  invariants.push(...tag([checkWorldConsistency(state)], 'cavfinal'))
+  invariants.push(
+    ...tag([checkNoSoftlock(state, totalResources(state), cavalryRecruited > 0 || attackWon)], 'cavfinal'),
+  )
+
+  // Bare-named HARD invariants (mirror runMarket's 'shipments-delivered'): the dedicated run must TRAIN
+  // cavalry AND win a cavalry attack within budget — proof the M10 recruit + combat pipeline completes.
+  const bothTypes = lightPeak >= CAVALRY_LIGHT && heavyPeak >= CAVALRY_HEAVY
+  invariants.push({
+    name: 'cavalry-recruited',
+    ok: cavalryRecruited >= 1 && bothTypes,
+    detail: bothTypes
+      ? `trained ${cavalryRecruited} cavalry — BOTH types to target (light peak ${lightPeak}/${CAVALRY_LIGHT}, heavy peak ${heavyPeak}/${CAVALRY_HEAVY}) with the Stajnia at level ${stableBuilt}`
+      : `cavalry not both-trained within ${ticks} ticks (light peak ${lightPeak}/${CAVALRY_LIGHT}, heavy peak ${heavyPeak}/${CAVALRY_HEAVY}, Stajnia level ${stableBuilt})`,
+  })
+  invariants.push({
+    name: 'cavalry-attack-won',
+    ok: attackWon,
+    detail: attackWon
+      ? `a cavalry strike force (${CAVALRY_LIGHT} light + ${CAVALRY_HEAVY} heavy) won a barbarian-camp attack`
+      : `dedicated run did not win a cavalry attack within ${ticks} ticks`,
+  })
+
+  return { state, invariants, metrics: { cavalryRecruited, stableBuilt } }
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -1974,6 +2165,26 @@ export function runOne(seed: string, ticks: number): RunResult {
   // already pin the engine + save paths), so no determinism/split replays are needed.
   const fortressDriveRazed = runFortress(seed, FORTRESS_TICKS, dt)
 
+  // M10 cavalry (KAWALERIA) — a SEPARATE dedicated run, the ONLY one that ever builds the Stajnia and so
+  // the ONLY one that can unlock + train the cavalry. The Stajnia is autoBuildable:false, so neither the
+  // main bot (MAIN_BUILD_IDS filters it) nor the in-game auto-build ever raise it, the cavalry never
+  // unlocks in the main run (cheapestRecruit can't pick a gated unit), and a no-Stajnia run is BYTE-
+  // IDENTICAL to pre-M10 — so the M1–M9 + meta targets above STILL evaluate here unchanged (the cavalry
+  // identity the contract pins). The run's invariants (sampled validity + the bare 'cavalry-recruited' /
+  // 'cavalry-attack-won' proofs) are folded in here, and its metrics feed the cavalry balance target.
+  const cavalry = runCavalry(seed, CAVALRY_TICKS)
+  invariants.push(...cavalry.invariants)
+
+  // M10 cavalry proof-of-mechanic checks (self-contained, deterministic): the cavalry is GATED on the
+  // Stajnia (cavalry-gated); the appended keys are INERT in a no-Stajnia run, which round-trips to a
+  // byte-identical pre-M10 save shape (cavalry-inert); the cavalry's population upkeep is counted exactly
+  // (cavalry-upkeep); and a roster + in-flight march carrying cavalry survives the real save/load path
+  // (cavalry-save-load).
+  invariants.push(checkCavalryGated(seed))
+  invariants.push(checkCavalryInert(seed))
+  invariants.push(checkCavalryUpkeep(seed))
+  invariants.push(checkCavalrySaveLoad(seed))
+
   const metrics = collect(
     seed,
     ticks,
@@ -1987,6 +2198,7 @@ export function runOne(seed: string, ticks: number): RunResult {
     market.metrics,
     automation.stats,
     fortressDriveRazed,
+    cavalry.metrics,
   )
   const ok = invariants.every((r) => r.ok)
   return { metrics, invariants, ok }

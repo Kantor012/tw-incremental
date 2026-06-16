@@ -241,6 +241,16 @@ export interface RunMetrics {
   /** Total resources moved by the delivered shipments over the run — exact decimal string (transport throughput). */
   resourcesTransported: string
 
+  // --- M10 cavalry (KAWALERIA — Stajnia-gated mounted units) ---
+  // Measured by a SEPARATE run (see runner.runCavalry) that builds the Stajnia (excluded from the main
+  // bot/auto-build set), recruits BOTH cavalry units and wins a cavalry attack — kept apart from the main
+  // + meta runs, which never build the Stajnia (so the cavalry never unlocks there and a no-Stajnia run is
+  // BYTE-IDENTICAL to pre-M10).
+  /** Cavalry (light + heavy) EVER trained in the dedicated cavalry run — the recruitment-sink throughput. */
+  cavalryRecruited: number
+  /** Max Stajnia level reached in the dedicated cavalry run (the gate the main run never opens). */
+  stableBuilt: number
+
   // --- M5.1 automation (idle routines) ---
   // Measured by a SEPARATE coverage run (see runner.runAutomationCoverage) with the three
   // automation gateways unlocked and every toggle ON — kept apart from the MAIN run, which
@@ -435,6 +445,22 @@ export interface MarketRunStats {
 }
 
 /**
+ * Cavalry (M10 — KAWALERIA) counters from the SEPARATE cavalry-driving run (see runner.runCavalry).
+ * Kept apart from {@link RunStats} / the meta run stats because it is produced by a different run — the
+ * only one that ever BUILDS the Stajnia (autoBuildable:false, so the main bot/auto-build never raise it)
+ * and thus the only one that can UNLOCK and train the cavalry. A run that never builds the Stajnia is
+ * BYTE-IDENTICAL to pre-M10 (the cavalry gate stays shut, so the main + meta runs' 17 core + meta targets
+ * are untouched). {@link collect} folds these straight into the matching {@link RunMetrics} cavalry
+ * fields. Mirrors {@link MarketRunStats} (a dedicated-run reachability tally).
+ */
+export interface CavalryRunStats {
+  /** Cavalry (light + heavy) EVER trained over the dedicated run — the recruitment-sink throughput. */
+  cavalryRecruited: number
+  /** Max Stajnia level reached over the dedicated run (the gate the main run never opens). */
+  stableBuilt: number
+}
+
+/**
  * Automation (M5.1) counters from the SEPARATE coverage run (see
  * runner.runAutomationCoverage). Kept apart from {@link RunStats} because it is produced by
  * a different run (automation ON) than the main economy/combat metrics (automation OFF), so
@@ -576,6 +602,7 @@ export function collect(
   market: MarketRunStats,
   automation: AutomationRunStats,
   fortressDriveRazed: number,
+  cavalry: CavalryRunStats,
 ): RunMetrics {
   const first = firstVillage(state)
 
@@ -705,6 +732,10 @@ export function collect(
     // M9: the dedicated market run's transport throughput (resourcesTransported → exact string).
     shipmentsDelivered: market.shipmentsDelivered,
     resourcesTransported: market.resourcesTransported.toString(),
+
+    // M10: the dedicated cavalry run's recruitment-sink throughput + the Stajnia level it reached.
+    cavalryRecruited: cavalry.cavalryRecruited,
+    stableBuilt: cavalry.stableBuilt,
 
     automationBuilt: automation.built,
     automationRecruited: automation.recruited,
