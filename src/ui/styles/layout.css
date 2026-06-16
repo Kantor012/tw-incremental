@@ -25,6 +25,26 @@
   flex-direction: column;
   min-height: 100dvh;
   width: 100%;
+  /* Winieta sceny: rogi ciemnieją, środek-góra lekko rozjaśniony — głębia tła
+   * (gradient z przezroczystości kładziony NA kolor --bg z body, zero plików). */
+  background-image: var(--grad-vignette);
+}
+
+/* Proceduralne ziarno pergaminu/drewna: BARDZO subtelna tekstura na całym
+ * viewporcie, narysowana feTurbulence z data-URI (zero assetów, zero CDN). Leży
+ * pod treścią (fixed, z-index:-1 → nad tłem body, pod kartami) i jest czysto
+ * dekoracyjna (pointer-events:none). mix-blend-mode wtapia ją w tło, a bardzo
+ * niskie opacity trzyma kontrast tekstu nienaruszony. Statyczna — bez animacji. */
+.app-shell::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image: var(--grain);
+  background-repeat: repeat;
+  opacity: 0.04;
+  mix-blend-mode: overlay;
 }
 
 /* Dashboard jest szerszy niż domyślny pojedynczy słupek (.container = 720px w
@@ -54,10 +74,16 @@ html {
   position: sticky;
   top: 0;
   z-index: var(--z-sticky);
-  /* Nieprzezroczyste, lekko wyniesione tło — treść przewija się POD paskiem. */
+  /* Nieprzezroczyste, lekko wyniesione tło — treść przewija się POD paskiem.
+   * Subtelny gradient powierzchni (jaśniej u góry) nadaje sztandarowi głębię. */
   background-color: var(--panel);
-  border-bottom: 1px solid var(--border);
-  box-shadow: var(--shadow-2);
+  background-image: var(--grad-panel);
+  border-bottom: 1px solid var(--border-strong);
+  /* Banner okutego sztandaru: cień separujący w dół (treść chowa się pod pasek) +
+   * połysk górnej krawędzi (światło na okuciu) + cienka ZŁOTA linia akcentu u dołu
+   * (gilt) — sygnaturowy akcent paska, nie jedyny nośnik żadnej informacji. */
+  box-shadow: var(--shadow-2), var(--edge-highlight),
+    inset 0 -2px 0 rgba(var(--accent-rgb), 0.5);
 }
 
 /* Wewnętrzny rząd HUD-a: marka | surowce (rosną) | statystyki. Zawija się na
@@ -127,19 +153,42 @@ html {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-1) var(--space-3);
-  background-color: var(--bg-2);
+  /* Wytłoczony żeton: powierzchnia JAŚNIEJSZA niż pasek (--panel-2 nad --panel)
+   * sama z siebie czyta się jako uniesiona; gradient + połysk górnej krawędzi +
+   * cień kontaktu dopełniają wrażenie wybitej z metalu monety. */
+  background-color: var(--panel-2);
+  background-image: var(--grad-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1), var(--edge-highlight);
 }
 
 .hud-res-icon {
   flex: none;
 }
 
-/* Ikona surowca poza kontekstem .resource-row (gdzie base.css ją wymiaruje). */
+/* Ikona surowca poza kontekstem .resource-row (gdzie base.css ją wymiaruje).
+ * Bazowo neutralny cień kontaktu „odrywa" ją od żetonu. */
 .hud-res .res-icon {
   width: 1.25rem;
   height: 1.25rem;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55));
+}
+
+/* Surowco-zależna poświata ikony — hak .hud-res--{surowiec} z layout.ts pozwala
+ * zapalić ją w barwie surowca (delikatnie, gra idle a nie neon). To DEKORACJA:
+ * surowiec niesie już nazwa (aria-label ikony + title), więc poświata wzmacnia
+ * skanowalność, nie jest jedynym sygnałem (WCAG 1.4.1). Wyłączana razem z resztą
+ * ruchu nie jest potrzebna (statyczna), lecz subtelny puls przy zmianie wartości
+ * mógłby dojść w M11.3. */
+.hud-res--wood .res-icon {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55)) drop-shadow(var(--glow-wood));
+}
+.hud-res--clay .res-icon {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55)) drop-shadow(var(--glow-clay));
+}
+.hud-res--iron .res-icon {
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.55)) drop-shadow(var(--glow-iron));
 }
 
 .hud-res-text {
@@ -184,10 +233,20 @@ html {
   color: var(--text);
 }
 
-/* Pasek HUD-a — niższy niż domyślny .bar, dociągnięty na pełną szerokość grupy. */
+/* Pasek HUD-a — niższy niż domyślny .bar, dociągnięty na pełną szerokość grupy.
+ * Wewnętrzny cień daje wrażenie WGŁĘBIONEGO toru (studni), w którym leży wypełnienie. */
 .hud-bar {
   width: 100%;
   height: 8px;
+  box-shadow: var(--inset-well-soft);
+}
+
+/* Wypełnienie paska HUD-a: ciepła rampa złota zamiast płaskiego koloru + górny
+ * połysk (inset) dla wrażenia szkliwa. Outer-glow odpadłby (tor ma overflow:hidden),
+ * więc gloss daje subtelny inset. Stan „pełny/pusty" niesie liczba „użyte / limit". */
+.hud-bar > i {
+  background-image: var(--grad-progress);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
 }
 
 /* ---- Przełącznik wiosek (aktywna wioska dla HUD-u i wszystkich paneli) --- */
@@ -230,8 +289,11 @@ html {
   padding: var(--space-1) var(--space-3);
   color: var(--muted);
   background-color: var(--bg-2);
+  background-image: var(--grad-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
+  /* Wytłoczona pigułka — połysk u góry + cień kontaktu. */
+  box-shadow: var(--shadow-1), var(--edge-highlight);
   font-family: var(--font-body);
   font-size: var(--text-sm);
   font-weight: var(--weight-medium);
@@ -239,7 +301,8 @@ html {
   cursor: pointer;
   transition: color var(--dur-fast) var(--ease),
     background-color var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease);
+    border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .village-btn:hover {
@@ -254,7 +317,11 @@ html {
 .village-btn.is-active {
   color: var(--bg);
   background-color: var(--accent);
+  /* Wypukły złoty metal (mosiądz u góry → złoto u dołu) + miękka poświata akcentu;
+   * stan niesie też pełne wypełnienie, pogrubienie i znacznik ✓ (WCAG 1.4.1). */
+  background-image: var(--grad-accent);
   border-color: var(--accent);
+  box-shadow: var(--glow-accent-soft), var(--edge-highlight-strong);
   font-weight: var(--weight-bold);
 }
 
@@ -324,7 +391,8 @@ html {
   scroll-margin-top: var(--hud-h);
   transition: color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
-    background-color var(--dur-fast) var(--ease);
+    background-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 .tab:hover {
@@ -333,10 +401,14 @@ html {
 }
 
 /* Aktywny tab: wyróżniony NIE tylko kolorem (WCAG 1.4.1) — dochodzi złote
- * podkreślenie i mocniejszy tekst. aria-selected niesie stan dla AT. */
+ * podkreślenie, mocniejszy tekst ORAZ uniesienie: lekko jaśniejsze tło zakładki,
+ * połysk górnej krawędzi i miękka złota poświata pod podkreśleniem (jak świecąca
+ * listwa). aria-selected niesie stan dla AT. */
 .tab.is-active {
   color: var(--accent);
+  background-color: var(--panel-2);
   border-bottom-color: var(--accent);
+  box-shadow: 0 2px 10px -2px rgba(var(--accent-rgb), 0.45), var(--edge-highlight);
   font-weight: var(--weight-bold);
 }
 
@@ -385,9 +457,50 @@ html {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
+  /* Warstwowa głębia karty: powierzchnia z subtelnym gradientem (jaśniej u góry),
+   * cień kontaktu + połysk górnej krawędzi (lite drewno/okucie). */
   background-color: var(--panel-2);
+  background-image: var(--grad-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1), var(--edge-highlight);
+  transition: transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    background-color var(--dur-fast) var(--ease-out),
+    background-image var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease);
+}
+
+/* Najazd kursorem unosi kartę (translateY) i pogłębia cień o jedną półkę —
+ * mikro-interakcja sygnalizująca interaktywność. Spójnie z zasadą „wyżej =
+ * JAŚNIEJ": powierzchnia wskakuje na wyższą półkę rampy (--surface-raised, czyt.
+ * nad spoczynkowym --panel-2) z mocniejszym górnym połyskiem (--grad-panel-raised),
+ * więc karta nie tylko rzuca dalszy cień, ale i „wychodzi w światło". Kontrast
+ * --text/--muted na --surface-raised trzyma AA (~10.9:1 / ~5.8:1). Ruch wyłączany
+ * przy prefers-reduced-motion (blok niżej) wg WCAG 2.3.3. */
+.card:hover,
+.building-card:hover,
+.unit-card:hover,
+.target:hover,
+.save-card:hover {
+  transform: translateY(-2px);
+  background-color: var(--surface-raised);
+  background-image: var(--grad-panel-raised);
+  box-shadow: var(--shadow-3), var(--edge-highlight);
+  border-color: var(--border-strong);
+}
+
+/* Ograniczony ruch: globalny wyłącznik w base.css zeruje czasy przejść, ale
+ * uniesienie karty zostawiłoby ją trwale przesuniętą — tu jawnie ZNOSIMY samo
+ * przesunięcie (cień/obrys nadal sygnalizują hover bez ruchu). WCAG 2.3.3/2.2.2. */
+@media (prefers-reduced-motion: reduce) {
+  .card:hover,
+  .building-card:hover,
+  .unit-card:hover,
+  .target:hover,
+  .save-card:hover {
+    transform: none;
+  }
 }
 
 /* ============================================================================
@@ -513,6 +626,8 @@ html {
   background-color: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Pole mapy czyta się jako WGŁĘBIONA studnia (okno na świat wpuszczone w panel). */
+  box-shadow: var(--inset-well);
   /* Przeciąganie mapy nie ma zaznaczać tekstu kontrolek/detali. */
   user-select: none;
 }
@@ -594,9 +709,10 @@ html {
   min-height: 44px;
 }
 
-/* Przyciski unoszą się nad mapą — cień zapewnia czytelność na tle węzłów. */
+/* Przyciski unoszą się nad mapą — głębszy, warstwowy cień wyraźnie odrywa je od
+ * pola węzłów (pływają nad sceną). */
 .map-controls .btn {
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-3), var(--edge-highlight);
 }
 
 /* ---- Węzły wiosek (SVG: <g> tarczy gracza albo <circle> barbarzyńcy) --- */
@@ -762,10 +878,14 @@ html {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  background-color: var(--panel);
-  border: 1px solid var(--border);
+  /* Pływająca karta-popover nad mapą: najwyższa półka rampy (--surface-overlay),
+   * subtelny gradient i połysk krawędzi + głęboki, warstwowy cień = wrażenie, że
+   * unosi się nad sceną. Kontrast --text/--muted na tej powierzchni trzyma AA. */
+  background-color: var(--surface-overlay);
+  background-image: var(--grad-panel-raised);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-3), var(--edge-highlight);
 }
 
 .map-detail-head {
@@ -972,7 +1092,9 @@ html {
   background-color: var(--bg-2);
   border: 1px solid var(--accent);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-2);
+  /* Baner-nakładka nad polem mapy: głębszy cień + złota poświata wiążą go z
+   * uzbrojonym trybem zakładania (akcent obrysu to dodatkowy, nie jedyny sygnał). */
+  box-shadow: var(--shadow-3), var(--glow-accent-soft);
 }
 
 /* ============================================================================
@@ -1130,6 +1252,8 @@ html {
   background-color: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Płótno konstelacji jako WGŁĘBIona studnia (spójnie z polem mapy). */
+  box-shadow: var(--inset-well);
   user-select: none;
 }
 
@@ -1319,7 +1443,7 @@ html {
 }
 
 .tech-controls .btn {
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-3), var(--edge-highlight);
 }
 
 /* ---- Karta detali wybranego węzła ------------------------------------ */
@@ -1335,10 +1459,13 @@ html {
   flex-direction: column;
   gap: var(--space-2);
   padding: var(--space-3);
-  background-color: var(--panel);
-  border: 1px solid var(--border);
+  /* Karta-popover wybranego węzła — ta sama, najwyższa półka i głębia, co panel
+   * detali mapy (unosi się nad konstelacją). */
+  background-color: var(--surface-overlay);
+  background-image: var(--grad-panel-raised);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-2);
+  box-shadow: var(--shadow-3), var(--edge-highlight);
 }
 
 .tech-detail-head {
@@ -1421,7 +1548,7 @@ html {
 /* Niedobór surowca — czerwień (PLUS atrybut title z JS i powód na przycisku niosą
  * znaczenie tekstem; kolor jest tylko wzmocnieniem). */
 .tech-cost-item.is-short .tech-cost-val {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .tech-detail-maxed {
@@ -1523,7 +1650,11 @@ html {
 .codex-section {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Karta-rozwijka: ta sama warstwowa głębia co karty dashboardu (gradient
+   * powierzchni + cień kontaktu + połysk górnej krawędzi). */
   background-color: var(--panel-2);
+  background-image: var(--grad-panel);
+  box-shadow: var(--shadow-1), var(--edge-highlight);
   padding: var(--space-2) var(--space-3);
   /* Kotwica ze spisu treści ma lądować poniżej sticky HUD-a. */
   scroll-margin-top: var(--hud-h);
@@ -1676,6 +1807,9 @@ html {
   border: 1px solid var(--border);
   border-left: 3px solid var(--bad);
   border-radius: var(--radius-md);
+  /* Wpuszczone pudełko-ostrzeżenie (studnia) — odróżnia alert od wypukłych kart;
+   * sens niesie znak ⚔ i słowny werdykt prognozy, nie sama forma (WCAG 1.4.1). */
+  box-shadow: var(--inset-well-soft);
 }
 
 /* Nagłówek dziedziczy z .recruit-subtitle, ale w pudełku ma przylegać do góry. */
@@ -1807,7 +1941,7 @@ html {
 }
 
 .challenge-spec-constraint {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .challenge-spec-reward {
@@ -1837,10 +1971,13 @@ html {
   -webkit-appearance: none;
   display: block;
   width: 100%;
-  height: 10px;
+  /* Grubszy, zaokrąglony pasek z WGŁĘBIonym torem (studnia) — czytelniejszy i
+   * spójny z premium-paskami HUD-a. */
+  height: 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
   background-color: var(--bg-2);
+  box-shadow: var(--inset-well-soft);
   overflow: hidden;
 }
 
@@ -1849,14 +1986,19 @@ html {
   border-radius: var(--radius-pill);
 }
 
+/* Wypełnienie: ciepła rampa złota + górny połysk (inset gloss) zamiast płaskiego
+ * koloru. Wartość niesie atrybut value oraz odczyt liczbowy, nie sam kolor. */
 .challenge-progress-bar::-webkit-progress-value {
   background-color: var(--accent);
+  background-image: var(--grad-progress);
   border-radius: var(--radius-pill);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
   transition: width var(--dur-base) var(--ease);
 }
 
 .challenge-progress-bar::-moz-progress-bar {
   background-color: var(--accent);
+  background-image: var(--grad-progress);
   border-radius: var(--radius-pill);
 }
 
@@ -1890,4 +2032,17 @@ html {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Pole „wkopane" w powierzchnię — parytet z .recruit-count/.save-area, by
+   * rodzina pól formularza czytała się spójnie (wcześniej select był płaski). */
+  box-shadow: var(--inset-well-soft);
+  transition: border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
+}
+
+/* Focus selecta rynku: zachowane wgłębienie + złoty pierścień, jak inne pola. */
+.market-select:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  border-color: var(--accent);
+  box-shadow: var(--inset-well-soft), var(--focus-ring);
 }

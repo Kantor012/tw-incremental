@@ -8,19 +8,40 @@
  *
  * Zasady:
  *  - Tylko fonty systemowe (brak @font-face, zero zewnętrznych assetów).
+ *  - Zero zewnętrznych grafik — głębia wyłącznie kodem: cienie, gradienty,
+ *    nakładki, proceduralne SVG (data-URI) i blendy CSS.
  *  - Kontrast tekst/tło >= 4.5:1 (--text ~14.8:1, --muted ~7.8:1 na --bg).
+ *    Powierzchnie podniesione są JAŚNIEJSZE od tła, ale wciąż na tyle ciemne,
+ *    by --text/--muted trzymały AA (najjaśniejsza --surface-overlay #45341f
+ *    daje dla --text ~10:1, dla --muted ~5.3:1).
+ *  - Stan NIGDY nie zależy od samego koloru — poświaty/gradienty są dodatkiem
+ *    do istniejących wskazówek tekstowych/kształtu/aria (WCAG 1.4.1).
  *  - Ten plik MUSI być wczytany PRZED base.css (base korzysta z tych zmiennych).
  * ========================================================================== */
 
 :root {
   color-scheme: dark;
 
-  /* ---- Paleta: tła i powierzchnie (ciepła sadza / wypalone drewno) ------- */
+  /* ---- Paleta: tła i powierzchnie (ciepła sadza / wypalone drewno) -------
+   * Rampa wysokości: im wyżej element „leży" nad tłem, tym JAŚNIEJSZA jego
+   * powierzchnia (sygnał głębi niezależny od cienia). Kolejność rosnąca:
+   * --bg < --bg-2 < --panel < --panel-2 < --surface-raised < --surface-overlay. */
   --bg: #1a1410;        /* tło aplikacji — zgodne z <meta theme-color>      */
   --bg-2: #221a13;      /* delikatne strefowanie tła / sekcje                */
   --panel: #2a2017;     /* karta / panel                                     */
   --panel-2: #332619;   /* zagnieżdżony panel, nagłówek panelu, hover tła    */
+  --surface-raised: #3b2c1c;  /* karta uniesiona (hover, aktywna) — czyt. nad --panel */
+  --surface-overlay: #45341f; /* popover / modal / menu — najwyższa półka    */
   --border: #4a3a28;    /* obrys paneli i kontrolek (ciepły brąz)           */
+  --border-strong: #5d4930;   /* mocniejszy obrys (hover/aktywny, podział)   */
+
+  /* ---- Nakładki podniesienia (biały welon na rosnącą wysokość) ----------
+   * Cienka biała półprzezroczystość kładziona NA powierzchnię (gradientem lub
+   * tłem) rozjaśnia ją zależnie od półki, bez twardego koloru — działa nad
+   * dowolnym tłem. Trzymaj subtelnie (3–8%), inaczej tekst traci kontrast. */
+  --overlay-hi: rgba(255, 255, 255, 0.04);    /* lekkie uniesienie           */
+  --overlay-hi-2: rgba(255, 255, 255, 0.06);  /* mocniejsze (hover/raised)   */
+  --overlay-lo: rgba(0, 0, 0, 0.28);          /* przyciemnienie (dół/wgłębienie) */
 
   /* ---- Paleta: tekst ----------------------------------------------------- */
   --text: #f0e6d6;      /* tekst główny — ciepła kość słoniowa (~14.8:1)     */
@@ -29,6 +50,7 @@
   /* ---- Paleta: akcenty (złoto / mosiądz — sztandary, monety) ------------- */
   --accent: #d9a441;    /* złoto — główny akcent, focus, aktywne stany       */
   --accent-2: #ead08a;  /* jaśniejszy mosiądz — hover akcentu, błyski        */
+  --accent-ink: #2a1c08; /* ciemny tusz NA złocie (tekst na przyciskach prim.) */
 
   /* ---- Paleta: surowce (barwy naturalne) -------------------------------- */
   --wood: #c98a4b;      /* drewno — ciepły tan / dębina                      */
@@ -36,8 +58,29 @@
   --iron: #9fb3c2;      /* żelazo — chłodna stal                             */
 
   /* ---- Paleta: status --------------------------------------------------- */
+  /* Rozdział WYPEŁNIENIE vs TEKST. --bad jest świetne jako PLAMA (paski, lewe
+   * krawędzie kart, węzły mapy, tło .btn-danger:hover — tam kontrastuje z --bg),
+   * ale jako drobny TEKST na podniesionych powierzchniach spada poniżej AA:
+   * na --panel-2 (#332619) ~4.26:1, a na najwyższej półce --surface-overlay
+   * (#45341f, pływający popover mapy) tylko ~3.46:1 — oba < 4.5:1 wymaganych dla
+   * tekstu zwykłej wielkości. Dlatego TEKST alarmowy bierze JAŚNIEJSZY --bad-text,
+   * dobrany tak, by czyścił 4.5:1 na NAJJAŚNIEJSZEJ powierzchni, na której się
+   * pojawia (--surface-overlay): ~5.1:1 na overlay, ~6.3:1 na --panel-2, ~7:1 na
+   * --bg-2 — wciąż jednoznacznie alarmowa czerwień, wzmacniana istniejącymi
+   * znacznikami ✗/⚠ i słowem (WCAG 1.4.1 + 1.4.3). Plama zostaje na --bad. */
   --good: #7ec06a;      /* sukces / zysk / dostępne                          */
-  --bad: #e0644c;       /* błąd / strata / zablokowane                       */
+  --bad: #e0644c;       /* błąd / strata / zablokowane — WYPEŁNIENIE/PLAMA   */
+  --bad-text: #f0926f;  /* czerwień jako drobny TEKST — AA na półkach do overlay */
+
+  /* ---- Kanały RGB (do składania poświat/nakładek z alfą) ----------------
+   * CSS nie wyciągnie składowych z heksu, więc trzymamy je osobno. Pozwala to
+   * budować rgb(var(--accent-rgb) / .3) bez duplikowania liczb po plikach. */
+  --accent-rgb: 217, 164, 65;
+  --good-rgb: 126, 192, 106;
+  --bad-rgb: 224, 100, 76;
+  --wood-rgb: 201, 138, 75;
+  --clay-rgb: 207, 113, 80;
+  --iron-rgb: 159, 179, 194;
 
   /* ---- Paleta: gałęzie drzewa rozwoju (9 ramion konstelacji) ------------ */
   /* Odrębny odcień na każde ramię — niesie TOŻSAMOŚĆ przestrzenną gałęzi
@@ -92,14 +135,100 @@
   --radius-lg: 14px;
   --radius-pill: 999px;
 
-  /* ---- Cienie (głębia + ciepły wewnętrzny połysk) ---------------------- */
+  /* ---- Cienie: warstwowa skala wysokości (dark-tuned) ------------------
+   * Każda półka to KILKA warstw: ostra krawędź (1px, kontakt) + cień średni +
+   * cień rozproszony (ambient). Na ciemnym tle cienie muszą być głębsze niż na
+   * jasnym, by w ogóle było je widać. Wyższa półka = mocniejszy, dalszy cień.
+   *   1 = spoczynek (pigułki HUD, drobne kontrolki)
+   *   2 = karta / panel
+   *   3 = element uniesiony (hover karty, sticky HUD)
+   *   4 = nakładki (modal, popover, menu, toast) */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.5);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.4), 0 4px 10px rgba(0, 0, 0, 0.35);
+  --shadow-3: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 20px rgba(0, 0, 0, 0.45),
+    0 20px 40px rgba(0, 0, 0, 0.3);
+  --shadow-4: 0 2px 4px rgba(0, 0, 0, 0.5), 0 12px 28px rgba(0, 0, 0, 0.5),
+    0 30px 60px rgba(0, 0, 0, 0.45);
 
-  /* ---- Czasy animacji --------------------------------------------------- */
+  /* ---- Tłoczenie krawędzi: połysk u góry, wgłębienie wewnątrz -----------
+   * --edge-highlight: 1px rozjaśnienie na górnej krawędzi (światło padające
+   *   z góry na okute drewno/metal) — daj na panele i przyciski (box-shadow,
+   *   po przecinku z cieniem rzucanym).
+   * --edge-highlight-strong: mocniejszy wariant na akcent/uniesione.
+   * --inset-well: wklęsły, ciemny cień wewnętrzny — studnie/inputy/tory
+   *   pasków postępu czytają się jako WGŁĘBIONE. */
+  --edge-highlight: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --edge-highlight-strong: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  --inset-well: inset 0 2px 4px rgba(0, 0, 0, 0.5);
+  --inset-well-soft: inset 0 1px 3px rgba(0, 0, 0, 0.4);
+
+  /* ---- Poświaty: kolorowy cień BEZ offsetu (= halo) ---------------------
+   * Subtelnie (gra idle, nie neon). Złota na focusie / aktywnej zakładce /
+   * primary na hover; good/bad jako WTÓRNE wzmocnienie stanu (nigdy jedyny
+   * nośnik informacji). Resource-glow do ikon surowców w HUD. */
+  --glow-accent: 0 0 0 1px rgba(var(--accent-rgb), 0.45),
+    0 0 14px rgba(var(--accent-rgb), 0.32);
+  --glow-accent-soft: 0 0 12px rgba(var(--accent-rgb), 0.28);
+  --glow-good: 0 0 12px rgba(var(--good-rgb), 0.3);
+  --glow-bad: 0 0 12px rgba(var(--bad-rgb), 0.32);
+  --glow-wood: 0 0 10px rgba(var(--wood-rgb), 0.3);
+  --glow-clay: 0 0 10px rgba(var(--clay-rgb), 0.3);
+  --glow-iron: 0 0 10px rgba(var(--iron-rgb), 0.3);
+
+  /* ---- Pierścień focusu (widoczny, złoty, z halo) ----------------------
+   * Wspólny token dla :focus-visible — łączy twardy obrys (kontrast >=3:1) z
+   * miękką poświatą. Trzymaj jako outline/box-shadow w base.css. */
+  --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent),
+    0 0 14px rgba(var(--accent-rgb), 0.4);
+
+  /* ---- Gradienty: subtelna głębia powierzchni i tła --------------------
+   * Wszystkie jako NAKŁADKI z przezroczystości — kładzione NA kolor
+   * powierzchni (background-image nad background-color), więc działają na
+   * dowolnej półce rampy. Kierunek: jaśniej u góry → ciemniej u dołu
+   * (światło z góry). */
+  --grad-panel: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.05),
+    rgba(0, 0, 0, 0.06)
+  );
+  --grad-panel-raised: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.07),
+    rgba(0, 0, 0, 0.08)
+  );
+  /* Złoty przycisk primary — mosiądz u góry → złoto u dołu (wypukły metal). */
+  --grad-accent: linear-gradient(180deg, var(--accent-2), var(--accent));
+  --grad-accent-hover: linear-gradient(180deg, #f3dca0, var(--accent-2));
+  /* Wypełnienie paska postępu — ciepła rampa złota wzdłuż osi X. */
+  --grad-progress: linear-gradient(90deg, var(--accent), var(--accent-2));
+  /* Winieta tła aplikacji — rogi ciemniejsze, środek-góra rozjaśniony, by
+   * scena „pogłębiała się" ku krawędziom (kładziona na --bg). */
+  --grad-vignette: radial-gradient(
+    130% 120% at 50% 0%,
+    rgba(255, 255, 255, 0.025) 0%,
+    rgba(0, 0, 0, 0) 38%,
+    rgba(0, 0, 0, 0.4) 100%
+  );
+
+  /* ---- Ziarno: proceduralna tekstura pergaminu/drewna (data-URI SVG) ----
+   * feTurbulence narysowane w locie (zero plików, zero CDN). Nakładać BARDZO
+   * subtelnie (np. pseudo-element z opacity ~.03–.05, mix-blend-mode: overlay),
+   * tak by nie ruszyć kontrastu tekstu. To tylko obraz; krycie steruje warstwa
+   * (layout.css). '#' i '%' w SVG zakodowane jako %23/%25 dla poprawnego URI. */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+
+  /* ---- Ruch: czasy i krzywe (z poszanowaniem prefers-reduced-motion) ----
+   * --dur-fast: mikro-interakcje (hover/press kontrolek).
+   * --dur-base: zmiany stanu (zakładki, paski postępu).
+   * --dur-slow: większe wejścia (modal, popover, podniesienie karty).
+   * --ease: ogólna, lekko sprężysta.
+   * --ease-out: wygładzone wyhamowanie (wejścia/uniesienia) — bardziej
+   *   „premium" niż liniowe; szybki start, miękki koniec. */
   --dur-fast: 120ms;
   --dur-base: 220ms;
+  --dur-slow: 360ms;
   --ease: cubic-bezier(0.2, 0.6, 0.3, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* ---- Warstwy (z-index) ------------------------------------------------ */
   --z-base: 1;

@@ -266,7 +266,10 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   const resCluster = h('div', 'hud-resources')
   const hudRes = {} as Record<ResourceId, HudResRefs>
   for (const id of RESOURCE_IDS) {
-    const chip = h('div', 'hud-res')
+    // Modyfikator per-surowiec (hud-res--wood/clay/iron) daje CSS hak na delikatną
+    // poświatę ikony w barwie surowca — dekoracja, nie jedyny sygnał (nazwę niesie
+    // aria-label ikony + title chipa).
+    const chip = h('div', 'hud-res hud-res--' + id)
     // Name reaches assistive tech via the icon's aria-label AND a hover title; the
     // glyph is never the sole carrier of which resource a number belongs to.
     chip.title = RESOURCE_NAMES[id]

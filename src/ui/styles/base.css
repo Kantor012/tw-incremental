@@ -50,7 +50,13 @@ h4 {
   font-family: var(--font-display);
   font-weight: var(--weight-bold);
   line-height: var(--leading-tight);
+  /* Ciaśniejszy trakt display-serifu — większe rozmiary „spinają się" w
+     bardziej dopracowaną, ekskluzywną typografię. */
+  letter-spacing: -0.01em;
   color: var(--text);
+  /* Delikatne tłoczenie: cień rzucony w dół na ciemnym tle wybija nagłówek
+     znad powierzchni (bez zmiany kontrastu samego tekstu). */
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
 }
 
 h1 {
@@ -94,6 +100,8 @@ textarea {
 a {
   color: var(--accent);
   text-decoration: none;
+  text-underline-offset: 0.15em;
+  transition: color var(--dur-fast) var(--ease);
 }
 a:hover {
   color: var(--accent-2);
@@ -106,6 +114,40 @@ a:hover {
   color: var(--bg);
 }
 
+/* ---- Pasek przewijania (motyw: ciemne drewno + mosiądz) ---------------
+ * Spójny z resztą UI: tor w kolorze tła sekcji, kciuk w ciepłym brązie
+ * okuć, rozjaśniany do złota na hover. Firefox: scrollbar-width/-color;
+ * WebKit/Blink: pseudo-elementy. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background-color: var(--bg-2);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: var(--border-strong);
+  /* Ramka w kolorze toru „wcina" kciuk, dając wrażenie zaokrąglonej pigułki
+     węższej od kanału. */
+  border: 3px solid var(--bg-2);
+  border-radius: var(--radius-pill);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--accent);
+}
+
+::-webkit-scrollbar-corner {
+  background-color: var(--bg-2);
+}
+
 /* ---- Liczby ----------------------------------------------------------- */
 /* Wszystkie wartości liczbowe (ekonomia na Decimal) renderujemy monospaced
  * z tabularnymi cyframi, by kolumny i liczniki nie „skakały". */
@@ -115,9 +157,14 @@ a:hover {
 }
 
 /* ---- Dostępność ------------------------------------------------------- */
+/* Pierścień focusu = mocna złota poświata z gardą --bg (kontrast >=3:1), nigdy
+   nie usuwana. Outline trzymamy PRZEZROCZYSTY: w trybie wymuszonych kolorów
+   (Windows High Contrast) box-shadow znika, a outline staje się widoczny i
+   przejmuje rolę wskaźnika focusu. */
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid transparent;
   outline-offset: 2px;
+  box-shadow: var(--focus-ring);
 }
 
 /* Usuwa domyślny outline tylko gdy mamy wsparcie :focus-visible */
@@ -210,9 +257,13 @@ a:hover {
 /* ---- Panel ------------------------------------------------------------ */
 .panel {
   background-color: var(--panel);
+  /* Subtelny gradient powierzchni (jaśniej u góry → ciemniej u dołu) kładziony
+     na kolor panelu — daje wrażenie oświetlonej z góry deski. */
+  background-image: var(--grad-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-1);
+  /* Warstwowa wysokość: połysk górnej krawędzi (inset) + rzucony cień karty. */
+  box-shadow: var(--edge-highlight), var(--shadow-2);
   padding: var(--space-4);
 }
 
@@ -234,7 +285,11 @@ a:hover {
   margin: calc(var(--space-4) * -1) calc(var(--space-4) * -1) var(--space-4);
   padding: var(--space-3) var(--space-4);
   background-color: var(--panel-2);
-  border-bottom: 1px solid var(--border);
+  /* Mocniejszy gradient + połysk górnej krawędzi: pasek nagłówka czyta się jak
+     uniesiona belka okuta nad treścią panelu. */
+  background-image: var(--grad-panel-raised);
+  box-shadow: var(--edge-highlight);
+  border-bottom: 1px solid var(--border-strong);
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
@@ -260,25 +315,42 @@ a:hover {
   line-height: var(--leading-tight);
   color: var(--text);
   background-color: var(--panel-2);
+  /* Wypukły metal: jaśniej u góry → ciemniej u dołu, na kolorze powierzchni. */
+  background-image: var(--grad-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Spoczynek: połysk górnej krawędzi + lekki rzucony cień (półka 1). */
+  box-shadow: var(--edge-highlight), var(--shadow-1);
   cursor: pointer;
   user-select: none;
   text-align: center;
   transition: background-color var(--dur-fast) var(--ease),
     border-color var(--dur-fast) var(--ease),
     color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease),
     transform var(--dur-fast) var(--ease);
 }
 
+/* Hover: karta unosi się (translateY), mocniejszy cień + miękka złota poświata
+   i rozjaśniona krawędź — przycisk „wychodzi" ku użytkownikowi. */
 .btn:hover {
   background-color: var(--border);
   border-color: var(--accent);
+  box-shadow: var(--edge-highlight-strong), var(--shadow-2),
+    var(--glow-accent-soft);
+  transform: translateY(-1px);
 }
 
+/* Wciśnięcie: opada i wgłębia się (inset) — wiarygodny „klik" w okute drewno. */
 .btn:active {
   transform: translateY(1px);
   background-color: var(--panel);
+  box-shadow: var(--inset-well-soft);
+}
+
+/* Focus klawiaturą: złoty pierścień + zachowany połysk krawędzi. */
+.btn:focus-visible {
+  box-shadow: var(--edge-highlight), var(--focus-ring);
 }
 
 .btn:disabled,
@@ -287,60 +359,83 @@ a:hover {
   cursor: not-allowed;
   transform: none;
   background-color: var(--panel-2);
+  /* Wyłączony = płaski i bezwładny: bez gradientu, bez wysokości. */
+  background-image: none;
   border-color: var(--border);
+  box-shadow: none;
 }
 
-/* Wariant główny — złoty sztandar */
+/* Wariant główny — złoty sztandar. Wypukły mosiądz (gradient akcentu) z ciemnym
+   tuszem --accent-ink na złocie (kontrast ~7.4:1, znacznie ponad AA). */
 .btn-primary {
-  color: var(--bg);
+  color: var(--accent-ink);
   background-color: var(--accent);
+  background-image: var(--grad-accent);
   border-color: var(--accent);
   font-weight: var(--weight-bold);
 }
 .btn-primary:hover {
   background-color: var(--accent-2);
+  background-image: var(--grad-accent-hover);
   border-color: var(--accent-2);
+  /* Pełna złota poświata — primary „rozżarza się" na hover. */
+  box-shadow: var(--edge-highlight-strong), var(--shadow-2), var(--glow-accent);
 }
 .btn-primary:active {
-  background-color: var(--accent);
+  background-image: var(--grad-accent);
+  box-shadow: var(--inset-well-soft);
 }
 .btn-primary:disabled,
 .btn-primary[aria-disabled="true"] {
   background-color: var(--accent);
+  background-image: var(--grad-accent);
   border-color: var(--accent);
+  box-shadow: none;
 }
 
-/* Wariant „ghost" — sam obrys */
+/* Wariant „ghost" — sam obrys, płaski w spoczynku (bez gradientu i wysokości);
+   dopiero hover wydobywa subtelną powierzchnię. */
 .btn-ghost {
   background-color: transparent;
+  background-image: none;
+  box-shadow: none;
 }
 .btn-ghost:hover {
   background-color: var(--panel-2);
+  background-image: var(--grad-panel);
+  box-shadow: var(--edge-highlight), var(--shadow-1);
 }
 
-/* Wariant niebezpieczny — akcja destrukcyjna (reset). --bad (#e0644c) na
- * --panel-2 (#332619) ~5.0:1; tekst --bg na pełnym --bad przy hoverze ~5.4:1. */
+/* Wariant niebezpieczny — akcja destrukcyjna (reset). W spoczynku TEKST bierze
+ * jaśniejsze --bad-text (na powierzchni .btn = --panel-2 ~6.3:1, pewne AA;
+ * surowe --bad dawało tu tylko ~4.26:1). Obrys zostaje na pełnym --bad (to
+ * plama/krawędź, nie tekst). Po hoverze tekst --bg na pełnym --bad ~5.3:1. */
 .btn-danger {
-  color: var(--bad);
+  color: var(--bad-text);
   border-color: var(--bad);
 }
 .btn-danger:hover {
   color: var(--bg);
   background-color: var(--bad);
   border-color: var(--bad);
+  /* Poświata --bad to WTÓRNE wzmocnienie (kolor + słowo + kontekst już niosą stan). */
+  box-shadow: var(--edge-highlight), var(--shadow-2), var(--glow-bad);
 }
 .btn-danger:active {
   background-color: var(--bad);
+  box-shadow: var(--inset-well-soft);
 }
 
 /* ---- Pasek postępu (HP, kolejka, magazyn) ----------------------------- */
 .bar {
   position: relative;
   width: 100%;
-  height: 10px;
+  height: 12px;
   background-color: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius-pill);
+  /* Tor wgłębiony (inset) — wypełnienie czyta się jak wlane do rynny. */
+  box-shadow: var(--inset-well-soft);
   overflow: hidden;
 }
 
@@ -349,7 +444,17 @@ a:hover {
   height: 100%;
   width: 0;
   background-color: var(--accent);
+  /* Pionowy połysk (jaśniej u góry → ciemniej u dołu) niezależny od koloru —
+     działa też dla wariantów surowcowych, które zmieniają tylko background-color. */
+  background-image: linear-gradient(
+    180deg,
+    var(--overlay-hi-2),
+    transparent 55%,
+    var(--overlay-lo)
+  );
   border-radius: inherit;
+  /* Lśniąca górna krawędź wypełnienia (poświata przyciętą krawędzią toru). */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
   transition: width var(--dur-base) var(--ease);
 }
 
@@ -405,6 +510,7 @@ a:hover {
 .resource-row .res-label {
   color: var(--muted);
   font-size: var(--text-sm);
+  letter-spacing: 0.02em;
 }
 
 .resource-row .res-value {
@@ -436,7 +542,7 @@ a:hover {
   color: var(--good);
 }
 .text-bad {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 /* ---- Panel budynków --------------------------------------------------- */
@@ -458,6 +564,8 @@ a:hover {
 
 .stat-label {
   font-size: var(--text-xs);
+  /* Lekki trakt na drobnych etykietach — bardziej dopracowany „caps-like" rytm. */
+  letter-spacing: 0.02em;
 }
 
 .stat-val {
@@ -543,7 +651,7 @@ a:hover {
    sygnał przetrwa skalę szarości / daltonizm. */
 .cost-item.is-short,
 .cost-item.is-short .cost-val {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 .cost-item.is-short {
@@ -613,6 +721,10 @@ a:hover {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Pole „wkopane" w powierzchnię (sunken well). */
+  box-shadow: var(--inset-well-soft);
+  transition: border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
 }
 
 /* Przyciski kroku (+1/+10) — kompaktowe, lecz zachowują cel dotykowy 44px
@@ -651,6 +763,9 @@ a:hover {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background-color: var(--bg-2);
+  /* Wiersz listy czyta się jako celowo „wkopany" (sunken well) — wspólny język
+   * z .march-item, niżej niż karty na --panel-2. */
+  box-shadow: var(--inset-well-soft);
   font-size: var(--text-sm);
 }
 
@@ -678,8 +793,23 @@ a:hover {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
+  /* Pole „wkopane" w powierzchnię (sunken well). */
+  box-shadow: var(--inset-well-soft);
+  transition: border-color var(--dur-fast) var(--ease),
+    box-shadow var(--dur-fast) var(--ease);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
+}
+
+/* Focus pól formularza: zachowane wgłębienie + wyraźny złoty pierścień (>=3:1).
+   Bardziej szczegółowy selektor niż globalne :focus-visible, więc nadpisuje
+   jego box-shadow, łącząc wgłębienie z poświatą focusu. */
+.recruit-count:focus-visible,
+.save-area:focus-visible {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  border-color: var(--accent);
+  box-shadow: var(--inset-well-soft), var(--focus-ring);
 }
 
 .save-area + .save-area {
@@ -794,7 +924,7 @@ a:hover {
 }
 
 .forecast-lose {
-  color: var(--bad);
+  color: var(--bad-text);
 }
 
 /* Marsze w toku — stos kart, sygnatura przebudowuje listę tylko przy zmianie. */
@@ -817,6 +947,8 @@ a:hover {
   border-left-width: 3px;
   border-radius: var(--radius-md);
   background-color: var(--bg-2);
+  /* Sunken well — spójnie z .queue-item (oba to wiersze listy pod kartami). */
+  box-shadow: var(--inset-well-soft);
   font-size: var(--text-sm);
 }
 
@@ -921,5 +1053,17 @@ a:hover {
   .panel-header {
     margin: calc(var(--space-5) * -1) calc(var(--space-5) * -1) var(--space-5);
     padding: var(--space-4) var(--space-5);
+  }
+}
+
+/* ---- Ograniczony ruch: znieś SAM ruch unoszenia/wciśnięcia ------------
+ * Globalny reset wyżej zeruje tylko CZAS przejść — element wciąż skakałby od
+ * razu na translateY. Tu, na końcu pliku (równa swoistość, późniejsza w
+ * kaskadzie → wygrywa), kasujemy przesunięcia hover/active. Poświaty, gradienty
+ * i cienie zostają (to nie jest ruch). WCAG 2.3.3 / 2.2.2. */
+@media (prefers-reduced-motion: reduce) {
+  .btn:hover,
+  .btn:active {
+    transform: none;
   }
 }
