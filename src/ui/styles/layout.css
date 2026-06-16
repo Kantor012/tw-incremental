@@ -1703,3 +1703,178 @@ html {
   margin: var(--space-1) 0 0;
   font-size: var(--text-xs);
 }
+
+/* ============================================================================
+ * j) PANEL „WYZWANIA" (zakładka „Wyzwania", src/ui/panels/challenges.ts)
+ * --------------------------------------------------------------------------
+ * Lista WYZWAŃ (M8): każdy wpis to karta z nazwą, opisem, OGRANICZENIEM (kara
+ * aktywna w trakcie biegu), CELEM bieżącego biegu i trwałą NAGRODĄ oraz tekstowym
+ * znacznikiem stanu (▶ w trakcie / ✓ ukończone ×N / nieukończone). Dla AKTYWNEGO
+ * wyzwania dochodzi pasek postępu celu i przycisk „Porzuć"; dla nieaktywnego —
+ * „Rozpocznij" (po potwierdzeniu, że RESETUJE bieg). Panel jest CZYSTO DEKLARATYWNY:
+ * elementy dostają semantyczne klasy .challenge-*, a CAŁY wygląd opisujemy TUTAJ —
+ * panel nie ustawia żadnych stylów inline (spójnie z sekcją „i" Kodeksu).
+ *
+ * Zasady spójne z resztą pliku: wyłącznie tokeny z tokens.css; zero hardkodowanych
+ * kolorów; stan NIE jest niesiony samym kolorem (WCAG 1.4.1) — niosą go tekst
+ * znacznika, etykiety i aria-label, a barwna lewa krawędź karty + odcień znacznika to
+ * jedynie DODATEK. Pasek postępu to natywny <progress> ostylowany tokenami i sterowany
+ * właściwościami value/max (atrybuty, nie style), więc pasuje do współdzielonego .bar.
+ * ========================================================================== */
+
+/* Panel układa się w pionowy stos (notatka → status → lista) ze wspólnym odstępem. */
+.challenges-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Reset listy dla siatki kart użytej jako <ul> (układ daje współdzielone .card-grid —
+ * sekcja c; tu tylko zdejmujemy domyślne punktory/wcięcie, jak .codex-grid). */
+.challenges-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+/* Karta wyzwania reużywa wspólną powierzchnię .card; tu tylko akcent stanu na lewej
+ * krawędzi (DODATEK do tekstowego znacznika, nie jedyny sygnał — WCAG 1.4.1). */
+.challenge-card {
+  border-left: 3px solid var(--border);
+}
+
+.challenge-card.is-active {
+  border-left-color: var(--accent);
+}
+
+.challenge-card.is-completed {
+  border-left-color: var(--good);
+}
+
+/* Nagłówek karty: nazwa (rośnie) + znacznik stanu po prawej. */
+.challenge-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.challenge-name {
+  margin: 0;
+  font-size: var(--text-base);
+}
+
+/* Znacznik stanu (▶ w trakcie / ✓ ukończone ×N / nieukończone). Odcień dokładają
+ * modyfikatory niżej; sam TEKST niesie stan. */
+.challenge-status-badge {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.challenge-card.is-active .challenge-status-badge {
+  color: var(--accent);
+}
+
+.challenge-card.is-completed .challenge-status-badge {
+  color: var(--good);
+}
+
+/* Opis wyzwania (przygaszony, jak opisy w innych kartach). */
+.challenge-desc {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+/* Specyfikacja: ograniczenie / cel / nagroda jako pary etykieta–wartość. */
+.challenge-specs {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.challenge-specs dt {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* Wartość dziedziczy domyślny --text; ograniczenie i nagroda dostają własny odcień
+ * (znaczenie niesie też etykieta dt, więc kolor jest tylko wzmocnieniem). */
+.challenge-specs dd {
+  margin: 0;
+}
+
+.challenge-spec-constraint {
+  color: var(--bad);
+}
+
+.challenge-spec-reward {
+  color: var(--accent-2);
+}
+
+/* Blok postępu celu (widoczny tylko dla aktywnego wyzwania — [hidden] z base.css). */
+.challenge-progress {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.challenge-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+/* Natywny <progress> ostylowany tokenami, by pasował do współdzielonego .bar (ten sam
+ * tor --bg-2, wypełnienie --accent, pełna szerokość, pigułkowe zaokrąglenie, 1px obrys).
+ * Wartość/maks. ustawia JS przez właściwości .value/.max — żadnych stylów inline. */
+.challenge-progress-bar {
+  appearance: none;
+  -webkit-appearance: none;
+  display: block;
+  width: 100%;
+  height: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background-color: var(--bg-2);
+  overflow: hidden;
+}
+
+.challenge-progress-bar::-webkit-progress-bar {
+  background-color: var(--bg-2);
+  border-radius: var(--radius-pill);
+}
+
+.challenge-progress-bar::-webkit-progress-value {
+  background-color: var(--accent);
+  border-radius: var(--radius-pill);
+  transition: width var(--dur-base) var(--ease);
+}
+
+.challenge-progress-bar::-moz-progress-bar {
+  background-color: var(--accent);
+  border-radius: var(--radius-pill);
+}
+
+/* Rząd akcji (Rozpocznij / Porzuć) — widoczny przycisk wypełnia szerokość karty. */
+.challenge-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.challenge-actions .btn {
+  flex: 1 1 auto;
+}
+
+/* ---- Ograniczony ruch ------------------------------------------------- */
+/* Globalny wyłącznik w base.css już neutralizuje przejście wypełnienia paska; tu
+ * jawnie wg kontraktu (spójnie z sekcjami mapy/drzewa/kodeksu). */
+@media (prefers-reduced-motion: reduce) {
+  .challenge-progress-bar::-webkit-progress-value {
+    transition: none;
+  }
+}

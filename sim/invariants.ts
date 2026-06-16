@@ -15,6 +15,7 @@ import {
   type World,
   type BarbarianVillage,
   type Fortress,
+  type TechModifiers,
 } from '../src/engine/state'
 import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
@@ -76,6 +77,8 @@ import {
   deadDynastyNodes,
   newDynasty,
 } from '../src/systems/dynasty'
+import { startChallenge, checkChallengeCompletion } from '../src/systems/challenges'
+import { CHALLENGES, CHALLENGE_IDS, type ChallengeMods } from '../src/content/challenges'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
@@ -1252,6 +1255,342 @@ export function checkDynastyNoSoftlock(seed: string): InvariantResult {
     detail: ok
       ? undefined
       : `fresh post-dynasty capital has no available build/recruit/attack action within ${DYNASTY_PLAYABILITY_HORIZON}s of idle production`,
+  }
+}
+
+// --- M8 challenge (WYZWANIA — constrained run for a one-time permanent reward) invariants -------
+//
+// Deterministic proof-of-mechanic checks for the challenge layer (no bot, no clock, only the seeded
+// world startChallenge installs). They isolate the challenge primitive's own guarantees: a started
+// challenge resets the run reproducibly, its CONSTRAINT actually lowers the constrained stat, COMPLETION
+// is one-time, the earned REWARD folds into every future run, the constrained run never softlocks, and
+// the { activeId, completed } record survives the real save/load path. The MAIN + meta runs never start
+// a challenge, so aggregateChallengeMods folds to identity there and their targets stay byte-identical
+// to pre-M8 — these checks (and the SEPARATE runner.runChallenge) are where the feature is exercised.
+
+/** Total production/second across every village + resource (Decimal) — the M8 economy probe. */
+function totalProductionOf(state: GameState): Decimal {
+  let total = ZERO
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    for (const r of RESOURCE_IDS) total = total.add(v.production[r])
+  }
+  return total
+}
+
+/**
+ * The issues where a {@link ChallengeMods} REWARD's present multiplicative axes are NOT strictly
+ * raised in `post` vs `base`. An empty list = every present reward axis folded into effectiveMods
+ * (the reward is live). Mirrors the per-axis shape of {@link ChallengeMods}; the reduction fractions
+ * and automation flags are never used by a v1 challenge, so they are not checked.
+ */
+function challengeRewardRaised(base: TechModifiers, post: TechModifiers, reward: ChallengeMods): string[] {
+  const issues: string[] = []
+  if (reward.productionMult !== undefined) {
+    for (const r of RESOURCE_IDS) {
+      if (!(post.productionMult[r] > base.productionMult[r])) {
+        issues.push(`productionMult.${r} ${base.productionMult[r]} !> ${post.productionMult[r]}`)
+      }
+    }
+  }
+  if (reward.storageMult !== undefined && !(post.storageMult > base.storageMult)) {
+    issues.push(`storageMult ${base.storageMult} !> ${post.storageMult}`)
+  }
+  if (reward.popMult !== undefined && !(post.popMult > base.popMult)) {
+    issues.push(`popMult ${base.popMult} !> ${post.popMult}`)
+  }
+  if (reward.attackMult !== undefined && !(post.attackMult > base.attackMult)) {
+    issues.push(`attackMult ${base.attackMult} !> ${post.attackMult}`)
+  }
+  if (reward.defenseMult !== undefined && !(post.defenseMult > base.defenseMult)) {
+    issues.push(`defenseMult ${base.defenseMult} !> ${post.defenseMult}`)
+  }
+  if (reward.lootMult !== undefined && !(post.lootMult > base.lootMult)) {
+    issues.push(`lootMult ${base.lootMult} !> ${post.lootMult}`)
+  }
+  return issues
+}
+
+/**
+ * startChallenge determinism (M8): STARTING a challenge takes no clock and draws its regenerated world
+ * + rngState from a per-challenge seed (`seed + ':chal:' + id`), so two identical states starting the
+ * SAME challenge must reset to a byte-identical run — same regenerated world, same installed rngState,
+ * same whole serialized state. Mirrors {@link checkNewEraDeterminism} but for the challenge primitive:
+ * a divergence means startChallenge introduced hidden nondeterminism (a clock read or an unseeded RNG).
+ * Self-contained (no runner import), Node-safe.
+ */
+export function checkChallengeDeterminism(seed: string): InvariantResult {
+  const id = CHALLENGE_IDS[0]
+  const a = createInitialState(seed, 0)
+  const b = createInitialState(seed, 0)
+  const okA = startChallenge(a, id)
+  const okB = startChallenge(b, id)
+  const worldEq = JSON.stringify(a.world) === JSON.stringify(b.world)
+  const rngEq = a.rngState === b.rngState
+  const serEq = serialize(a) === serialize(b)
+  const ok = okA && okB && worldEq && rngEq && serEq
+  return {
+    name: 'challenge-determinism',
+    ok,
+    detail: ok
+      ? undefined
+      : !okA || !okB
+        ? `startChallenge refused to start ${id}`
+        : !worldEq
+          ? 'two startChallenge resets from the same seed produced different worlds'
+          : !rngEq
+            ? 'two startChallenge resets from the same seed produced different rngState'
+            : 'two startChallenge resets from the same seed produced different serialized state',
+  }
+}
+
+/**
+ * The active challenge CONSTRAINT actually LOWERS the constrained stat (M8). Picks a challenge whose
+ * constraint carries a production penalty (productionMult < 1), starts it on a fresh state (which RESETS
+ * the run to a fresh capital under the constraint), and asserts both the effectiveMods production
+ * multiplier on EVERY resource AND the recomputed total production/sec are strictly below an identical
+ * UNCONSTRAINED fresh capital's. Both copies are fresh capitals with empty meta accounts, so the only
+ * difference is the active constraint — a strictly lower value proves the constraint folds into the
+ * economy via the same `combine` pipeline. Pure / deterministic (the only RNG is the seeded world).
+ */
+export function checkChallengeConstraint(seed: string): InvariantResult {
+  const chal = CHALLENGES.find(
+    (c) => typeof c.constraint.productionMult === 'number' && c.constraint.productionMult < 1,
+  )
+  if (!chal) {
+    return { name: 'challenge-constraint', ok: false, detail: 'no challenge has a production-penalty constraint to test' }
+  }
+  const base = createInitialState(seed, 0)
+  const constrained = createInitialState(seed, 0)
+  if (!startChallenge(constrained, chal.id)) {
+    return { name: 'challenge-constraint', ok: false, detail: `startChallenge refused ${chal.id}` }
+  }
+  const baseMods = effectiveMods(base)
+  const constrainedMods = effectiveMods(constrained)
+  const baseProd = totalProductionOf(base)
+  const constrainedProd = totalProductionOf(constrained)
+  const multLower = RESOURCE_IDS.every((r) => constrainedMods.productionMult[r] < baseMods.productionMult[r])
+  const prodLower = constrainedProd.lt(baseProd)
+  const ok = multLower && prodLower
+  return {
+    name: 'challenge-constraint',
+    ok,
+    detail: ok
+      ? `${chal.id} constraint cut production ${baseProd.toString()} -> ${constrainedProd.toString()} (x${chal.constraint.productionMult})`
+      : !multLower
+        ? `${chal.id} constraint did not lower the production multiplier on every resource`
+        : `${chal.id} constraint did not lower total production (${baseProd.toString()} -> ${constrainedProd.toString()})`,
+  }
+}
+
+/**
+ * Challenge completion is ONE-TIME (M8): with the goal met, {@link checkChallengeCompletion} fires
+ * exactly once — it bumps `completed[id]` to 1, clears `activeId` (so the constraint switches off and
+ * the reward on), and a SECOND call (now that `activeId` is null) is a no-op that never double-grants.
+ * Picks a production-goal challenge, starts it, drives the goal trivially by maxing the capital's
+ * buildings + recomputing (production >> target), then asserts the single-completion contract. Pure /
+ * deterministic (no bot, only the seeded world startChallenge installs).
+ */
+export function checkChallengeCompletionOnce(seed: string): InvariantResult {
+  const chal = CHALLENGES.find((c) => c.goal.kind === 'production')
+  if (!chal) {
+    return { name: 'challenge-completion-once', ok: false, detail: 'no production-goal challenge to test completion' }
+  }
+  const state = createInitialState(seed, 0)
+  if (!startChallenge(state, chal.id)) {
+    return { name: 'challenge-completion-once', ok: false, detail: `startChallenge refused ${chal.id}` }
+  }
+  // Drive the production goal to met: max every building and recompute so production >> the target.
+  const v = state.villages[state.villageOrder[0]]
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+
+  const issues: string[] = []
+  const first = checkChallengeCompletion(state)
+  if (!first) issues.push('first checkChallengeCompletion did not fire with the goal met')
+  if (state.challenge.activeId !== null) issues.push(`activeId not cleared after completion (=${String(state.challenge.activeId)})`)
+  if (state.challenge.completed[chal.id] !== 1) {
+    issues.push(`completed[${chal.id}]=${String(state.challenge.completed[chal.id])} after one completion (expected 1)`)
+  }
+  // Idempotent: a second call (activeId already cleared) must NOT fire again / bump the count.
+  const second = checkChallengeCompletion(state)
+  if (second) issues.push('second checkChallengeCompletion fired again (double-grant)')
+  if (state.challenge.completed[chal.id] !== 1) issues.push(`completed[${chal.id}] bumped past 1 on a second call`)
+  return {
+    name: 'challenge-completion-once',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : `${chal.id} completed exactly once, activeId cleared, no double-grant`,
+  }
+}
+
+/**
+ * The earned REWARD folds into a FRESH post-completion run (M8). Completes a production-goal challenge
+ * through the REAL lifecycle (start -> max economy -> {@link checkChallengeCompletion}), then proves
+ * the permanent reward is live on a FRESH run carrying only the resulting `completed` map: every
+ * present multiplicative axis of the challenge's reward must be strictly raised in
+ * `effectiveMods(fresh + completed)` vs a no-challenge baseline. This is the "an earned challenge makes
+ * every future run stronger forever" guarantee (mirrors prestige-production-uplift). Pure / deterministic.
+ */
+export function checkChallengeRewardFolds(seed: string): InvariantResult {
+  const chal = CHALLENGES.find((c) => c.goal.kind === 'production')
+  if (!chal) {
+    return { name: 'challenge-reward-folds', ok: false, detail: 'no production-goal challenge to test the reward' }
+  }
+  const state = createInitialState(seed, 0)
+  startChallenge(state, chal.id)
+  const v = state.villages[state.villageOrder[0]]
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  if (!checkChallengeCompletion(state)) {
+    return { name: 'challenge-reward-folds', ok: false, detail: `could not complete ${chal.id} to earn its reward` }
+  }
+  // Fresh post-completion run: a fresh capital carrying ONLY the completed map (no active challenge),
+  // so the bag folded into effectiveMods is the reward alone (the constraint is off).
+  const base = createInitialState(seed, 0)
+  const post = createInitialState(seed, 0)
+  post.challenge.completed = { ...state.challenge.completed }
+  const issues = challengeRewardRaised(effectiveMods(base), effectiveMods(post), chal.reward)
+  return {
+    name: 'challenge-reward-folds',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : `${chal.id} reward folds into a fresh post-completion run (${chal.rewardText})`,
+  }
+}
+
+/**
+ * Earned rewards STACK across DISTINCT completions (M8 — the contract's "earned challenge bonuses
+ * stack" clause). Completes a production-goal challenge through the REAL lifecycle, then INJECTS a
+ * SECOND distinct completed id, and proves a fresh run carrying BOTH completed entries folds BOTH
+ * rewards into effectiveMods AT ONCE — every present multiplicative axis of EACH reward is strictly
+ * raised vs a no-challenge baseline (not just the first completed id; a regression that stopped after
+ * one entry would leave the other's axis at the baseline and trip this). Hardens the single-reward
+ * {@link checkChallengeRewardFolds} on the stacking side. Pure / deterministic (only the seeded world).
+ */
+export function checkChallengeRewardStacks(seed: string): InvariantResult {
+  const first = CHALLENGES.find((c) => c.goal.kind === 'production')
+  // A SECOND, distinct challenge whose reward carries at least one multiplicative axis.
+  const second = CHALLENGES.find(
+    (c) => (!first || c.id !== first.id) && Object.values(c.reward).some((x) => typeof x === 'number'),
+  )
+  if (!first || !second) {
+    return { name: 'challenge-reward-stacks', ok: false, detail: 'need two distinct rewarding challenges to test stacking' }
+  }
+  // Complete the first challenge through the real lifecycle (start -> max economy -> completion).
+  const state = createInitialState(seed, 0)
+  startChallenge(state, first.id)
+  const v = state.villages[state.villageOrder[0]]
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  if (!checkChallengeCompletion(state)) {
+    return { name: 'challenge-reward-stacks', ok: false, detail: `could not complete ${first.id} to earn its reward` }
+  }
+  // Fresh post-completion run carrying BOTH completed ids (the second injected, mirroring a prior
+  // completion). With no active challenge the folded bag is BOTH rewards (no constraint).
+  const base = createInitialState(seed, 0)
+  const post = createInitialState(seed, 0)
+  post.challenge.completed = { ...state.challenge.completed, [second.id]: 1 }
+  const baseMods = effectiveMods(base)
+  const postMods = effectiveMods(post)
+  // BOTH rewards must fold simultaneously: each reward's present axes strictly raised vs baseline.
+  const issues = [
+    ...challengeRewardRaised(baseMods, postMods, first.reward),
+    ...challengeRewardRaised(baseMods, postMods, second.reward),
+  ]
+  return {
+    name: 'challenge-reward-stacks',
+    ok: issues.length === 0,
+    detail: issues.length
+      ? issues.join('; ')
+      : `${first.id} + ${second.id} rewards both fold into one fresh run (stack)`,
+  }
+}
+
+/**
+ * Game-seconds the constrained capital is advanced by idle production before it MUST offer a progress
+ * action, and the coarse step between probes. Mirrors {@link ERA_PLAYABILITY_HORIZON}: a just-started
+ * challenge capital is a fresh {@link createInitialState} start under a multiplicative penalty, so it
+ * accrues a touch slower but still unlocks its first action in a few seconds — the horizon is a
+ * generous, bounded multiple of that, catching a PERMANENT dead-end without reading a FALSE stall.
+ */
+const CHALLENGE_PLAYABILITY_HORIZON = 600
+const CHALLENGE_PLAYABILITY_STEP = 5
+
+/**
+ * No softlock under an active challenge (M8): STARTING a challenge rebuilds the run as ONE fresh capital
+ * under a CONSTRAINT (penalty multipliers), so — like a fresh start or a meta reset — it must never land
+ * in a PERMANENT stall. Starts the most punishing constraint ({@link CHALLENGES}[0]) and asserts the
+ * constrained run reaches a state with at least one available progress action ({@link chooseAction}
+ * non-null) under the EFFECTIVE mods (tech × prestige × era × dynasty × the constraint). The constraint
+ * only LOWERS the economy (production still > 0), so accrual is merely slower, never zero — a challenge
+ * run is a normal run under a multiplier penalty, so progress is always possible. Does NOT probe the
+ * bare just-started instant (a fresh capital sits below the cheapest build for the first few seconds —
+ * the FALSE stall the era/dynasty checks also skip); instead it advances idle production over a bounded
+ * horizon and passes the moment an action appears. Deterministic + self-contained. Mirrors
+ * {@link checkEraNoSoftlock}.
+ */
+export function checkChallengeNoSoftlock(seed: string): InvariantResult {
+  const chal = CHALLENGES[0]
+  const state = createInitialState(seed, 0)
+  if (!startChallenge(state, chal.id)) {
+    return { name: 'challenge-no-softlock', ok: false, detail: `startChallenge refused ${chal.id}` }
+  }
+
+  // True iff SOME village offers a progress action right now under the effective (constrained) mods.
+  const hasAction = (): boolean => {
+    const mods = effectiveMods(state)
+    for (const vid of state.villageOrder) {
+      if (chooseAction(state.villages[vid], state.world, mods) !== null) return true
+    }
+    return false
+  }
+
+  let ok = hasAction()
+  for (let t = 0; !ok && t < CHALLENGE_PLAYABILITY_HORIZON; t += CHALLENGE_PLAYABILITY_STEP) {
+    simulate(state, CHALLENGE_PLAYABILITY_STEP)
+    ok = hasAction()
+  }
+
+  return {
+    name: 'challenge-no-softlock',
+    ok,
+    detail: ok
+      ? undefined
+      : `fresh constrained ${chal.id} capital has no available action within ${CHALLENGE_PLAYABILITY_HORIZON}s of idle production`,
+  }
+}
+
+/**
+ * Challenge round-trip (M8): the { activeId, completed } record ({@link GameState.challenge}) must
+ * survive the real export/import (base64) path byte-for-byte — the part that SURVIVES every reset of
+ * any kind (CLAUDE.md hard rule #3): an ACTIVE challenge resumes after a load, and the COMPLETED map
+ * (keying the permanent rewards) is never lost. The whole-state {@link checkRoundTrip} already proves
+ * serialize/deserialize is loss-free; this is the targeted proof for the v19 challenge node. Compares
+ * `activeId` and the completed map (order-independently). Mirrors {@link checkEraRoundTrip}.
+ */
+export function checkChallengeRoundTrip(state: GameState): InvariantResult {
+  const restored = importSave(exportSave(state))
+  const a = state.challenge
+  const b = restored.challenge
+  const ak = Object.keys(a.completed)
+  const bk = Object.keys(b.completed)
+  let mapEq = ak.length === bk.length
+  if (mapEq) {
+    for (const k of ak) {
+      if (a.completed[k] !== b.completed[k]) {
+        mapEq = false
+        break
+      }
+    }
+  }
+  const ok = a.activeId === b.activeId && mapEq
+  return {
+    name: 'challenge-round-trip',
+    ok,
+    detail: ok
+      ? undefined
+      : `challenge record changed across export/import: ` +
+        `{activeId:${String(a.activeId)},completed:${JSON.stringify(a.completed)}} -> ` +
+        `{activeId:${String(b.activeId)},completed:${JSON.stringify(b.completed)}}`,
   }
 }
 

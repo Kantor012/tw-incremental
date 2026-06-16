@@ -572,7 +572,7 @@ describe('migration v12 -> v13', () => {
   it('backfills an all-zero stats record + an empty achievements map, preserving everything else', () => {
     const m = migrate(rawV12())
 
-    expect(m.version).toBe(18)
+    expect(m.version).toBe(19)
     expect(m.version).toBe(SAVE_VERSION)
 
     // stats: every counter zero, lootHauled a Decimal zero.

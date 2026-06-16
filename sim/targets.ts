@@ -212,6 +212,20 @@ export interface BalanceTargets {
    */
   requireDynastyAutomationUnlock: boolean
 
+  // --- M8 challenge (WYZWANIA — constrained run for a permanent reward) goal (warning) ---
+  /**
+   * The bot must COMPLETE at least this many challenges over the (separate) challenge run — proof the
+   * constrained-run mechanic is reachable within a reasonable session. STARTING a challenge RESETS the
+   * run under a constraint (penalty mods that fold into effectiveMods), and the dedicated run picks a
+   * challenge whose goal is reachable under that constraint — a PRODUCTION goal, unaffected by the
+   * attack/defense/pop penalties — then drives the economy until {@link import('../src/systems/challenges').checkChallengeCompletion}
+   * fires. >= 1 is the contract floor. Measured by a SEPARATE run (see sim/runner.runChallenge) so the
+   * M1–M6.2 targets stay measured with aggregateChallengeMods at identity (the main + meta runs never
+   * start a challenge, so their effectiveMods is byte-identical to pre-M8). If it cannot be hit, the goal
+   * targets / constraint magnitudes (content/challenges.ts) need tuning — see CHANGELOG "Balance".
+   */
+  minChallengesCompleted: number
+
   // --- M5.1 automation (idle routines) goals (HARD — see runner.runAutomationCoverage) ---
   // These are proof-of-mechanic floors for the SEPARATE automation coverage run (automation
   // ON), NOT balance-curve warnings: with the deterministic seeded scenario each routine
@@ -348,6 +362,14 @@ export const TARGETS: BalanceTargets = {
   minDynastyPurchases: 1,
   requireDynastyEpUplift: true,
   requireDynastyAutomationUnlock: true,
+
+  // M8: challenge online. The dedicated run STARTS a production-goal challenge (reachable under its
+  // economy-neutral constraint — an attack/defense/pop penalty never touches production) and drives the
+  // economy until the goal clears, recording the permanent reward. Floor at the proof-of-mechanic level
+  // (>= 1 completed). Measured by a SEPARATE run so the M1–M6.2 targets stay byte-identical (challenge
+  // mods fold to identity when no challenge is active/completed, as in the main + meta runs). If it
+  // cannot be hit, tune the goal target / constraint magnitude (content/challenges.ts) — see CHANGELOG.
+  minChallengesCompleted: 1,
 
   // M5.1: automation online. With the three gateways unlocked and every toggle ON, the
   // SEPARATE coverage run (automation OFF in the main run, so the goals above are untouched)

@@ -28,6 +28,14 @@ import { aggregateEraMods, eraPpMult, eraStartResourceBonus } from './era'
 // `automation_unlock` gateway is the one place automations are unlocked), and
 // `dynastyStartResourceBonus` extends the run head-start.
 import { aggregateDynastyMods, dynastyStartResourceBonus } from './dynasty'
+// VALUE import of the challenge (M8) roll-up — used ONLY inside the body of `effectiveMods`
+// below, never at module top level, so the systems/challenges.ts <-> here cycle stays benign
+// exactly like the era/dynasty edges above: by the time it runs, both modules are fully
+// evaluated. challenges.ts value-imports `prestigeScore` back from this module (its goal
+// metric), the single edge back. The challenge bag COMBINES onto the tech × prestige × era ×
+// dynasty bag — IDENTITY when no challenge is active and none completed, so a no-challenge
+// save folds to exactly the pre-M8 value (every earlier balance target stays byte-identical).
+import { aggregateChallengeMods } from './challenges'
 
 /**
  * Prestige (ascension) engine (M4.1) — the PERMANENT meta-layer on top of tech.
@@ -209,14 +217,20 @@ export function effectiveMods(state: GameState): TechModifiers {
   const prestigeNodes = state.prestige ? state.prestige.nodes : {}
   const eraNodes = state.era ? state.era.nodes : {}
   const dynastyNodes = state.dynasty ? state.dynasty.nodes : {}
-  // Fold all FOUR trees: ((tech × prestige) × era) × dynasty. `combine(x, identityBag) ===
-  // x` byte-for-byte, and aggregateEraMods({}) / aggregateDynastyMods({}) ARE the identity
-  // bag, so a no-era / no-dynasty save folds to exactly the pre-M6.x value — the earlier
-  // balance targets stay byte-identical. The dynasty bag is the ONLY one whose
-  // `automation_unlock` gateway can set the automation flags true (combine ORs them).
+  // Fold all FOUR trees plus the M8 challenge bag: (((tech × prestige) × era) × dynasty) ×
+  // challenge. `combine(x, identityBag) === x` byte-for-byte, and aggregateEraMods({}) /
+  // aggregateDynastyMods({}) / aggregateChallengeMods(no-challenge state) ARE the identity
+  // bag, so a no-era / no-dynasty / no-challenge save folds to exactly the pre-M6.x / pre-M8
+  // value — the earlier balance targets stay byte-identical. The dynasty bag is the ONLY one
+  // whose `automation_unlock` gateway can set the automation flags true (combine ORs them);
+  // the challenge bag's automations are always false. The challenge bag is read off the WHOLE
+  // state (its active constraint + completed-reward map), not a node sub-map like the others.
   return combine(
-    combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
-    aggregateDynastyMods(dynastyNodes),
+    combine(
+      combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
+      aggregateDynastyMods(dynastyNodes),
+    ),
+    aggregateChallengeMods(state),
   )
 }
 

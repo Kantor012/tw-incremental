@@ -22,6 +22,7 @@ import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
 import { newDynasty, purchaseDynasty } from './systems/dynasty'
+import { abandonChallenge, startChallenge } from './systems/challenges'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
 
@@ -265,6 +266,31 @@ mountApp(root, {
     }
     return ok
   },
+  onStartChallenge: (id: string) => {
+    // startChallenge RESETS the run (fresh capital, world regenerated from a per-challenge
+    // seed, tech/battle log cleared, horde re-armed) and turns the constraint on; the META
+    // accounts (prestige/era/dynasty) + lifetime stats/achievements survive. The active
+    // village is gone after the reset, so resnap to the new run's first village before
+    // committing so the selection stays valid (mirrors onAscend). No-op (returns false) when
+    // a challenge is already active or the id is unknown.
+    const ok = startChallenge(store.state, id)
+    if (ok) {
+      if (store.state.villages[activeVillageId.value] === undefined) {
+        activeVillageId.value = store.state.villageOrder[0]
+      }
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
+  onAbandonChallenge: () => {
+    // End the active challenge with NO reward: clear the constraint and let the run continue
+    // unconstrained (no reset). A no-op when no challenge is active. Persist + commit so the
+    // dropped constraint is reflected immediately.
+    abandonChallenge(store.state)
+    store.commit()
+    saveToLocal(store.state)
+  },
   onSetAutomation: (patch) => {
     // Merge the partial toggle/policy patch into state.automation, then commit +
     // persist. No recompute: the automation settings are read directly each sub-step
@@ -273,7 +299,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.22.0',
+  version: '0.23.0',
   offlineSeconds,
 })
 

@@ -479,6 +479,35 @@ export interface DynastyState {
 }
 
 /**
+ * CHALLENGE (WYZWANIE) account state (M8) — the run-modifier layer that plugs into the
+ * SAME `combine` fold as the three meta-trees. A challenge is a CONSTRAINED run for a
+ * ONE-TIME permanent reward: starting one RESETS the run (fresh capital/world from a
+ * deterministic seed, tech/log cleared — like an ascend) and turns on a CONSTRAINT
+ * multiplier bag, while the meta accounts (prestige/era/dynasty) and the lifetime
+ * stats/achievements are PRESERVED. Completing the goal records it permanently and grants
+ * a bonus multiplier bag that folds into `effectiveMods` FOREVER.
+ *
+ * Only the raw account state serializes here; both the active constraint and every
+ * completed reward are TRANSIENT multipliers re-derived from this record by
+ * `aggregateChallengeMods` (systems/challenges.ts) and COMBINED onto the tech × prestige ×
+ * era × dynasty bag by `effectiveMods`. An EMPTY record (no active challenge, none
+ * completed) folds to the identity bag, so a no-challenge save is byte-identical to
+ * pre-M8. Mirrors {@link PrestigeState} / {@link EraState} in spirit (a permanent account
+ * the run never wipes).
+ */
+export interface ChallengeState {
+  /** The currently running challenge id, or `null` when no challenge is active. */
+  activeId: string | null
+  /**
+   * Times each challenge has been COMPLETED (absent key = never; monotonic, >= 1 once
+   * done). The permanent reward of any id with `completed[id] >= 1` folds into
+   * `effectiveMods` forever (surviving every reset). A sparse map, like the meta-tree
+   * `nodes` maps.
+   */
+  completed: Record<string, number>
+}
+
+/**
  * The three routines the idle layer can run for the player (M5.1). Each is
  * UNLOCKED via the tech tree (a binary `automation_unlock` gateway) and then TOGGLED
  * on by the player; both must be true for the routine to fire in the deterministic
@@ -629,6 +658,14 @@ export interface GameState {
    * start. See {@link DynastyState}.
    */
   dynasty: DynastyState
+  /**
+   * CHALLENGE (WYZWANIE) account state (M8) — the active run constraint (if any) plus the
+   * permanent map of completed challenges. SURVIVES every reset; its constraint + reward
+   * effects combine onto the tech × prestige × era × dynasty bag via `effectiveMods`. An
+   * empty record folds to identity, so a no-challenge save is byte-identical to pre-M8. See
+   * {@link ChallengeState}.
+   */
+  challenge: ChallengeState
   /**
    * Idle automation toggles + policy (M5.1). The routines themselves are gated by
    * the tech tree (see {@link TechModifiers.automations}); this is the player's
@@ -890,6 +927,7 @@ export function createInitialState(seed: string, now: number): GameState {
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
     era: { points: 0, totalEarned: 0, eras: 0, nodes: {} },
     dynasty: { points: 0, totalEarned: 0, dynasties: 0, nodes: {} },
+    challenge: { activeId: null, completed: {} },
     automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
     stats: createInitialStats(),
     achievements: {},

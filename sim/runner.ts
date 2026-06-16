@@ -2,6 +2,7 @@ import {
   createInitialState,
   recomputeDerived,
   INITIAL_UNITS,
+  RESOURCE_IDS,
   type GameState,
   type BattleReport,
 } from '../src/engine/state'
@@ -42,6 +43,8 @@ import {
   dynastyNodeLevel,
 } from '../src/systems/dynasty'
 import { DYNASTY_NODES, DYNASTY_NODE_IDS } from '../src/content/dynasty'
+import { startChallenge } from '../src/systems/challenges'
+import { CHALLENGES, CHALLENGE_IDS } from '../src/content/challenges'
 import type { UnitId } from '../src/content/units'
 import { TARGETS } from './targets'
 import {
@@ -94,6 +97,13 @@ import {
   checkDynastyTopology,
   checkDynastyRoundTrip,
   checkDynastyNoSoftlock,
+  checkChallengeDeterminism,
+  checkChallengeConstraint,
+  checkChallengeCompletionOnce,
+  checkChallengeRewardFolds,
+  checkChallengeRewardStacks,
+  checkChallengeNoSoftlock,
+  checkChallengeRoundTrip,
   type InvariantResult,
 } from './invariants'
 import {
@@ -119,6 +129,7 @@ import {
   type PrestigeRunStats,
   type EraRunStats,
   type DynastyRunStats,
+  type ChallengeRunStats,
   type AutomationRunStats,
 } from './metrics'
 
@@ -205,6 +216,19 @@ const DYNASTY_TICKS = 16000
  * add over the main run.
  */
 const FORTRESS_TICKS = 16000
+
+/**
+ * Step budget for the SEPARATE M8 challenge (WYZWANIA) run. The run STARTS a challenge whose goal is
+ * reachable under its constraint (a PRODUCTION goal, untouched by the attack/defense/pop penalties),
+ * then drives the bot's normal economy until {@link import('../src/systems/challenges').checkChallengeCompletion}
+ * fires. A modest production threshold (the catalogue floor) is cleared by the building/tech economy
+ * well inside this window — comparable to the prestige run, where the bot rebuilds a worthwhile economy
+ * from a fresh capital several times over {@link PRESTIGE_TICKS}; here it builds ONE constrained economy
+ * past the goal. Generous headroom keeps the run robust to seed variation, and the run STOPS the moment
+ * the goal lands (single pass, no determinism/split replays — the dedicated checks pin those), so the
+ * budget bounds the worst case rather than the common one.
+ */
+const CHALLENGE_TICKS = 12000
 
 /** Full ram train the fortress run holds — {@link ramDefenseFactor} floors the wall at 30 Tarany. */
 const FORTRESS_DRIVE_RAMS = 30
@@ -1317,6 +1341,128 @@ export function runFortress(seed: string, ticks: number, dt: number): number {
   return state.stats.fortressesRazed
 }
 
+// --- M8 challenge (WYZWANIA — constrained run for a permanent reward) run -----------------------
+//
+// A SEPARATE run from every measurement above, mirroring the prestige/era rationale: STARTING a
+// challenge RESETS the run (one fresh constrained capital + a per-challenge world, tech/log cleared —
+// like an ascend) while PRESERVING the meta accounts (prestige/era/dynasty) and lifetime stats. Folding
+// it into the primary or meta runs would zero out the cumulative progression those targets measure AND
+// apply a penalty multiplier they are not measured under. Here the bot plays the SAME {@link step} under
+// the active CONSTRAINT, and once the current-run goal is met {@link checkChallengeCompletion} (called
+// each step exactly as the engine's tick does) records the completion permanently and grants the reward.
+// The dedicated run picks a challenge whose goal is reachable under its constraint — a PRODUCTION goal,
+// which the attack/defense/pop penalties never touch — so the bot's normal economy build-up clears it.
+
+/** Which challenge the dedicated run drives — the first PRODUCTION-goal one (reachable under any
+ * economy-neutral constraint), data-driven so a catalogue edit never strands the run. */
+function challengeDriveId(): string {
+  const c = CHALLENGES.find((c) => c.goal.kind === 'production')
+  return c ? c.id : CHALLENGE_IDS[0]
+}
+
+/** What a challenge run yields: the final state, sampled invariants, and the challenge tally. */
+interface ChallengeRun {
+  state: GameState
+  invariants: InvariantResult[]
+  metrics: ChallengeRunStats
+}
+
+/**
+ * Run a fresh state forward WITH a challenge active until its goal completes. STARTS the
+ * {@link challengeDriveId} challenge (RESETS the run to a fresh constrained capital — meta accounts
+ * preserved), then plays the SAME {@link step} loop under the constraint, calling
+ * {@link checkChallengeCompletion} each step (mirroring tick.ts) and STOPPING the moment a completion
+ * fires (the dedicated run's job is to prove the goal is reachable under the constraint, not to grind on).
+ * Samples the hard invariants periodically + at the end (incl. a challenge round-trip on the live
+ * record), then MEASURES whether the earned reward folds into a FRESH post-completion run. Returns the
+ * completed map + that proof. Deterministic: the only RNG is the seeded per-challenge world.
+ */
+function runChallenge(seed: string, ticks: number = CHALLENGE_TICKS): ChallengeRun {
+  const dt = TARGETS.tickSeconds
+  const state = createInitialState(seed, 0)
+  const scratch = emptyUnitCounts()
+  const invariants: InvariantResult[] = []
+  const id = challengeDriveId()
+
+  // START the challenge — RESETS the run to a fresh constrained capital (meta accounts preserved).
+  startChallenge(state, id)
+
+  let completedTick: number | null = null
+  let prevTotal = totalResources(state)
+  let actedInWindow = 0
+
+  for (let i = 0; i < ticks; i++) {
+    // The engine's tick ALREADY calls checkChallengeCompletion once per sub-step inside step(),
+    // so by the time step() returns a goal met this step has cleared activeId and banked the
+    // reward. Detect that here via the activeId transition (active before -> null after) rather
+    // than a redundant second call (which would always see activeId already null and never fire).
+    const wasActive = state.challenge.activeId !== null
+    const { built, recruited, attacked, founded, tech } = step(state, dt, scratch, i)
+    actedInWindow += built + recruited + attacked + founded + tech
+    if (wasActive && state.challenge.activeId === null && completedTick === null) {
+      completedTick = i
+    }
+
+    if ((i + 1) % SAMPLE_EVERY === 0) {
+      const phase = `chal t${i + 1}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
+      prevTotal = totalResources(state)
+      actedInWindow = 0
+    }
+
+    // STOP once the goal completes — the run has proven reachability under the constraint.
+    if (completedTick !== null) break
+  }
+
+  // Final invariants (mirrors the other runs' final phase): the post-completion state stays valid +
+  // playable, and the { activeId, completed } record round-trips through the v19 save.
+  invariants.push(...tag(runInvariants(state), 'chalfinal'))
+  invariants.push(...tag([checkArmyConsistency(state)], 'chalfinal'))
+  invariants.push(...tag([checkWorldConsistency(state)], 'chalfinal'))
+  // Whole-run no-softlock (mirrors runPrestige's pfinal): the run made progress iff it completed its
+  // challenge, so it never stalled overall (the per-window samples above carry the real acted signal).
+  invariants.push(...tag([checkNoSoftlock(state, totalResources(state), completedTick !== null)], 'chalfinal'))
+  invariants.push(...tag([checkChallengeRoundTrip(state)], 'chalfinal'))
+
+  const completedMap = { ...state.challenge.completed }
+  let completed = 0
+  for (const cid of CHALLENGE_IDS) if ((completedMap[cid] ?? 0) >= 1) completed += 1
+
+  // rewardActive: the earned reward must fold into a FRESH post-completion run — a fresh capital
+  // carrying only the completed map must have a strictly raised effectiveMods axis vs a no-challenge
+  // baseline (the constraint is off, so the bag folded in is the reward alone).
+  const base = createInitialState(seed, 0)
+  const baseMods = effectiveMods(base)
+  const post = createInitialState(seed, 0)
+  post.challenge.completed = { ...completedMap }
+  const postMods = effectiveMods(post)
+  const rewardActive =
+    completed > 0 &&
+    (RESOURCE_IDS.some((r) => postMods.productionMult[r] > baseMods.productionMult[r]) ||
+      postMods.storageMult > baseMods.storageMult ||
+      postMods.popMult > baseMods.popMult ||
+      postMods.attackMult > baseMods.attackMult ||
+      postMods.defenseMult > baseMods.defenseMult ||
+      postMods.lootMult > baseMods.lootMult)
+
+  // Bare-named HARD invariant: the dedicated run must COMPLETE its (reachable) challenge within budget.
+  invariants.push({
+    name: 'challenge-completed',
+    ok: completed >= 1,
+    detail:
+      completed >= 1
+        ? `completed ${id} at tick ${completedTick} (completed map: ${JSON.stringify(completedMap)}, reward active: ${rewardActive})`
+        : `dedicated run did not complete challenge ${id} within ${ticks} ticks`,
+  })
+
+  return { state, invariants, metrics: { completed, completedMap, rewardActive } }
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -1489,6 +1635,34 @@ export function runOne(seed: string, ticks: number): RunResult {
   // never softlocks).
   invariants.push(checkDynastyNoSoftlock(seed))
 
+  // M8 challenge (WYZWANIA) — a SEPARATE constrained run so the M1–M6.2 + meta targets stay measured
+  // with aggregateChallengeMods at IDENTITY (the main + meta runs never start a challenge, so their
+  // effectiveMods — and thus the 17 core + prestige/era/dynasty/fortress/horde targets — is byte-
+  // identical to pre-M8). Drives the bot under an active constraint until a reachable production goal
+  // completes, recording the permanent reward. The run's invariants (sampled validity + a challenge
+  // round-trip + the bare 'challenge-completed' proof) are folded in here.
+  const challenge = runChallenge(seed, CHALLENGE_TICKS)
+  invariants.push(...challenge.invariants)
+
+  // M8 challenge proof-of-mechanic checks (self-contained, deterministic — only the seeded per-challenge
+  // world): startChallenge replays byte-identically (challenge-determinism); the active constraint
+  // strictly LOWERS the constrained stat (challenge-constraint); completion is one-time with no double-
+  // grant (challenge-completion-once); the earned reward folds into a FRESH post-completion run
+  // (challenge-reward-folds) and TWO distinct earned rewards STACK into one run (challenge-reward-stacks);
+  // and a constrained run never softlocks (challenge-no-softlock). The challenge save/load round-trip is
+  // exercised on a state carrying BOTH an active challenge AND a completed one (the highest-information
+  // record for the v19 node).
+  invariants.push(checkChallengeDeterminism(seed))
+  invariants.push(checkChallengeConstraint(seed))
+  invariants.push(checkChallengeCompletionOnce(seed))
+  invariants.push(checkChallengeRewardFolds(seed))
+  invariants.push(checkChallengeRewardStacks(seed))
+  invariants.push(checkChallengeNoSoftlock(seed))
+  const chalRt = createInitialState(seed, 0)
+  chalRt.challenge.completed[CHALLENGE_IDS[0]] = 1
+  startChallenge(chalRt, CHALLENGE_IDS[1] ?? CHALLENGE_IDS[0])
+  invariants.push(checkChallengeRoundTrip(chalRt))
+
   // M5.1 automation (idle routines) — a SEPARATE coverage run with the three gateways
   // unlocked and every toggle ON (the main run keeps automation OFF, so the targets above are
   // untouched). Asserts each routine demonstrably fires (auto build/recruit/attack) and that
@@ -1625,6 +1799,7 @@ export function runOne(seed: string, ticks: number): RunResult {
     prestige.stats,
     era.stats,
     dynasty.stats,
+    challenge.metrics,
     automation.stats,
     fortressDriveRazed,
   )

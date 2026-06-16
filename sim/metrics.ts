@@ -214,6 +214,22 @@ export interface RunMetrics {
    */
   dynastyAutomationUnlocked: boolean
 
+  // --- M8 challenge (WYZWANIA — constrained run for a permanent reward) ---
+  // Measured by a SEPARATE run (see runner.runChallenge) that STARTS a challenge whose goal is
+  // reachable under its constraint and drives the economy until checkChallengeCompletion fires —
+  // kept apart from the main + meta runs, which never start a challenge (so aggregateChallengeMods
+  // folds to identity there and their 17 core + meta targets stay byte-identical to pre-M8).
+  /** Distinct challenges COMPLETED over the dedicated challenge run (Σ ids with completed >= 1). */
+  challengesCompleted: number
+  /**
+   * GATED REWARD: whether a COMPLETED challenge's permanent reward actually raised effectiveMods on a
+   * FRESH post-completion run — measured as some multiplicative axis of `effectiveMods(fresh + the
+   * completed map)` strictly exceeding the no-challenge baseline. true proves the one-time reward folds
+   * into every future run forever (the challenge's reason to exist; mirrors {@link dynastyAutomationUnlocked}
+   * as the feature's signature gated effect).
+   */
+  challengeRewardActive: boolean
+
   // --- M5.1 automation (idle routines) ---
   // Measured by a SEPARATE coverage run (see runner.runAutomationCoverage) with the three
   // automation gateways unlocked and every toggle ON — kept apart from the MAIN run, which
@@ -376,6 +392,23 @@ export interface DynastyRunStats {
 }
 
 /**
+ * Challenge (M8 — WYZWANIA) counters from the SEPARATE challenge-driving run (see
+ * runner.runChallenge). Kept apart from {@link RunStats} / the meta run stats because it is produced
+ * by a different run — the only one that ever STARTS a challenge (which RESETS the run under a
+ * constraint), so the main + meta targets stay measured with aggregateChallengeMods at identity (byte-
+ * identical to pre-M8). {@link collect} folds these straight into the matching {@link RunMetrics}
+ * challenge fields. Mirrors {@link EraRunStats}.
+ */
+export interface ChallengeRunStats {
+  /** Distinct challenges completed over the run (Σ ids with completed >= 1). */
+  completed: number
+  /** The completed map at run end (challenge id -> times finished). */
+  completedMap: Record<string, number>
+  /** Whether a completed reward raised effectiveMods on a fresh post-completion run (gated proof). */
+  rewardActive: boolean
+}
+
+/**
  * Automation (M5.1) counters from the SEPARATE coverage run (see
  * runner.runAutomationCoverage). Kept apart from {@link RunStats} because it is produced by
  * a different run (automation ON) than the main economy/combat metrics (automation OFF), so
@@ -513,6 +546,7 @@ export function collect(
   prestige: PrestigeRunStats,
   era: EraRunStats,
   dynasty: DynastyRunStats,
+  challenge: ChallengeRunStats,
   automation: AutomationRunStats,
   fortressDriveRazed: number,
 ): RunMetrics {
@@ -637,6 +671,9 @@ export function collect(
     dynastyLevelsOwned: dynasty.levelsOwned,
     dynastyEpUplift: dynasty.epUplift,
     dynastyAutomationUnlocked: dynasty.automationUnlocked,
+
+    challengesCompleted: challenge.completed,
+    challengeRewardActive: challenge.rewardActive,
 
     automationBuilt: automation.built,
     automationRecruited: automation.recruited,

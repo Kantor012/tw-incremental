@@ -6,6 +6,7 @@ import { createTechPanel } from './panels/tech'
 import { createPrestigePanel } from './panels/prestige'
 import { createEraPanel } from './panels/era'
 import { createDynastyPanel } from './panels/dynasty'
+import { createChallengesPanel } from './panels/challenges'
 import { createAutomationPanel } from './panels/automation'
 import { createMapPanel } from './panels/map'
 import { createArmyPanel } from './panels/army'
@@ -34,6 +35,7 @@ const TABS: TabSpec[] = [
   { id: 'prestige', label: 'Prestiż', create: createPrestigePanel },
   { id: 'era', label: 'Era', create: createEraPanel },
   { id: 'dynasty', label: 'Dynastia', create: createDynastyPanel },
+  { id: 'challenges', label: 'Wyzwania', create: createChallengesPanel },
   { id: 'automation', label: 'Automatyzacja', create: createAutomationPanel },
   { id: 'map', label: 'Mapa', create: createMapPanel },
   { id: 'army', label: 'Wojsko', create: createArmyPanel },

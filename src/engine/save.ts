@@ -15,6 +15,7 @@ import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
 import { ERA_NODES, ERA_NODE_IDS } from '../content/era'
 import { DYNASTY_NODES, DYNASTY_NODE_IDS } from '../content/dynasty'
+import { CHALLENGE_IDS } from '../content/challenges'
 import { ACHIEVEMENT_IDS } from '../content/achievements'
 import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../systems/world'
 
@@ -40,8 +41,9 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  *   content/prestige.ts, used by the v9 validation), the era catalogue (`ERA_NODES` /
  *   `ERA_NODE_IDS`, content/era.ts, used by the v15 validation) and the dynasty catalogue
  *   (`DYNASTY_NODES` / `DYNASTY_NODE_IDS`, content/dynasty.ts, used by the v16 validation)
+ *   and the challenge id list (`CHALLENGE_IDS`, content/challenges.ts, used by the v19 validation)
  *   are PURE DATA that import only the erased `ResourceId` type from state.ts (era.ts /
- *   dynasty.ts import nothing at all), so they add no runtime edge and can never form an
+ *   dynasty.ts / challenges.ts import nothing at all), so they add no runtime edge and can never form an
  *   initialisation cycle. The achievements
  *   id list (`ACHIEVEMENT_IDS`,
  *   content/achievements.ts, used by the v13 validation) is the same: that module imports
@@ -52,7 +54,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 18
+export const SAVE_VERSION = 19
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -581,6 +583,22 @@ export function migrate(raw: any): any {
         : s.stats,
       version: 18,
     }),
+    // v18 -> v19: challenges (M8 — WYZWANIA). A v18 save predates the run-modifier layer, so
+    // backfill the single new field — `challenge`, the { activeId, completed } record (the
+    // running challenge or null + the permanent map of completed-challenge counts) — as the
+    // EMPTY account ({ activeId: null, completed: {} }). The constraint/reward multipliers it
+    // drives are TRANSIENT (folded by aggregateChallengeMods inside effectiveMods in
+    // recomputeDerived); an empty challenge account folds to the IDENTITY bag, so nothing else
+    // is stored or seeded here and a migrated run is byte-identical to pre-M8 (no active
+    // constraint, no earned reward). A forward-compat save that already carries an object
+    // `challenge` keeps it verbatim; any non-object (corrupt/missing) is reset to the empty
+    // account. Nothing is recomputed here; importSave's recomputeDerived pass runs afterwards
+    // exactly as for every other migration. Mirrors the v8->v9 / v14->v15 backfills.
+    18: (s) => ({
+      ...s,
+      challenge: isObject(s.challenge) ? s.challenge : { activeId: null, completed: {} },
+      version: 19,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -783,7 +801,9 @@ function validateVillage(v: unknown, id: string): void {
  * `null` or a known unit id, and `recruitTarget` is a non-negative integer), and finally
  * the M5.4 lifetime `stats` record (nine non-negative integer event counters — including the
  * M7 `fortressesRazed` — plus the Decimal `lootHauled`, finite + non-negative) and the M5.4 `achievements` map (every
- * present key a known ACHIEVEMENT_ID, every value a finite, non-negative unlock marker).
+ * present key a known ACHIEVEMENT_ID, every value a finite, non-negative unlock marker), and
+ * finally the M8 `challenge` record (`activeId` is `null` or a known CHALLENGE_ID, and its
+ * `completed` map follows the same known-id rule with finite, non-negative integer counts).
  */
 export function validateState(s: unknown): GameState {
   if (!isObject(s)) throw new Error('save: not an object')
@@ -1115,6 +1135,37 @@ export function validateState(s: unknown): GameState {
     const maxLevel = DYNASTY_NODES[nodeId].maxLevel
     if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > maxLevel) {
       throw new Error(`save: invalid dynasty level ${nodeId}`)
+    }
+  }
+
+  // CHALLENGE record (M8 — WYZWANIA) — the run-modifier account, which SURVIVES every reset.
+  // `activeId` is the running challenge or `null`; when set it must be a KNOWN challenge id (a
+  // stray id would mis-resolve the active constraint and then get autosaved — CLAUDE.md hard
+  // rule #3). `completed` is a sparse `{ challengeId: times }` map (absent key = never finished)
+  // exactly like the meta-tree node maps: the constraint/reward multipliers it drives are
+  // TRANSIENT (re-derived by aggregateChallengeMods inside effectiveMods in recomputeDerived
+  // after import), so only the counts persist. Every PRESENT key must be a KNOWN challenge id
+  // whose count is a finite, non-negative INTEGER; unknown keys are REJECTED for the same reason
+  // as the tech/prestige/era/dynasty maps — `completed` is written ONLY by
+  // checkChallengeCompletion (known ids), so a key outside CHALLENGE_IDS means a corrupt/
+  // tampered/forward-version save (downgrade is best-effort, like the rest of forward-compat). An
+  // empty `{}` always passes, which the v18->v19 migration guarantees.
+  const { challenge } = s
+  if (!isObject(challenge)) throw new Error('save: missing challenge')
+  const knownChallengeIds = CHALLENGE_IDS as readonly string[]
+  const activeId = challenge.activeId
+  if (activeId !== null && (typeof activeId !== 'string' || !knownChallengeIds.includes(activeId))) {
+    throw new Error('save: invalid challenge activeId')
+  }
+  const completed = challenge.completed
+  if (!isObject(completed)) throw new Error('save: invalid challenge completed')
+  for (const id of Object.keys(completed)) {
+    if (!knownChallengeIds.includes(id)) {
+      throw new Error(`save: unknown challenge ${id}`)
+    }
+    const times = completed[id]
+    if (typeof times !== 'number' || !Number.isInteger(times) || times < 0) {
+      throw new Error(`save: invalid challenge completed ${id}`)
     }
   }
 

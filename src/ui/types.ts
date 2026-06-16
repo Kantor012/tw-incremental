@@ -142,6 +142,23 @@ export interface UiCtx {
    */
   onPurchaseDynasty: (nodeId: string) => boolean
   /**
+   * ROZPOCZNIJ WYZWANIE (M8): start the challenge `id` — RESET the run (villages → a fresh
+   * capital, world regenerated from a per-challenge seed, tech/battle log cleared, horde
+   * re-armed) and turn its CONSTRAINT penalty on. The META accounts (prestige/era/dynasty)
+   * and the lifetime stats/achievements are PRESERVED (a challenge does NOT bank or wipe
+   * them). Returns true on a successful start (no challenge already active and the id is
+   * known) — false otherwise. On true the new run is already committed + persisted. The panel
+   * confirms the destructive reset with the player itself; this callback is the commit, not
+   * the prompt. Mirrors {@link onAscend} (a run reset), but for a constrained challenge run.
+   */
+  onStartChallenge: (id: string) => boolean
+  /**
+   * PORZUĆ WYZWANIE (M8): end the active challenge with NO reward — clear its constraint and
+   * let the run continue unconstrained (no reset). A no-op when no challenge is active. On
+   * return the change is already committed + persisted.
+   */
+  onAbandonChallenge: () => void
+  /**
    * Patch the idle automation toggles / policy (M5.1): merge `patch` into
    * `store.state.automation`, then commit + persist (no recompute — the automation
    * state is read directly by the tick, not folded into derived stats). The

@@ -279,6 +279,15 @@ function evalTargets(r: RunResult): TargetCheck[] {
         ? 'automations unlocked account-wide by the dynasty gateway (build + recruit + attack)'
         : 'dynasty automation_unlock gateway did NOT unlock all three automations',
     },
+    {
+      // M8: the bot must COMPLETE at least minChallengesCompleted challenges in the separate
+      // challenge run. Added ALONGSIDE the 17 core + prestige/era/dynasty/fortress/horde targets
+      // above (all of which STILL evaluate here, unchanged): a challenge folds to identity in the
+      // main + meta runs, so those targets stay byte-identical to pre-M8 — see the per-seed report.
+      name: 'challenges-completed',
+      ok: m.challengesCompleted >= TARGETS.minChallengesCompleted,
+      detail: `completed ${m.challengesCompleted} challenge(s) in the dedicated run (reward active: ${m.challengeRewardActive}; target >= ${TARGETS.minChallengesCompleted})`,
+    },
   ]
 }
 
@@ -461,6 +470,46 @@ async function main(): Promise<void> {
         `${String(m.dynastyNodesOwned).padStart(11)} | ${String(m.dynastyLevelsOwned).padStart(12)} | x${m.dynastyEpUplift.toFixed(3)} | ` +
         `${m.dynastyAutomationUnlocked ? 'unlocked' : 'locked'}`,
     )
+  }
+  console.log('')
+
+  // --- Challenge per seed (M8 WYZWANIA; SEPARATE challenge-driving run) ---
+  console.log('--- Challenge (end) ---')
+  console.log('seed     | challenges completed | reward folds into a fresh run')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.challengesCompleted).padStart(20)} | ${m.challengeRewardActive ? 'yes' : 'no'}`,
+    )
+  }
+  console.log('')
+
+  // --- M8 challenge coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M8 challenge (coverage) ---')
+  const m8Names = [
+    'challenge-completed',
+    'challenge-determinism',
+    'challenge-constraint',
+    'challenge-completion-once',
+    'challenge-reward-folds',
+    'challenge-reward-stacks',
+    'challenge-no-softlock',
+    'challenge-round-trip',
+  ]
+  for (const r of results) {
+    const line = m8Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing completion / determinism / constraint / reward check is visible.
+    for (const name of m8Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
   }
   console.log('')
 

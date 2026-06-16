@@ -10,6 +10,7 @@ import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
 import { effectiveMods } from '../systems/prestige'
 import { runAutomation } from '../systems/automation'
 import { checkAchievements } from '../systems/achievements'
+import { checkChallengeCompletion } from '../systems/challenges'
 
 /**
  * Fixed simulation step shared by the live loop and offline catch-up: 20 ticks
@@ -49,6 +50,16 @@ export const TICK_RATE = 1 / 20
  * draw count and order are invariant to how `dt` is sliced — keeping online / offline /
  * sim byte-identical with hordes active.
  *
+ * Challenges (M8) are checked ONCE per sub-step too, AFTER the village loop (next to
+ * checkAchievements): {@link checkChallengeCompletion} records an active challenge whose
+ * CURRENT-RUN goal is met and ends its constraint with a permanent reward. It draws NO rng,
+ * so its position relative to the rng draws is irrelevant; it is kept in a FIXED slot for
+ * determinism and is a no-op (byte-identical to pre-M8) when no challenge is active. A
+ * completion is the ONE sub-step event that mutates the effectiveMods ledger mid-span
+ * (constraint off, reward on), so subStep RETURNS whether it completed a challenge this
+ * call — {@link simulate} re-aggregates the threaded `mods` bag before the next sub-step so
+ * the remaining combat advancers see the corrected multipliers (see simulate's note).
+ *
  * EVERYTHING advances here for each village, not just the step-sensitive subsystems,
  * because combat (marches deliver loot, raids steal resources) READS AND WRITES the
  * same resource pool that production fills and the storage cap clamps. Once two
@@ -61,7 +72,7 @@ export const TICK_RATE = 1 / 20
  * (Linear production summed over the grid still equals `rate*dt` exactly on Decimal —
  * the existing production tests hold.)
  */
-function subStep(state: GameState, dt: number, mods: TechModifiers): void {
+function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // Combat LUCK (M5.5): seed ONE RNG from the persisted `rngState` at the start of the
   // sub-step and thread that SAME instance through every village's combat (marches then
   // raids, in villageOrder). Each RESOLVED attack / fired raid draws exactly one luckFactor
@@ -78,17 +89,21 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // player village would resize villageOrder under the loop. Typed off advanceMarches'
   // return so this stays decoupled from where ConquestEvent is declared.
   const conquests: ReturnType<typeof advanceMarches> = []
-  // The EFFECTIVE modifiers (tech × prestige) are a pure function of the GLOBAL tech +
-  // prestige ledgers, which NO sub-step mutates (production / recruitment / marches /
-  // raids / conquest / automation never touch state.tech or state.prestige.nodes), so
-  // they are constant for the whole `simulate` span. `mods` is therefore aggregated ONCE
-  // by the caller (simulate) and threaded in — same value every sub-step, byte-identical
-  // regardless of how `dt` is sliced, and the per-substep effectiveMods roll-up (a scan
-  // of all tech + prestige nodes) is kept off the hot loop. Threaded into the combat
-  // advancers (marches/raids) where attack/defense/march-speed/loot multipliers apply;
-  // recruitment is intentionally NOT passed mods — it snapshots its per-unit duration
-  // (incl. the recruit-speed fraction) at queue time, so reading mods again mid-flight
-  // would double-apply.
+  // The EFFECTIVE modifiers (tech × prestige × era × dynasty × challenge) are a pure
+  // function of the GLOBAL ledgers that production / recruitment / marches / raids /
+  // conquest / automation never touch (state.tech / prestige.nodes / era.nodes /
+  // dynasty.nodes), so for an ORDINARY sub-step they are constant across the whole
+  // `simulate` span. `mods` is therefore aggregated ONCE by the caller (simulate) and
+  // threaded in — same value every sub-step, byte-identical regardless of how `dt` is
+  // sliced, and the per-substep effectiveMods roll-up is kept off the hot loop. The ONE
+  // exception (M8): checkChallengeCompletion below CAN flip the challenge ledger mid-span
+  // (constraint off, reward on); subStep returns that so simulate re-aggregates `mods`
+  // before the next sub-step (see simulate's note), keeping the remaining advancers on the
+  // refreshed bag the chunked TICK_RATE path would use. Threaded into the combat advancers
+  // (marches/raids) where attack/defense/march-speed/loot multipliers apply; recruitment
+  // is intentionally NOT passed mods — it snapshots its per-unit duration (incl. the
+  // recruit-speed fraction) at queue time, so reading mods again mid-flight would
+  // double-apply.
   for (const id of state.villageOrder) {
     const v = state.villages[id]
     for (const r of RESOURCE_IDS) {
@@ -153,6 +168,16 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // into the economy and the 17 balance goals stay untouched. The returned list of newly
   // unlocked ids is unused here (the UI reads state.achievements reactively after commit).
   checkAchievements(state)
+  // Challenge completion (M8) is evaluated LAST too, in this FIXED position next to
+  // checkAchievements and AFTER the village loop / automation, so it reads a fully settled
+  // sub-step (every economy/combat write applied, derived stats current). checkChallengeCompletion
+  // is a pure, deterministic pass: when an active challenge's CURRENT-RUN goal is met it records
+  // it permanently and ends the run's constraint (recomputeDerived re-folds the now-earned reward).
+  // It draws NO rng (so its order relative to the rng draws above is irrelevant) and is idempotent
+  // (activeId cleared on completion), so it fires byte-identically online / offline / sim. With no
+  // active challenge it is a no-op, so a no-challenge run is byte-identical to pre-M8. Its return is
+  // surfaced (see below) so simulate can refresh the threaded `mods` after a mid-span completion.
+  const challengeCompleted = checkChallengeCompletion(state)
   // M5.5: persist the advanced luck stream so the next sub-step resumes exactly where this
   // one left off. All draws happened inside the village loop above (one per resolved attack
   // / fired raid) plus the single fixed-position advanceHorde draw (one per resolved horde,
@@ -161,6 +186,10 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // identical online / offline / sim because the sub-step grid makes the draw sequence
   // invariant to the `dt` split.
   state.rngState = rng.getState()
+  // Signal a mid-span challenge completion so simulate re-aggregates the threaded `mods`
+  // before the next sub-step (the constraint/reward this completion folded in/out changes
+  // what effectiveMods returns for the REMAINING sub-steps of a big-dt span).
+  return challengeCompleted
 }
 
 /**
@@ -176,22 +205,40 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
  * (it calls simulate(TICK_RATE) repeatedly), `simulate(big)` and the chunked offline
  * path resolve to an identical ordered list of sub-steps — the guarantee the offline
  * / combat determinism invariants assert.
+ *
+ * The threaded `mods` bag is aggregated ONCE up front (its ledger is constant across an
+ * ordinary span), with ONE M8 exception: when a sub-step COMPLETES a challenge it flips
+ * the challenge ledger (constraint off, reward on), so subStep returns true and we
+ * re-aggregate `mods` before the next sub-step. That keeps the remaining sub-steps of a
+ * big-dt span on the SAME refreshed bag the chunked TICK_RATE path (which re-aggregates
+ * every call) uses — so `simulate(big) === N × simulate(TICK_RATE)` stays byte-identical
+ * even across a mid-span completion that touches a combat/loot axis.
  */
 export function simulate(state: GameState, dtSeconds: number): void {
   // Reject zero, negative AND NaN (NaN <= 0 is false, and Decimal.add(NaN) === 0,
   // so a NaN dt would silently wipe every resource — see offline boot path).
   if (!(dtSeconds > 0)) return
 
-  // Aggregate the effective tech × prestige modifiers ONCE for the whole span: the ledger
-  // they fold is immutable across sub-steps (see subStep), so every sub-step of this call
-  // sees the identical bag. This collapses the per-substep effectiveMods scan (all tech +
-  // prestige nodes) to one roll-up per simulate() call. The live loop / offline catch-up
+  // Aggregate the effective tech × prestige × era × dynasty × challenge modifiers ONCE for
+  // the whole span: the ledger they fold is immutable across sub-steps (see subStep), so
+  // every sub-step of this call sees the identical bag. This collapses the per-substep
+  // effectiveMods scan to one roll-up per simulate() call. The live loop / offline catch-up
   // call simulate(TICK_RATE) (one sub-step) so they are unaffected; only big-`dt` callers
   // (sim harness) shed the redundant scans — and because the value is identical either way,
   // online (one big step) and offline (many TICK_RATE steps) stay byte-identical.
-  const mods = effectiveMods(state)
+  //
+  // M8 exception: a sub-step that COMPLETES a challenge flips the challenge ledger mid-span
+  // (subStep returns true), so re-aggregate `mods` before the next sub-step. The chunked
+  // TICK_RATE path re-derives mods on its next call anyway, so this refresh keeps a big-dt
+  // span and the chunked path resolving the REMAINING combat advancers on the same corrected
+  // multipliers — restoring `simulate(big) === N × simulate(TICK_RATE)` across a completion.
+  let mods = effectiveMods(state)
   const fullSteps = Math.floor(dtSeconds / TICK_RATE)
-  for (let i = 0; i < fullSteps; i++) subStep(state, TICK_RATE, mods)
+  for (let i = 0; i < fullSteps; i++) {
+    if (subStep(state, TICK_RATE, mods)) mods = effectiveMods(state)
+  }
   const remainder = dtSeconds - fullSteps * TICK_RATE
+  // The remainder is the LAST sub-step; nothing after it consumes `mods`, so its return is
+  // intentionally ignored (no refresh needed). The loop above already left `mods` current.
   if (remainder > 0) subStep(state, remainder, mods)
 }
