@@ -1,18 +1,20 @@
-import type { Village, BarbarianVillage, ResourceMap, TechModifiers } from '../../engine/state'
+import type { Village, BarbarianVillage, Fortress, World, ResourceMap, TechModifiers } from '../../engine/state'
 import { RESOURCE_IDS } from '../../engine/state'
 import { D, type Decimal } from '../../engine/decimal'
 import { formatNumber, formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../../content/barbarians'
+import { fortressTarget } from '../../content/fortresses'
 import {
   distance,
   targetsByDistance,
   barbarianById,
+  fortressById,
   WORLD_CENTER,
   WORLD_SIZE,
 } from '../../systems/world'
 import { canFound } from '../../systems/villages'
-import { marchTime, stationedUnits, canAttack, canScout } from '../../systems/marches'
+import { marchTime, stationedUnits, canAttack, canAttackFortress, canScout } from '../../systems/marches'
 import { unitUnlocked } from '../../systems/recruitment'
 import {
   armyAttackPower,
@@ -92,6 +94,12 @@ const ZOOM_STEP = 1.2
 const GRID = 50
 /** Pixels of pointer travel that turn a click into a pan (so a tap still selects). */
 const PAN_THRESHOLD = 4
+/**
+ * World-field radius of a fortress boss star (M7). Uniform — every fortress is a far,
+ * high-tier boss — and deliberately bigger than the chunkiest camp dot (barbRadius caps
+ * at 6) so a fortress dominates the field at a glance, the way a boss target should.
+ */
+const FORT_RADIUS = 8
 
 /** Cached handles for one army-composer row in the detail card. */
 interface ArmyPickRefs {
@@ -106,6 +114,15 @@ interface BarbNodeRefs {
   /** Transparent, screen-sized hit circle so taps meet the touch-target minimum. */
   hit: SVGCircleElement
   barb: BarbarianVillage
+}
+
+/** Cached handles for one rendered fortress node (M7). Mirrors {@link BarbNodeRefs}. */
+interface FortNodeRefs {
+  g: SVGGElement
+  title: SVGElement
+  /** Transparent, screen-sized hit circle so taps meet the touch-target minimum. */
+  hit: SVGCircleElement
+  fort: Fortress
 }
 
 /** Cached handles for one rendered march (a line plus its travelling marker). */
@@ -145,9 +162,33 @@ function totalLootOf(level: number): Decimal {
   return s
 }
 
+/** Total one-time fortress cache (Σ over resources) for a tier, as Decimal (the haul cap). Mirrors {@link totalLootOf}. */
+function fortTotalLootOf(level: number): Decimal {
+  const loot: ResourceMap = fortressTarget(level).loot
+  let s = loot[RESOURCE_IDS[0]]
+  for (let i = 1; i < RESOURCE_IDS.length; i++) s = s.add(loot[RESOURCE_IDS[i]])
+  return s
+}
+
 /** Round to 2dp for compact, stable viewBox strings. */
 function fmt2(n: number): string {
   return (Math.round(n * 100) / 100).toString()
+}
+
+/**
+ * SVG points string for a five-pointed star centred at (cx, cy), in WORLD units, with
+ * the given outer/inner radii (first spike points straight up). Drawn in world space so
+ * it zooms with the viewBox exactly like the round camp dots; the boss STAR is what makes
+ * a fortress read as a different KIND of target than a circle (shape, not colour alone).
+ */
+function starPoints(cx: number, cy: number, outer: number, inner: number): string {
+  const pts: string[] = []
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? outer : inner
+    const a = -Math.PI / 2 + (i * Math.PI) / 5
+    pts.push(fmt2(cx + r * Math.cos(a)) + ',' + fmt2(cy + r * Math.sin(a)))
+  }
+  return pts.join(' ')
 }
 
 /**
@@ -213,6 +254,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
   }
   addLegend('is-player', 'Twoja wioska')
   addLegend('is-barb', 'Barbarzyńca (jaśniejszy/większy = wyższy poziom)')
+  addLegend('is-fortress', 'Forteca (gwiazda — potężny, jednorazowy cel)')
   addLegend('is-march', 'Marsz')
   el.appendChild(legend)
 
@@ -239,7 +281,7 @@ export function createMapPanel(ctx: UiCtx): Panel {
   svgEl.setAttribute('role', 'group')
   svgEl.setAttribute(
     'aria-label',
-    'Mapa świata: wioski gracza i wioski barbarzyńskie. Dostępna lista celów w zakładce „Wyprawy".',
+    'Mapa świata: wioski gracza, wioski barbarzyńskie i fortece. Dostępna lista celów w zakładce „Wyprawy".',
   )
   wrap.appendChild(svgEl)
 
@@ -252,6 +294,10 @@ export function createMapPanel(ctx: UiCtx): Panel {
   marchesGroup.setAttribute('aria-hidden', 'true')
   const barbsGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
   barbsGroup.setAttribute('class', 'map-barbs')
+  // Fortress (boss) layer (M7) — drawn ABOVE the camps so the bigger boss stars are never
+  // hidden behind a dense low-tier cluster, but BELOW the player shields + overlay rings.
+  const fortsGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
+  fortsGroup.setAttribute('class', 'map-forts')
   const playersGroup = document.createElementNS(SVG_NS, 'g') as SVGGElement
   playersGroup.setAttribute('class', 'map-players')
   playersGroup.setAttribute('aria-hidden', 'true')
@@ -287,12 +333,20 @@ export function createMapPanel(ctx: UiCtx): Panel {
   const selRing = svg('circle', { class: 'map-sel-ring', r: '0', fill: 'none' })
   selRing.setAttribute('vector-effect', 'non-scaling-stroke')
   selRing.style.display = 'none'
+  // Selected-fortress ring (M7): a SEPARATE marker so it never fights the camp selRing
+  // (a camp and a fortress are never selected at once, but the two markers stay
+  // independent). Reuses the dashed .map-sel-ring look — selection semantics are identical.
+  const fortSelRing = svg('circle', { class: 'map-sel-ring', r: '0', fill: 'none' })
+  fortSelRing.setAttribute('vector-effect', 'non-scaling-stroke')
+  fortSelRing.style.display = 'none'
   overlayGroup.appendChild(activeRing)
   overlayGroup.appendChild(selRing)
+  overlayGroup.appendChild(fortSelRing)
 
   svgEl.appendChild(gridGroup)
   svgEl.appendChild(marchesGroup)
   svgEl.appendChild(barbsGroup)
+  svgEl.appendChild(fortsGroup)
   svgEl.appendChild(playersGroup)
   svgEl.appendChild(overlayGroup)
 
@@ -509,6 +563,9 @@ export function createMapPanel(ctx: UiCtx): Panel {
 
   // ---- Selection state -----------------------------------------------------
   let selectedId: string | null = null
+  // Selected FORTRESS id (M7), mutually exclusive with `selectedId`: selecting a camp
+  // clears the fortress selection and vice versa, so at most one detail card is open.
+  let selectedFortressId: string | null = null
   // Last-seen `scouted` flag per camp id, so update() can ANNOUNCE the moment the shown
   // camp flips unscouted→scouted (its scout returned) — otherwise recon completion is
   // silent (the '?' just becomes numbers). A camp first seen already scouted is recorded
@@ -527,7 +584,20 @@ export function createMapPanel(ctx: UiCtx): Panel {
       suppressClick = false
       return
     }
+    selectedFortressId = null
     selectedId = id
+    update()
+  }
+  // Select a FORTRESS (M7): mirror of `select`, but it clears the camp selection so the
+  // fortress detail card replaces the camp one (the two share the bottom-left anchor).
+  const selectFortress = (id: string): void => {
+    if (foundMode) return
+    if (suppressClick) {
+      suppressClick = false
+      return
+    }
+    selectedId = null
+    selectedFortressId = id
     update()
   }
 
@@ -781,6 +851,273 @@ export function createMapPanel(ctx: UiCtx): Panel {
   // position:relative), not the unpositioned .map-panel — otherwise position:absolute
   // resolves against the viewport/initial containing block and the card escapes the map.
   wrap.appendChild(detail)
+
+  // ---- Fortress detail card (M7) -------------------------------------------
+  // A SEPARATE detail card for the boss target. A fortress is never scouted (no fog —
+  // always revealed) and never conquered (no loyalty), so this trims the camp card down
+  // to: defence (high), the one-time loot cache, distance/march time and a razed-state
+  // line — plus its OWN army composer and a „Szturmuj fortecę" button wired to
+  // ctx.onAssaultFortress. It is MUTUALLY EXCLUSIVE with the camp card above (only one is
+  // shown at a time — update() toggles display), so both safely share the bottom-left
+  // .map-detail anchor. Built ONCE; update() only pokes refs (the panel contract),
+  // mirroring the camp card's per-frame discipline.
+  const fortressDetail = h('div', 'map-detail map-detail--fortress')
+  fortressDetail.setAttribute('role', 'region')
+  fortressDetail.setAttribute('aria-label', 'Szczegóły wybranej fortecy')
+  fortressDetail.style.display = 'none'
+
+  const fortHead = h('div', 'map-detail-head')
+  const fortNameEl = h('h3', 'map-detail-name')
+  const fortLevelEl = h('span', 'map-detail-level num')
+  fortHead.appendChild(fortNameEl)
+  fortHead.appendChild(fortLevelEl)
+  fortressDetail.appendChild(fortHead)
+
+  const fortBody = h('div', 'map-detail-body')
+
+  const fortStats = h('div', 'building-stats')
+  const mkFortStat = (label: string): HTMLElement => {
+    const w = h('div', 'stat')
+    w.appendChild(h('span', 'stat-label muted', label))
+    const val = h('span', 'num stat-val')
+    w.appendChild(val)
+    fortStats.appendChild(w)
+    return val
+  }
+  const fortDefVal = mkFortStat('Obrona')
+  const fortLootVal = mkFortStat('Łup (skarbiec)')
+  const fortDistVal = mkFortStat('Odległość')
+  const fortTimeVal = mkFortStat('Czas marszu')
+  const fortStateVal = mkFortStat('Stan')
+  fortBody.appendChild(fortStats)
+
+  const fortForecast = h('p', 'map-detail-forecast')
+  fortForecast.setAttribute('role', 'status')
+  fortForecast.setAttribute('aria-live', 'polite')
+  fortBody.appendChild(fortForecast)
+  // Guard re-announcement of the aria-live region (same idea as the camp card's setForecast).
+  let lastFortForecast = ''
+  const setFortForecast = (text: string): void => {
+    if (text !== lastFortForecast) {
+      fortForecast.textContent = text
+      lastFortForecast = text
+    }
+  }
+
+  // Luck primer — a fortress fights with the SAME ±25% roll as a camp (no fog here, so the
+  // forecast is always shown). Reuses the shared note so it can't drift from the camp card.
+  fortBody.appendChild(h('p', 'map-detail-hint muted', LUCK_NOTE))
+
+  // Siege summary (rams only): a fortress is never tier-razed by catapults — it is a
+  // one-time boss, razed wholesale on a win — so only the ram defence cut is reported.
+  const fortSiegeNote = h('p', 'map-detail-siege muted')
+  fortSiegeNote.hidden = true
+  fortBody.appendChild(fortSiegeNote)
+
+  // Army composer — its OWN inputs (a fortress assault is dispatched independently of the
+  // camp composer above). Reuses the styled army-picker / recruit-controls classes.
+  fortBody.appendChild(h('h4', 'recruit-subtitle', 'Skład szturmu'))
+  const fortComposer = h('div', 'army-picker')
+  const fortArmyPicks = {} as Record<UnitId, ArmyPickRefs>
+  for (const id of ATTACK_UNIT_IDS) {
+    const def = UNITS[id]
+    const pick = h('div', 'army-pick')
+    const labelRow = h('span', 'army-pick-label')
+    const iconWrap = h('span', 'res-icon-wrap')
+    iconWrap.appendChild(unitIcon(id))
+    labelRow.appendChild(iconWrap)
+    labelRow.appendChild(document.createTextNode(' ' + def.name))
+    const avail = h('span', 'army-pick-avail num muted')
+    const input = h('input', 'recruit-count num')
+    input.type = 'number'
+    input.min = '0'
+    input.step = '1'
+    input.value = '0'
+    input.inputMode = 'numeric'
+    input.setAttribute('aria-label', 'Liczba do wysłania na fortecę: ' + def.name)
+    input.addEventListener('input', () => update())
+    pick.appendChild(labelRow)
+    pick.appendChild(avail)
+    pick.appendChild(input)
+    fortComposer.appendChild(pick)
+    fortArmyPicks[id] = { input, avail }
+  }
+  fortBody.appendChild(fortComposer)
+
+  const fortActions = h('div', 'recruit-controls')
+  const fortSendAllBtn = h('button', 'btn btn-ghost', 'Wszystkie dostępne')
+  fortSendAllBtn.type = 'button'
+  fortSendAllBtn.addEventListener('click', () => {
+    const home = stationedUnits(activeVillage())
+    for (const id of ATTACK_UNIT_IDS) fortArmyPicks[id].input.value = String(home[id])
+    update()
+  })
+  const fortClearBtn = h('button', 'btn btn-ghost', 'Wyczyść')
+  fortClearBtn.type = 'button'
+  fortClearBtn.addEventListener('click', () => {
+    for (const id of ATTACK_UNIT_IDS) fortArmyPicks[id].input.value = '0'
+    update()
+  })
+  const fortAttackBtn = h('button', 'btn btn-primary', 'Szturmuj fortecę')
+  fortAttackBtn.type = 'button'
+  fortActions.appendChild(fortSendAllBtn)
+  fortActions.appendChild(fortClearBtn)
+  fortActions.appendChild(fortAttackBtn)
+  fortBody.appendChild(fortActions)
+
+  const fortMsg = h('p', 'recruit-msg muted')
+  fortMsg.setAttribute('role', 'status')
+  fortMsg.setAttribute('aria-live', 'polite')
+  fortBody.appendChild(fortMsg)
+
+  fortressDetail.appendChild(fortBody)
+  wrap.appendChild(fortressDetail)
+
+  /**
+   * Read the composed assault army from the FORTRESS inputs, clamped per-type to the home
+   * garrison. Returns a COMPLETE roster (every UnitId present, scout always 0) so the
+   * combat/march helpers see a defined count for each. Mirrors {@link readArmy}.
+   */
+  const readFortArmy = (v: Village): Record<UnitId, number> => {
+    const home = stationedUnits(v)
+    const army = {} as Record<UnitId, number>
+    for (const id of UNIT_IDS) army[id] = 0
+    for (const id of ATTACK_UNIT_IDS) {
+      const parsed = Math.floor(Number(fortArmyPicks[id].input.value))
+      const n = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
+      army[id] = Math.min(n, home[id])
+    }
+    return army
+  }
+
+  fortAttackBtn.addEventListener('click', () => {
+    const v = activeVillage()
+    const world = ctx.store.state.world
+    if (selectedFortressId === null) return
+    const fort = fortressById(world, selectedFortressId)
+    if (fort === undefined) {
+      fortMsg.textContent = 'Cel już nie istnieje.'
+      update()
+      return
+    }
+    if (fort.razed) {
+      fortMsg.textContent = 'Forteca już zniszczona.'
+      update()
+      return
+    }
+    const army = readFortArmy(v)
+    const verdict = canAttackFortress(v, fort, army)
+    if (!verdict.ok) {
+      fortMsg.textContent = verdict.reason ?? 'Nie można wysłać szturmu.'
+      update()
+      return
+    }
+    // A fortress is ALWAYS revealed (no fog), so the forecast is honest — mirror the camp
+    // path: rams scale the wall DOWN for the fight (ramDefenseFactor, ramless = ×1), and the
+    // EFFECTIVE tech × prestige mods the tick resolves with are used, so this pre-send check
+    // can never disagree with the real outcome. Warn on anything that is NOT a CERTAIN win
+    // (the ±25% luck can still flip a probable assault into a wipe).
+    const mods = effectiveMods(ctx.store.state)
+    const effDef = fortressTarget(fort.level).defensePower * ramDefenseFactor(army)
+    const fc = attackForecast(armyAttackPower(army, mods), effDef)
+    if (!fc.certainWin && !window.confirm(attackConfirmMessage(fc))) return
+    const ok = ctx.onAssaultFortress(ctx.activeVillageId.value, fort.id, army)
+    if (ok) {
+      fortMsg.textContent = 'Wysłano szturm: ' + fort.name + '.'
+      for (const id of ATTACK_UNIT_IDS) fortArmyPicks[id].input.value = '0'
+    } else {
+      fortMsg.textContent = 'Nie udało się wysłać szturmu.'
+    }
+    update()
+  })
+
+  /**
+   * Poke the fortress detail card from the current state (the panel contract — never
+   * rebuilds). No-op when no fortress is selected (the card is hidden then). A razed
+   * fortress shows its struck state and a cleared/disabled assault button. Mirrors the
+   * camp card's update branch, minus fog/scout/loyalty (a fortress has none).
+   */
+  const updateFortressDetail = (v: Village, world: World, mods: TechModifiers): void => {
+    const fort = selectedFortressId ? fortressById(world, selectedFortressId) : undefined
+    if (!fort) return
+    const target = fortressTarget(fort.level)
+    const army = readFortArmy(v)
+    const composed = armySize(army)
+    const home = stationedUnits(v)
+    // Rams scale the wall DOWN for the fight, exactly as marches.advanceMarches resolves it.
+    const ramFactor = ramDefenseFactor(army)
+
+    fortNameEl.textContent = fort.name
+    fortLevelEl.textContent = 'poz. ' + fort.level
+
+    // Defence (always revealed): show the EFFECTIVE wall after any ram cut so it lines up
+    // with the army's attack power and the verdict below.
+    const base = target.defensePower
+    if (ramFactor < 1) {
+      fortDefVal.textContent = formatInt(base) + ' → ' + formatInt(Math.round(base * ramFactor))
+    } else {
+      fortDefVal.textContent = formatInt(base)
+    }
+
+    // One-time loot cache, carry-capped to the composed army (like a camp haul).
+    const totalLoot = fortTotalLootOf(fort.level)
+    if (composed > 0) {
+      const cd = D(armyCarry(army))
+      const haul = cd.lt(totalLoot) ? cd : totalLoot
+      fortLootVal.textContent = formatInt(haul)
+    } else {
+      fortLootVal.textContent = 'do ' + formatNumber(totalLoot)
+    }
+
+    fortDistVal.textContent = formatNumber(distance(v.x, v.y, fort.x, fort.y), 1) + ' pól'
+    fortTimeVal.textContent = composed > 0 ? formatTime(marchTime(v, fort, army, mods)) : '—'
+    fortStateVal.textContent = fort.razed ? 'Zniszczona' : 'Nietknięta'
+
+    if (fort.razed) {
+      // Razed = permanently out of play: clear the forecast tint and say so in words.
+      setFortForecast('Forteca zrównana z ziemią — nie można jej ponownie zaatakować.')
+      fortForecast.classList.remove('forecast-win', 'forecast-lose')
+    } else if (composed > 0) {
+      const fc = attackForecast(armyAttackPower(army, mods), base * ramFactor)
+      setFortForecast(fc.text)
+      applyForecastClass(fortForecast, fc.cls)
+    } else {
+      setFortForecast('Wybierz jednostki, aby zobaczyć prognozę szturmu.')
+      fortForecast.classList.remove('forecast-win', 'forecast-lose')
+    }
+
+    const siegeText = ramFactor < 1
+      ? 'Tarany osłabią mury fortecy o ' + Math.round((1 - ramFactor) * 100) + '%.'
+      : ''
+    fortSiegeNote.textContent = siegeText
+    fortSiegeNote.hidden = siegeText.length === 0
+
+    // Composer availability + clamp; a razed fortress disables the inputs (no assault).
+    for (const id of ATTACK_UNIT_IDS) {
+      const pick = fortArmyPicks[id]
+      pick.avail.textContent = 'dostępne: ' + formatInt(home[id])
+      pick.input.max = String(home[id])
+      pick.input.disabled = fort.razed || home[id] <= 0
+      const cur = Math.floor(Number(pick.input.value))
+      if (Number.isFinite(cur) && cur > home[id]) pick.input.value = String(home[id])
+    }
+
+    let homeSum = 0
+    for (const id of ATTACK_UNIT_IDS) homeSum += home[id]
+    fortSendAllBtn.disabled = fort.razed || homeSum <= 0
+    fortClearBtn.disabled = composed <= 0
+
+    // aria-disabled (not `disabled`) keeps the button focusable so its reason reaches the
+    // user; the click handler is a guarded no-op when canAttackFortress rejects (incl. razed).
+    const verdict = canAttackFortress(v, fort, army)
+    fortAttackBtn.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
+    fortAttackBtn.title = verdict.ok ? '' : (verdict.reason ?? '')
+    fortAttackBtn.setAttribute(
+      'aria-label',
+      'Szturmuj fortecę: ' + fort.name + ' (poziom ' + fort.level + ')',
+    )
+  }
+
   // Founding banner as an in-map overlay (see note at its creation). Appended last so
   // it stacks above the field/detail; CSS positions it (top on desktop, above the
   // bottom controls on phones) and toggles nothing but its look — JS owns visibility.
@@ -894,6 +1231,8 @@ export function createMapPanel(ctx: UiCtx): Panel {
   // ---- Bounded rebuilds (only when their content signature changes) --------
   let barbNodes: BarbNodeRefs[] = []
   let barbSig = ''
+  let fortNodes: FortNodeRefs[] = []
+  let fortSig = ''
 
   /** Target on-screen diameter (px) for a node's transparent hit area (touch). */
   const HIT_TARGET_PX = 40
@@ -911,6 +1250,11 @@ export function createMapPanel(ctx: UiCtx): Panel {
     for (const node of barbNodes) {
       const r = Math.max(barbRadius(node.barb.level), Math.min(target, 12))
       node.hit.setAttribute('r', fmt2(r))
+    }
+    // Fortress hit areas (M7): same screen-sized touch target, never smaller than the
+    // (bigger) boss star and capped a touch higher so the larger marker stays tappable.
+    for (const node of fortNodes) {
+      node.hit.setAttribute('r', fmt2(Math.max(FORT_RADIUS, Math.min(target, 14))))
     }
   }
 
@@ -936,11 +1280,24 @@ export function createMapPanel(ctx: UiCtx): Panel {
   }
   /** Select a target by id, keep it on screen (so focus is never off-viewBox), refresh. */
   const selectAndReveal = (id: string, focus: boolean): void => {
+    selectedFortressId = null
     selectedId = id
     const b = barbarianById(ctx.store.state.world, id)
     if (b) ensureVisible(b)
     update()
     if (focus) focusNode(id)
+  }
+  /** Select a FORTRESS by id, keep it on screen, refresh (M7). Mirrors {@link selectAndReveal}. */
+  const selectFortressAndReveal = (id: string, focus: boolean): void => {
+    selectedId = null
+    selectedFortressId = id
+    const f = fortressById(ctx.store.state.world, id)
+    if (f) ensureVisible(f)
+    update()
+    if (focus) {
+      const ref = fortNodes.find((n) => n.fort.id === id)
+      if (ref) ref.g.focus()
+    }
   }
   /** Nearest barbarian from `from` inside a 90° cone toward screen direction (dx,dy). */
   const nearestInDirection = (
@@ -1042,6 +1399,70 @@ export function createMapPanel(ctx: UiCtx): Panel {
       })
       barbsGroup.appendChild(g)
       barbNodes.push({ g, title, hit, barb })
+    }
+    updateHitRadii()
+  }
+
+  /**
+   * Rebuild the fortress (boss) node set when the world changes (e.g. a save import /
+   * ascension regenerates the fortresses). Mirrors {@link rebuildBarbs} but draws a STAR
+   * (distinct shape) in the boss colour token and adds a diagonal strike shown only when
+   * razed. There are only FORTRESS_COUNT of them, so all are kept keyboard-tabbable
+   * (no roving needed — unlike the ~125 camps).
+   */
+  const rebuildFortresses = (): void => {
+    const s = ctx.store.state
+    const sig = s.seed + ':' + s.world.fortresses.length
+    if (sig === fortSig) return
+    fortSig = sig
+    fortsGroup.textContent = ''
+    fortNodes = []
+    for (const fort of s.world.fortresses) {
+      const g = document.createElementNS(SVG_NS, 'g') as SVGGElement
+      g.setAttribute('class', 'map-node map-node--fortress')
+      g.setAttribute('role', 'button')
+      g.setAttribute('tabindex', '0')
+      // Transparent, screen-sized hit circle FIRST (under the star). Inherits fill/stroke
+      // from .map-node--fortress, so both are explicitly cleared. Radius set by updateHitRadii.
+      const hit = svg('circle', {
+        cx: String(fort.x),
+        cy: String(fort.y),
+        r: String(FORT_RADIUS * 2),
+        class: 'map-node-hit',
+      }) as SVGCircleElement
+      hit.style.fill = 'transparent'
+      hit.style.stroke = 'none'
+      hit.style.pointerEvents = 'all'
+      // The boss STAR (distinct from the round camp dots); fill cascades from the <g> token.
+      const mark = svg('polygon', {
+        points: starPoints(fort.x, fort.y, FORT_RADIUS, FORT_RADIUS * 0.42),
+        class: 'map-node-fortress-mark',
+      })
+      mark.setAttribute('vector-effect', 'non-scaling-stroke')
+      // Razed strike (a diagonal slash); CSS shows it only when the node carries .is-razed.
+      const strike = svg('line', {
+        x1: fmt2(fort.x - FORT_RADIUS),
+        y1: fmt2(fort.y + FORT_RADIUS),
+        x2: fmt2(fort.x + FORT_RADIUS),
+        y2: fmt2(fort.y - FORT_RADIUS),
+        class: 'map-node-fortress-strike',
+        fill: 'none',
+      })
+      strike.setAttribute('vector-effect', 'non-scaling-stroke')
+      const title = document.createElementNS(SVG_NS, 'title')
+      g.appendChild(hit)
+      g.appendChild(mark)
+      g.appendChild(strike)
+      g.appendChild(title)
+      g.addEventListener('click', () => selectFortress(fort.id))
+      g.addEventListener('keydown', (e: KeyboardEvent) => {
+        if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+          e.preventDefault()
+          selectFortressAndReveal(fort.id, false)
+        }
+      })
+      fortsGroup.appendChild(g)
+      fortNodes.push({ g, title, hit, fort })
     }
     updateHitRadii()
   }
@@ -1162,6 +1583,34 @@ export function createMapPanel(ctx: UiCtx): Panel {
     }
   }
 
+  // Fortress aria/title (M7): distance from the active village PLUS the razed state (which
+  // flips when an assault returns), so the signature folds in both — refresh on a village
+  // switch/move OR when any fortress is razed.
+  let fortAriaSig = ''
+  const refreshFortAria = (v: Village): void => {
+    const s = ctx.store.state
+    const sig =
+      v.id + ':' + v.x + ',' + v.y + ':' + s.world.fortresses.map((f) => (f.razed ? '1' : '0')).join('')
+    if (sig === fortAriaSig) return
+    fortAriaSig = sig
+    for (const node of fortNodes) {
+      const f = node.fort
+      const dist = distance(v.x, v.y, f.x, f.y)
+      const state = f.razed ? 'zniszczona' : 'nietknięta'
+      node.g.setAttribute(
+        'aria-label',
+        f.name +
+          ', ' +
+          state +
+          ', odległość ' +
+          formatNumber(dist, 1) +
+          ' pól od aktywnej wioski. Naciśnij Enter, aby wybrać i zaplanować szturm.',
+      )
+      node.title.textContent =
+        f.name + ' · ' + formatNumber(dist, 1) + ' pól · ' + state
+    }
+  }
+
   // ---- Reactivity ----------------------------------------------------------
   const update = (): void => {
     const v = activeVillage()
@@ -1173,8 +1622,10 @@ export function createMapPanel(ctx: UiCtx): Panel {
     const mods = effectiveMods(ctx.store.state)
 
     rebuildBarbs()
+    rebuildFortresses()
     rebuildPlayers()
     refreshAria(v)
+    refreshFortAria(v)
     rebuildMarches(v)
     updateMarchMarkers(v, mods)
     applyView()
@@ -1183,10 +1634,14 @@ export function createMapPanel(ctx: UiCtx): Panel {
     if (selectedId !== null && barbarianById(world, selectedId) === undefined) {
       selectedId = null
     }
+    if (selectedFortressId !== null && fortressById(world, selectedFortressId) === undefined) {
+      selectedFortressId = null
+    }
     // Auto-focus the nearest target so the card is useful the moment the tab opens —
     // but NOT on narrow viewports, where the detail bottom-sheet would cover most of
     // the (short) map before any interaction; there the user taps a node to open it.
-    if (selectedId === null && !isNarrow()) {
+    // Skipped while a FORTRESS is selected, so its card isn't stolen by a camp (M7).
+    if (selectedId === null && selectedFortressId === null && !isNarrow()) {
       const nearest = targetsByDistance(v, world)[0]
       selectedId = nearest ? nearest.id : null
     }
@@ -1214,6 +1669,33 @@ export function createMapPanel(ctx: UiCtx): Panel {
     activeRing.setAttribute('cy', String(v.y))
     activeRing.setAttribute('r', '6.5')
     activeRing.style.display = ''
+
+    // ---- Fortress layer (M7): selection highlight, razed strike, boss ring, card swap.
+    // A camp and a fortress are never selected at once, so at most one detail card is open;
+    // toggle the camp card OFF and the fortress card ON whenever a (still-existing) fortress
+    // is selected. The camp detail branch below still runs (with no camp selected) but on the
+    // now-hidden card, so it stays a harmless no-op.
+    const selFort = selectedFortressId ? fortressById(world, selectedFortressId) : undefined
+    for (const node of fortNodes) {
+      // Read the LIVE fortress for the razed strike: within a run the node references the
+      // same object that gets mutated in place, but a world reset (ascension/era/dynasty)
+      // swaps in fresh, un-razed fortresses — looking them up by id keeps the strike honest.
+      const live = fortressById(world, node.fort.id) ?? node.fort
+      node.g.classList.toggle('is-selected', node.fort.id === selectedFortressId)
+      node.g.classList.toggle('is-razed', live.razed)
+    }
+    if (selFort) {
+      fortSelRing.setAttribute('cx', String(selFort.x))
+      fortSelRing.setAttribute('cy', String(selFort.y))
+      fortSelRing.setAttribute('r', fmt2(FORT_RADIUS + 1.8))
+      fortSelRing.style.display = ''
+    } else {
+      fortSelRing.style.display = 'none'
+    }
+    const fortressActive = selFort !== undefined
+    detail.style.display = fortressActive ? 'none' : ''
+    fortressDetail.style.display = fortressActive ? '' : 'none'
+    updateFortressDetail(v, world, mods)
 
     // Detail card.
     if (!selected) {

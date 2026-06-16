@@ -83,7 +83,7 @@ function armed(level = 1, seed = 'ach'): GameState {
   const v = s.villages.v0
   v.resources = { wood: D(50), clay: D(50), iron: D(50) }
   v.buildings.barracks = 1
-  s.world = { barbarians: [barb('b0', level, v.x + 3, v.y)] }
+  s.world = { fortresses: [], barbarians:[barb('b0', level, v.x + 3, v.y)] }
   recomputeDerived(s)
   return s
 }
@@ -559,6 +559,7 @@ function rawV12() {
       barbarians: [
         { id: 'b0', x: 210, y: 198, level: 2, name: 'Obóz barbarzyńców (poz. 2)', loyalty: 100, scouted: true },
       ],
+      fortresses: [],
     },
     battleLog: [],
     tech: {},
@@ -571,7 +572,7 @@ describe('migration v12 -> v13', () => {
   it('backfills an all-zero stats record + an empty achievements map, preserving everything else', () => {
     const m = migrate(rawV12())
 
-    expect(m.version).toBe(16)
+    expect(m.version).toBe(17)
     expect(m.version).toBe(SAVE_VERSION)
 
     // stats: every counter zero, lootHauled a Decimal zero.

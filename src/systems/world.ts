@@ -1,11 +1,14 @@
 import { RNG } from '../engine/rng'
 import { MAX_TARGET_LEVEL } from '../content/barbarians'
-import type { BarbarianVillage, Village, World } from '../engine/state'
+import { FORTRESS_COUNT, FORTRESS_LEVELS, fortressName } from '../content/fortresses'
+import type { BarbarianVillage, Fortress, Village, World } from '../engine/state'
 
 /**
- * World geometry & generation (M2.2). Turns the abstract camp ladder into a
- * SPATIAL map: barbarian villages laid out in radial rings around the capital,
- * with march time derived from the Euclidean distance between source and target.
+ * World geometry & generation (M2.2; fortresses M7). Turns the abstract camp ladder
+ * into a SPATIAL map: barbarian villages laid out in radial rings around the capital,
+ * with march time derived from the Euclidean distance between source and target. Since
+ * M7 it ALSO seeds a small, FINITE set of {@link Fortress} boss targets on far rings
+ * beyond the camps, from a SEPARATE rng stream so the barbarian list stays unchanged.
  *
  * Balance is preserved BY CONSTRUCTION. A tier-L village sits in a ring of radius
  * ~ L * {@link DISTANCE_PER_LEVEL} (= the legacy `barbarianTarget(level).distance`)
@@ -119,7 +122,57 @@ export function generateWorld(seed: string): World {
     }
   }
 
-  return { barbarians }
+  // Fortresses (M7): a SEPARATE, FINITE class of boss targets. Drawn from a DEDICATED
+  // rng stream (seed + ':fortress') so generating them never advances — and the
+  // resulting barbarian list above stays BYTE-IDENTICAL to a pre-M7 world. Placed on
+  // far rings beyond every camp tier (their levels start past MAX_TARGET_LEVEL), and
+  // nudged off any occupied cell (the capital + every barbarian, reusing `occupied`)
+  // so a fortress never shares a field with a camp or another fortress.
+  const fortresses = generateFortresses(seed, occupied)
+
+  return { barbarians, fortresses }
+}
+
+/**
+ * Deterministically place the {@link FORTRESS_COUNT} fortresses for `seed` (M7) on
+ * their OWN rng stream (`seed + ':fortress'`), so they are additive and never perturb
+ * the barbarian world. Fortress `i` sits on the ring for {@link FORTRESS_LEVELS}[i]
+ * (random angle, radius = level·DISTANCE_PER_LEVEL ± a one-ring jitter), rounded and
+ * clamped to the map, with a deterministic nudge to the next free cell on any
+ * collision against `occupied` (seeded by the caller with the capital + every
+ * barbarian). Ids are `'f'+i` in level-ascending order; every fortress starts
+ * `razed: false`. The `occupied` set is mutated so fortresses also avoid each other.
+ */
+function generateFortresses(seed: string, occupied: Set<string>): Fortress[] {
+  const rng = RNG.fromString(seed + ':fortress')
+  const fortresses: Fortress[] = []
+  for (let i = 0; i < FORTRESS_COUNT; i++) {
+    const level = FORTRESS_LEVELS[i]
+    const angle = rng.next() * Math.PI * 2
+    const radius =
+      level * DISTANCE_PER_LEVEL + rng.range(-DISTANCE_PER_LEVEL, DISTANCE_PER_LEVEL)
+    let x = clampCoord(Math.round(WORLD_CENTER.x + radius * Math.cos(angle)))
+    let y = clampCoord(Math.round(WORLD_CENTER.y + radius * Math.sin(angle)))
+    // Deterministic nudge to the next free cell on any collision (same rule as camps).
+    while (occupied.has(cellKey(x, y))) {
+      x += 1
+      if (x > WORLD_SIZE) {
+        x = 0
+        y += 1
+        if (y > WORLD_SIZE) y = 0
+      }
+    }
+    occupied.add(cellKey(x, y))
+    fortresses.push({
+      id: 'f' + i,
+      x,
+      y,
+      level,
+      name: fortressName(level),
+      razed: false,
+    })
+  }
+  return fortresses
 }
 
 /** Euclidean distance (in fields) between two map points. */
@@ -130,6 +183,11 @@ export function distance(ax: number, ay: number, bx: number, by: number): number
 /** Look up a barbarian village by id; undefined when absent (e.g. a 'legacy' id). */
 export function barbarianById(world: World, id: string): BarbarianVillage | undefined {
   return world.barbarians.find((b) => b.id === id)
+}
+
+/** Look up a fortress by id (M7); undefined when absent. Mirrors {@link barbarianById}. */
+export function fortressById(world: World, id: string): Fortress | undefined {
+  return world.fortresses.find((f) => f.id === id)
 }
 
 /** Numeric index baked into a `'b'+index` id, for a stable distance-tie ordering. */

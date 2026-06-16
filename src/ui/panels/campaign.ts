@@ -1,8 +1,9 @@
-import type { Village, BarbarianVillage, TechModifiers } from '../../engine/state'
+import type { Village, BarbarianVillage, Fortress, TechModifiers } from '../../engine/state'
 import { D } from '../../engine/decimal'
 import { formatInt, formatTime } from '../../engine/format'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
 import { barbarianTarget } from '../../content/barbarians'
+import { fortressTarget } from '../../content/fortresses'
 import {
   armyAttackPower,
   armyDefensePower,
@@ -12,8 +13,8 @@ import {
   CATA_PER_LEVEL,
 } from '../../systems/combat'
 import { villageDefenseMult } from '../../systems/buildings'
-import { stationedUnits, marchTime, canAttack, canScout } from '../../systems/marches'
-import { targetsByDistance, distance, barbarianById } from '../../systems/world'
+import { stationedUnits, marchTime, canAttack, canScout, canAttackFortress } from '../../systems/marches'
+import { targetsByDistance, distance, barbarianById, fortressById } from '../../systems/world'
 import { raidPower } from '../../systems/raids'
 import { barracksUnlocked, unitUnlocked } from '../../systems/recruitment'
 import { effectiveMods } from '../../systems/prestige'
@@ -97,6 +98,28 @@ interface TargetCard {
   loyaltyShown: number
 }
 
+/**
+ * Cached handles for the army-dependent fields of one FORTRESS card (M7). Mirrors
+ * {@link TargetCard} but without the fog-of-war / loyalty machinery — a fortress is
+ * always revealed (no scout) and never conquered (no loyalty); instead it carries a
+ * `razedTag` that surfaces the one-time inert state.
+ */
+interface FortressCard {
+  /** The concrete fortress this card dispatches an assault at (stable per build). */
+  fortress: Fortress
+  /** Wall strength after any rams (base → reduced), always shown (no fog). */
+  defense: HTMLElement
+  loot: HTMLElement
+  march: HTMLElement
+  forecast: HTMLElement
+  /** Ram effect of the composed army in WORDS; `hidden` when the army carries no rams. */
+  siegeNote: HTMLElement
+  /** „Forteca zniszczona" cue (word + glyph) — shown only for a razed fortress. */
+  razedTag: HTMLElement
+  /** „Szturm" dispatch — commits an assault via ctx.onAssaultFortress. */
+  button: HTMLButtonElement
+}
+
 /** Clamp a raw ratio*100 to a finite 0..100 percentage (NaN/∞ → full). */
 function pctOf(part: number): number {
   return Number.isFinite(part) ? Math.max(0, Math.min(100, part)) : 100
@@ -112,6 +135,12 @@ function setBar(bar: HTMLElement, pct: number): void {
 /** Total camp loot (sum across resources) for a camp tier, as a Decimal. */
 function campTotalLoot(level: number) {
   const t = barbarianTarget(level)
+  return t.loot.wood.add(t.loot.clay).add(t.loot.iron)
+}
+
+/** Total fortress cache (sum across resources) for a fortress tier (M7), as a Decimal. */
+function fortressTotalLoot(level: number) {
+  const t = fortressTarget(level)
   return t.loot.wood.add(t.loot.clay).add(t.loot.iron)
 }
 
@@ -307,6 +336,36 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   let targetCards: TargetCard[] = []
   let lastTargetSig = ''
   let lastArmySig = ''
+
+  // ---- Fortece (M7 boss targets) ------------------------------------------
+  // A FINITE, high-value class of targets distinct from the grindable camps: a fortress
+  // sits on a FAR ring, carries a much higher wall (needs a real army + tarany) and a
+  // much bigger ONE-TIME loot cache. A won szturm RAZES it for good (no conquest, no
+  // loyalty, no zwiad — always revealed) and hauls the cache home (carry-capped like any
+  // attack). They respawn fresh on every world reset (ascension / era / dynasty). Reuses
+  // the shared army composer, the .target card surface and the same battle forecast.
+  el.appendChild(h('h3', 'recruit-subtitle', 'Fortece'))
+  el.appendChild(
+    h(
+      'p',
+      'muted',
+      'Skończony zbiór potężnych fortec na dalekich pierścieniach świata. Wymagają prawdziwej armii ' +
+        'z taranami; zwycięski szturm burzy fortecę na stałe i przynosi jednorazowy, bogaty skarbiec. ' +
+        'Fortec nie da się przejąć ani zbadać — ich obrona jest zawsze widoczna.',
+    ),
+  )
+  const fortressList = h('div', 'target-list')
+  el.appendChild(fortressList)
+  const fortressMsg = h('p', 'recruit-msg muted')
+  fortressMsg.setAttribute('role', 'status')
+  fortressMsg.setAttribute('aria-live', 'polite')
+  el.appendChild(fortressMsg)
+
+  // Rebuilt when the active village (sort order) OR any fortress's razed flag changes
+  // (a won szturm flips it mid-march); the army-dependent fields ride the shared army
+  // signature gate (pokeFortresses), so a plain tick does no per-card work.
+  let fortressCards: FortressCard[] = []
+  let lastFortressSig = ''
 
   /**
    * (Re)build the target card list from `targetsByDistance(v, world)`. Sets every
@@ -615,6 +674,199 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     }
   }
 
+  /**
+   * (Re)build the fortress card list from `world.fortresses`, nearest-first (only a
+   * handful, so the sort is cheap). Sets every STATIC field (name, level, distance, the
+   * one-time reward preview and the per-fortress „Szturm" handler) once; the army-dependent
+   * fields (defence after rams / loot haul / march time / forecast / verdict) are filled by
+   * {@link pokeFortresses}. A RAZED fortress shows a „Forteca zniszczona" cue and its assault
+   * button is permanently disabled. Called only when the active village or a fortress's razed
+   * flag changes.
+   */
+  const rebuildFortresses = (v: Village): void => {
+    const world = ctx.store.state.world
+    fortressList.textContent = ''
+    fortressCards = []
+    if (world.fortresses.length === 0) {
+      fortressList.appendChild(h('p', 'queue-empty muted', 'Brak fortec na mapie.'))
+      return
+    }
+    // Nearest-first, like the camp list (targetsByDistance) — only FORTRESS_COUNT of them,
+    // so a per-build sort is negligible and never runs on a plain tick.
+    const sorted = [...world.fortresses].sort(
+      (a, b) => distance(v.x, v.y, a.x, a.y) - distance(v.x, v.y, b.x, b.y),
+    )
+    for (const fortress of sorted) {
+      const dist = Math.round(distance(v.x, v.y, fortress.x, fortress.y))
+
+      // Card chrome comes from the shared .target class (layout.css) — no inline.
+      const row = h('div', 'target')
+
+      const head = h('div', 'target-head')
+      head.appendChild(h('span', 'target-name', fortress.name))
+      head.appendChild(h('span', 'target-level num', 'poz. ' + fortress.level))
+
+      const statsLine = h('p', 'target-stats muted')
+      // Always shown (no fog of war on a fortress); filled by pokeFortresses.
+      const defense = h('span', 'num')
+      const loot = h('span', 'num')
+      const distEl = h('span', 'num', formatInt(dist) + ' pól')
+      const march = h('span', 'num')
+      statsLine.appendChild(document.createTextNode('Obrona '))
+      statsLine.appendChild(defense)
+      statsLine.appendChild(document.createTextNode(' · Łup '))
+      statsLine.appendChild(loot)
+      statsLine.appendChild(document.createTextNode(' · Odl. '))
+      statsLine.appendChild(distEl)
+      statsLine.appendChild(document.createTextNode(' · Marsz '))
+      statsLine.appendChild(march)
+
+      // One-time reward preview (STATIC — the cache value depends only on the tier): the
+      // full skarbiec the fortress holds plus the permanent trophy. The actual haul is
+      // carry-capped (shown live in „Łup" above); this states the prize on offer.
+      const reward = h(
+        'p',
+        'target-siege muted',
+        'Nagroda: jednorazowy skarbiec do ' +
+          formatInt(fortressTotalLoot(fortress.level)) +
+          ' surowców (ograniczony udźwigiem armii) + trofeum — forteca znika na stałe.',
+      )
+
+      // Ram effect (M5.3) in WORDS; a fortress is razed wholesale on a win, so catapulty do
+      // NOT tier it down (unlike a camp) — only tarany matter. Filled/toggled by pokeFortresses.
+      const siegeNote = h('p', 'target-siege muted')
+      siegeNote.hidden = true
+
+      // „Forteca zniszczona" cue (M7): word + glyph (never colour alone), shown ONLY for a
+      // razed fortress so the inert state is unmistakable beside the disabled button.
+      const razedTag = h('p', 'target-siege text-good', '✓ Forteca zniszczona.')
+      razedTag.hidden = !fortress.razed
+
+      const bottom = h('div', 'target-bottom')
+      const forecast = h('span', 'target-forecast')
+      const button = h('button', 'btn btn-primary', 'Szturm')
+      button.type = 'button'
+      // aria-disabled (not `disabled`) keeps the control focusable/hoverable so its reason
+      // (a razed/locked/empty-army verdict) reaches the user; the handler is a guarded no-op.
+      button.setAttribute(
+        'aria-label',
+        'Szturmuj ' + fortress.name + ' (poziom ' + fortress.level + ', odległość ' + dist + ' pól)',
+      )
+      button.addEventListener('click', () => {
+        const cv = activeVillage()
+        const army = readArmy(cv)
+        const verdict = canAttackFortress(cv, fortress, army)
+        if (!verdict.ok) {
+          fortressMsg.textContent = verdict.reason ?? 'Nie można ruszyć na fortecę.'
+          update()
+          return
+        }
+        // No fog of war on a fortress (always revealed): show the loss FORECAST against the
+        // effective wall (base × ram factor) using the SAME effective mods the tick resolves
+        // with (effectiveMods), and require a confirm on anything that is not a CERTAIN win —
+        // a bad ±25% luck roll can flip a probable win to a wipe — exactly like a scouted camp.
+        const mods = effectiveMods(ctx.store.state)
+        const effDef = fortressTarget(fortress.level).defensePower * ramDefenseFactor(army)
+        const fc = attackForecast(armyAttackPower(army, mods), effDef)
+        if (!fc.certainWin && !window.confirm(attackConfirmMessage(fc))) {
+          return
+        }
+        const ok = ctx.onAssaultFortress(ctx.activeVillageId.value, fortress.id, army)
+        if (ok) {
+          fortressMsg.textContent = 'Wysłano szturm: ' + fortress.name + '.'
+          for (const uid of ATTACK_UNIT_IDS) armyPicks[uid].input.value = '0'
+        } else {
+          fortressMsg.textContent = 'Nie udało się ruszyć na fortecę.'
+        }
+        update()
+      })
+      bottom.appendChild(forecast)
+      bottom.appendChild(button)
+
+      row.appendChild(head)
+      row.appendChild(statsLine)
+      row.appendChild(reward)
+      row.appendChild(siegeNote)
+      row.appendChild(razedTag)
+      row.appendChild(bottom)
+      fortressList.appendChild(row)
+      fortressCards.push({ fortress, defense, loot, march, forecast, siegeNote, razedTag, button })
+    }
+  }
+
+  /**
+   * Refresh the army-dependent fields of every fortress card from the composed army — the
+   * effective wall after any rams, the carry-capped haul, the march time, the three-state
+   * forecast and the „Szturm" verdict. Mirrors {@link pokeTargets}'s scouted branch (a
+   * fortress is always revealed). A RAZED fortress is rendered inert (dashed fields, button
+   * disabled). Only called when the army (or barracks unlock) changes — never on a plain tick.
+   */
+  const pokeFortresses = (
+    v: Village,
+    army: Record<UnitId, number>,
+    composed: number,
+    mods: TechModifiers,
+  ): void => {
+    const carry = armyCarry(army)
+    const atkPow = armyAttackPower(army, mods)
+    // Rams scale the fortress wall DOWN for the fight (ramDefenseFactor; ramless = ×1),
+    // mirrored from marches.advanceMarches so the forecast can't disagree with the engine.
+    const ramFactor = ramDefenseFactor(army)
+    const ramPart =
+      ramFactor < 1
+        ? 'Tarany osłabią obronę fortecy o ' + Math.round((1 - ramFactor) * 100) + '%.'
+        : ''
+    for (const card of fortressCards) {
+      if (card.fortress.razed) {
+        // Inert: dash the dynamic fields and keep the button disabled (the razed cue
+        // already explains why). canAttackFortress would also reject — we skip the work.
+        card.march.textContent = '—'
+        card.defense.textContent = '—'
+        card.loot.textContent = '—'
+        card.forecast.textContent = '—'
+        card.forecast.classList.remove('forecast-win', 'forecast-lose')
+        card.siegeNote.hidden = true
+        card.button.setAttribute('aria-disabled', 'true')
+        card.button.title = 'Forteca już zniszczona.'
+        continue
+      }
+      const t = fortressTarget(card.fortress.level)
+      const base = t.defensePower
+      // March time is pure geometry (distance × speed); shown whenever an army is composed.
+      card.march.textContent =
+        composed > 0 ? formatTime(marchTime(v, card.fortress, army, mods)) : '—'
+      // Show the EFFECTIVE wall after any ram cut (base → reduced) so the number lines up
+      // with the army's attack power and the win verdict below.
+      if (ramFactor < 1) {
+        const eff = Math.round(base * ramFactor)
+        card.defense.textContent = formatInt(base) + ' → ' + formatInt(eff)
+      } else {
+        card.defense.textContent = formatInt(base)
+      }
+      const total = fortressTotalLoot(card.fortress.level)
+      if (composed > 0) {
+        // Haul = min(army carry, total cache) — the exact sum the assault lands.
+        const cd = D(carry)
+        const haul = cd.lt(total) ? cd : total
+        card.loot.textContent = formatInt(haul)
+        // Three-state forecast (M5.5) against the effective wall, accounting for the ±25%
+        // combat luck the tick rolls — carried in WORDS, with colour only as a tint.
+        const fc = attackForecast(atkPow, base * ramFactor)
+        card.forecast.textContent = fc.text
+        applyForecastClass(card.forecast, fc.cls)
+      } else {
+        card.loot.textContent = 'do ' + formatInt(total)
+        card.forecast.textContent = '—'
+        card.forecast.classList.remove('forecast-win', 'forecast-lose')
+      }
+      card.siegeNote.textContent = ramPart
+      card.siegeNote.hidden = ramPart.length === 0
+      const verdict = canAttackFortress(v, card.fortress, army)
+      card.button.setAttribute('aria-disabled', verdict.ok ? 'false' : 'true')
+      card.button.title = verdict.ok ? '' : (verdict.reason ?? '')
+    }
+  }
+
   // ---- Marches in progress -------------------------------------------------
   el.appendChild(h('h3', 'recruit-subtitle', 'Marsze w toku'))
   const marchList = h('ul', 'march-list')
@@ -726,6 +978,15 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       lastArmySig = '' // force the poke below
       lastScoutCtrlSig = '' // force the scout-button refresh below
     }
+    // Fortress list (M7): rebuild when the active village (sort order) OR any fortress's
+    // razed flag changes (a won szturm flips it mid-march). Force a card re-poke right after
+    // — the shared army gate below fills BOTH the camp and the fortress cards.
+    const fortressSig = v.id + ':' + world.fortresses.map((f) => (f.razed ? '1' : '0')).join('')
+    if (fortressSig !== lastFortressSig) {
+      lastFortressSig = fortressSig
+      rebuildFortresses(v)
+      lastArmySig = '' // force the poke below
+    }
     // Army-dependent card fields: poke when the composed army / unlock changes OR when
     // any camp's scouted flag flips (M5.2) — revealing its defence/loot/forecast.
     const scoutedSig = targetCards.map((c) => (c.barb.scouted ? '1' : '0')).join('')
@@ -734,6 +995,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     if (armySig !== lastArmySig) {
       lastArmySig = armySig
       pokeTargets(v, army, composed, mods)
+      pokeFortresses(v, army, composed, mods)
     }
 
     // ---- Scout control (M5.2) ----
@@ -813,12 +1075,18 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
             'march-item ' + (m.phase === 'returning' ? 'is-returning' : 'is-outbound'),
           )
           const main = h('div', 'march-main')
-          // Name the concrete target village; fall back to the tier label for a
-          // legacy/migrated march whose id no longer resolves in the world.
-          const barb = barbarianById(world, m.targetId)
-          const baseName = barb
-            ? barb.name
-            : 'Wioska barbarzyńska (poz. ' + m.targetLevel + ')'
+          // Name the concrete target; a fortress march (M7, targetType 'fortress') resolves
+          // in world.fortresses, a camp/scout march in world.barbarians. Fall back to the
+          // tier label for a legacy/migrated march whose id no longer resolves in the world.
+          const isFortressMarch = m.targetType === 'fortress'
+          const target = isFortressMarch
+            ? fortressById(world, m.targetId)
+            : barbarianById(world, m.targetId)
+          const baseName = target
+            ? target.name
+            : isFortressMarch
+              ? 'Forteca (poz. ' + m.targetLevel + ')'
+              : 'Wioska barbarzyńska (poz. ' + m.targetLevel + ')'
           // Tag a recon march so the list distinguishes „Zwiad" from an attack (M5.2).
           const targetName = (m.kind === 'scout' ? 'Zwiad — ' : '') + baseName
           main.appendChild(h('span', 'march-target', targetName))

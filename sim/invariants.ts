@@ -7,15 +7,18 @@ import {
   recomputeDerived,
   RESOURCE_IDS,
   INITIAL_BUILDINGS,
+  NO_TECH_MODS,
   type GameState,
   type Stats,
   type Village,
   type World,
   type BarbarianVillage,
+  type Fortress,
 } from '../src/engine/state'
 import { BUILDINGS, BUILDING_IDS } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
+import { FORTRESS_COUNT, fortressTarget } from '../src/content/fortresses'
 import { TECH_NODES, TECH_NODE_IDS, TECH_ROOTS } from '../src/content/tech'
 import {
   PRESTIGE_NODES,
@@ -47,7 +50,7 @@ import { autoAttackOnce } from '../src/systems/automation'
 import { advanceRaids } from '../src/systems/raids'
 import { RNG } from '../src/engine/rng'
 import { villageDefenseMult } from '../src/systems/buildings'
-import { WORLD_SIZE } from '../src/systems/world'
+import { WORLD_SIZE, generateWorld } from '../src/systems/world'
 import { LOYALTY_MAX } from '../src/systems/conquest'
 import {
   techHasCycle,
@@ -2739,5 +2742,238 @@ export function checkLuckDeterminism(seed: string, seconds: number): InvariantRe
           : !hasLuck
             ? 'no battle report carried a luck roll (luck not exercised)'
             : `rngState diverged online (${big.rngState}) vs offline (${chunked.rngState})`,
+  }
+}
+
+// --- M7 fortress (finite boss targets) coverage ------------------------------------------
+//
+// Fortresses are an ADDITIVE, FINITE class of far-ring boss targets drawn from a SEPARATE
+// ':fortress' rng stream, so the barbarian world stays BYTE-IDENTICAL to pre-M7. A victorious
+// assault razes a fortress ONCE and for good (razed = true, never re-attackable) and hauls a big
+// one-time loot cache home — there is no loyalty / scouting / catapult tier-razing. These
+// deterministic proof-of-mechanic checks (no bot, no Math.random) mirror the M5.3 siege coverage:
+// the fortress world is well-shaped + deterministic from the seed, a (razed) fortress survives
+// save/load, and a winning assault razes the boss exactly once, refuses any second assault, and
+// never strands the run.
+
+/** Rams the fortress raze-once scenario fields — >= 30 floors {@link ramDefenseFactor} at 0.4 (-60% wall). */
+const FORTRESS_RAZE_RAMS = 40
+/** Safety multiple over the bare worst-luck win threshold for the raze-once axeman core (a comfortable win on any roll). */
+const FORTRESS_RAZE_MARGIN = 2
+/** Horizon (game-seconds) the raze-once assault is simulated for — well past a far-ring round trip. */
+const FORTRESS_HORIZON = 30000
+
+/**
+ * The WEAKEST (lowest-level, nearest) fortress of a world — the boss the raze-once scenario
+ * assaults so the seeded army stays a manageable size. Reads the level (rather than assuming
+ * 'f0') to stay robust to a data reorder. generateWorld always spawns {@link FORTRESS_COUNT}.
+ */
+function weakestFortress(world: World): Fortress {
+  return world.fortresses.reduce((a, b) => (b.level < a.level ? b : a))
+}
+
+/**
+ * Fortress world is WELL-SHAPED (M7), checked per sample like {@link checkWorldConsistency}. Over
+ * `world.fortresses` it asserts each fortress has a non-empty string id, FINITE coordinates, an
+ * INTEGER level >= 1, a non-empty name and a BOOLEAN razed flag, and that NO TWO fortresses share
+ * a map cell — so a razing (razed flips true) or a save round-trip can never corrupt the boss list.
+ * (The fresh-world placement correctness — count, far rings, off every camp/capital cell — is the
+ * stronger one-shot {@link checkFortressDeterminism}; this guards the LIVE list as it mutates.)
+ */
+export function checkFortressConsistency(state: GameState): InvariantResult {
+  const world: World | undefined = state.world
+  if (world === undefined || !Array.isArray(world.fortresses)) {
+    return {
+      name: 'fortress-consistency',
+      ok: false,
+      detail: 'state.world.fortresses missing or not an array',
+    }
+  }
+  const issues: string[] = []
+  const occupied = new Map<string, string>()
+  for (const f of world.fortresses as Fortress[]) {
+    if (typeof f.id !== 'string' || f.id.length === 0) issues.push(`bad id ${String(f.id)}`)
+    if (!Number.isFinite(f.x) || !Number.isFinite(f.y)) issues.push(`${f.id} non-finite coords (${f.x},${f.y})`)
+    if (!Number.isInteger(f.level) || f.level < 1) issues.push(`${f.id} level=${f.level}`)
+    if (typeof f.name !== 'string' || f.name.length === 0) issues.push(`${f.id} empty name`)
+    if (typeof f.razed !== 'boolean') issues.push(`${f.id} razed=${String(f.razed)}`)
+    const key = f.x + ',' + f.y
+    const prev = occupied.get(key)
+    if (prev !== undefined) issues.push(`${f.id} shares cell ${key} with ${prev}`)
+    occupied.set(key, f.id)
+  }
+  return {
+    name: 'fortress-consistency',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Fortresses are DETERMINISTIC from the seed (M7): two {@link generateWorld} calls on the same seed
+ * must agree on BOTH the fortress list AND the barbarian list (the latter confirms the barbarian list
+ * stays reproducible WITH fortress generation in the same call). NOTE: this a==b comparison proves
+ * determinism only, NOT byte-identity to the PRE-M7 baseline — if fortress generation DID perturb the
+ * ':world' stream, both a and b would be perturbed identically and still match. The against-baseline
+ * byte-identity guarantee (the additive contract) is pinned by the golden-snapshot test in
+ * tests/fortresses.test.ts; here we also assert the FINITE shape of a fresh world: exactly
+ * {@link FORTRESS_COUNT} fortresses, each well-shaped, born un-razed, on far rings BEYOND the camp
+ * ladder ({@link MAX_TARGET_LEVEL}), no two sharing a cell. Pure / self-contained — no clock, no bot.
+ */
+export function checkFortressDeterminism(seed: string): InvariantResult {
+  const issues: string[] = []
+  const a = generateWorld(seed)
+  const b = generateWorld(seed)
+
+  if (JSON.stringify(a.fortresses) !== JSON.stringify(b.fortresses)) {
+    issues.push('two generateWorld(seed) produced different fortresses')
+  }
+  if (JSON.stringify(a.barbarians) !== JSON.stringify(b.barbarians)) {
+    issues.push('two generateWorld(seed) produced different barbarians (generation not deterministic)')
+  }
+  if (a.fortresses.length !== FORTRESS_COUNT) {
+    issues.push(`fortress count ${a.fortresses.length} != FORTRESS_COUNT ${FORTRESS_COUNT}`)
+  }
+
+  const occupied = new Map<string, string>()
+  for (const f of a.fortresses) {
+    if (typeof f.id !== 'string' || f.id.length === 0) issues.push(`bad id ${String(f.id)}`)
+    if (!Number.isFinite(f.x) || !Number.isFinite(f.y)) issues.push(`${f.id} non-finite coords (${f.x},${f.y})`)
+    if (!Number.isInteger(f.level) || f.level <= MAX_TARGET_LEVEL) {
+      issues.push(`${f.id} level ${f.level} not beyond the camp ladder (> ${MAX_TARGET_LEVEL})`)
+    }
+    if (typeof f.name !== 'string' || f.name.length === 0) issues.push(`${f.id} empty name`)
+    if (f.razed !== false) issues.push(`${f.id} born razed`)
+    const key = f.x + ',' + f.y
+    const prev = occupied.get(key)
+    if (prev !== undefined) issues.push(`${f.id} shares cell ${key} with ${prev}`)
+    occupied.set(key, f.id)
+  }
+
+  return {
+    name: 'fortress-determinism',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `${a.fortresses.length} fortresses (levels ${a.fortresses.map((f) => f.level).join('/')}, all > ${MAX_TARGET_LEVEL}); both lists deterministic (baseline byte-identity pinned by the golden snapshot)`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Fortress save/load round-trip (M7): the fortress list — INCLUDING a razed fortress (the bit that
+ * survives the run) — must ride the real export/import (base64) path byte-for-byte. The whole-state
+ * {@link checkRoundTrip} proves serialize/deserialize is loss-free; this is the targeted proof that
+ * the v17 save carries `world.fortresses` (and the razed flag) specifically. Mirrors
+ * {@link checkEraRoundTrip}. Pure function of a fresh seeded state.
+ */
+export function checkFortressSaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  if (state.world.fortresses.length === 0) {
+    return { name: 'fortress-save-load', ok: false, detail: 'fresh world has no fortresses to round-trip' }
+  }
+  // Raze one so the round-trip must also carry the FLIPPED flag, not just the as-generated list.
+  state.world.fortresses[0].razed = true
+  const restored = importSave(exportSave(state))
+  const a = JSON.stringify(state.world.fortresses)
+  const b = JSON.stringify(restored.world.fortresses)
+  const razedSurvived = restored.world.fortresses.some((f) => f.razed)
+  const ok = a === b && razedSurvived
+  return {
+    name: 'fortress-save-load',
+    ok,
+    detail: ok
+      ? `${restored.world.fortresses.length} fortresses (incl. a razed one) survived export/import byte-identically`
+      : a !== b
+        ? 'fortresses changed across export/import'
+        : 'the razed flag did not survive export/import',
+  }
+}
+
+/**
+ * A winning fortress assault RAZES the boss exactly ONCE (M7), and a razed fortress is permanently
+ * out of play. Drives the REAL engine ({@link sendAttack}(…, 'fortress') + {@link simulate}) on a
+ * fresh seeded capital with raids frozen out, fielding rams (to floor the wall) plus an axeman core
+ * sized to win even at WORST luck, and asserts:
+ *
+ *  - the assault WINS and sets `fortress.razed = true`, bumping `stats.fortressesRazed` by exactly 1, AND
+ *  - a SECOND dispatch at the same fortress is REFUSED ({@link sendAttack} returns false — one-time), AND
+ *  - further simulation leaves it razed with the counter unchanged (it never re-fires), AND
+ *  - razing introduces NO SOFTLOCK ({@link chooseAction} still offers a progress action), AND
+ *  - the state stays sound (no NaN / negative / over-cap resources, the army books balance).
+ *
+ * Value-driven: the core is sized from the LIVE fortress defence, so a Balance retune of the
+ * fortress curves still passes as long as the seeded army can crack it. Pure / deterministic — no bot.
+ */
+export function checkFortressRazeOnce(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  if (state.world.fortresses.length === 0) {
+    return { name: 'fortress-raze-once', ok: false, detail: 'fresh world has no fortresses to assault' }
+  }
+  const v = firstVillage(state)
+  v.buildings.barracks = 1
+  v.buildings.academy = 1 // the siege (Taran) gate
+  recomputeDerived(state)
+  v.resources = { wood: D(1e9), clay: D(1e9), iron: D(1e9) }
+  v.popCap = D(1e12)
+  v.raidTimer = 1e9 // freeze raids so the ONLY report is this assault
+
+  const fortress = weakestFortress(state.world)
+  const target = fortressTarget(fortress.level)
+
+  // Rams floor the wall; size an axeman core that wins even on the unluckiest roll, with margin.
+  const army = zeroArmy()
+  army.ram = FORTRESS_RAZE_RAMS
+  const effDef = target.defensePower * ramDefenseFactor(army)
+  army.axeman = Math.ceil(effDef / (WORST_LUCK * UNITS.axeman.attack)) * FORTRESS_RAZE_MARGIN
+  for (const id of UNIT_IDS) v.units[id] = army[id]
+
+  const issues: string[] = []
+  const before = state.stats.fortressesRazed
+  const dispatched = sendAttack(v, state.world, state.battleLog, fortress.id, army, NO_TECH_MODS, 'fortress')
+  if (!dispatched) {
+    return { name: 'fortress-raze-once', ok: false, detail: 'could not dispatch the fortress assault' }
+  }
+  simulate(state, FORTRESS_HORIZON)
+
+  if (!fortress.razed) issues.push('fortress not razed after a winning assault')
+  if (state.stats.fortressesRazed !== before + 1) {
+    issues.push(`fortressesRazed ${before} -> ${state.stats.fortressesRazed} (expected +1)`)
+  }
+
+  // ONE-TIME: a razed fortress can never be attacked again — a fresh dispatch is refused outright.
+  const reArmy = zeroArmy()
+  reArmy.ram = FORTRESS_RAZE_RAMS
+  reArmy.axeman = army.axeman
+  for (const id of UNIT_IDS) v.units[id] = reArmy[id]
+  if (sendAttack(v, state.world, state.battleLog, fortress.id, reArmy, NO_TECH_MODS, 'fortress')) {
+    issues.push('a razed fortress accepted a second assault (must be one-time)')
+  }
+  simulate(state, FORTRESS_HORIZON)
+  if (!fortress.razed) issues.push('razed fortress lost its razed flag after the re-attempt')
+  if (state.stats.fortressesRazed !== before + 1) {
+    issues.push(`fortressesRazed re-fired after razing: now ${state.stats.fortressesRazed}`)
+  }
+
+  // NO SOFTLOCK: razing a fortress must never strand the run — a progress action still exists.
+  if (chooseAction(v, state.world, effectiveMods(state)) === null) {
+    issues.push('no progress action available after razing the fortress (softlock)')
+  }
+
+  // State sanity: no NaN / negative / over-cap resources, balanced army books.
+  for (const r of RESOURCE_IDS) {
+    const res = v.resources[r]
+    if (!isFiniteDecimal(res) || res.lt(0) || res.gt(v.storageCap)) issues.push(`capital.${r}=${res.toString()}`)
+  }
+  const ac = checkArmyConsistency(state)
+  if (!ac.ok) issues.push(`army-consistency: ${ac.detail ?? 'failed'}`)
+
+  return {
+    name: 'fortress-raze-once',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `razed ${fortress.name} (wall ${target.defensePower}) once; a razed fortress refuses re-assault and never re-fires`
+        : issues.join('; '),
   }
 }

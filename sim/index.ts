@@ -179,6 +179,16 @@ function evalTargets(r: RunResult): TargetCheck[] {
       detail: `conquered ${m.villagesConquered} (own ${m.villagesOwned}, target conquered >= ${TARGETS.minVillagesConquered})`,
     },
     {
+      // M7: the bot must raze at least minFortressesRazed fortresses in the dedicated boss-target run
+      // (runner.runFortress). Measured apart from the MAIN run because the main loop churns its
+      // population, so its standing army never amasses into a boss-cracking stack (lifetime.fortressesRazed
+      // stays 0 there); the dedicated run amasses a real all-in army + full siege train on the proven
+      // endgame economy and razes the nearest far-ring fortress.
+      name: 'fortresses-razed',
+      ok: m.fortressDriveRazed >= TARGETS.minFortressesRazed,
+      detail: `razed ${m.fortressDriveRazed} fortress(es) in the dedicated siege run (target >= ${TARGETS.minFortressesRazed})`,
+    },
+    {
       name: 'tech-nodes-purchased',
       ok: m.techPurchases >= TARGETS.minTechPurchases,
       detail: `bought ${m.techPurchases} tech levels (${m.techNodesOwned} nodes, ${m.techLevelsOwned} levels; target >= ${TARGETS.minTechPurchases})`,
@@ -466,14 +476,14 @@ async function main(): Promise<void> {
   // --- M5.4 lifetime stats + achievements (end of the MAIN run) ---
   console.log('--- Lifetime stats & achievements (end) ---')
   console.log(
-    'seed     | attacks (won/lost) | loot hauled | raids (rep/lost) | razed | scouts | founded/conq | achievements',
+    'seed     | attacks (won/lost) | loot hauled | raids (rep/lost) | razed (camps/forts) | scouts | founded/conq | achievements',
   )
   for (const r of results) {
     const m = r.metrics
     const lt = m.lifetime
     console.log(
       `${m.seed.padEnd(8)} | ${String(lt.attacksWon)}/${lt.attacksLost} | ${lt.lootHauled} | ` +
-        `${lt.raidsRepelled}/${lt.raidsLost} | ${String(lt.campsRazed).padStart(5)} | ${String(lt.scoutsReturned).padStart(6)} | ` +
+        `${lt.raidsRepelled}/${lt.raidsLost} | ${String(lt.campsRazed)}/${String(lt.fortressesRazed).padStart(5)} | ${String(lt.scoutsReturned).padStart(6)} | ` +
         `${lt.villagesFounded}/${lt.villagesConquered} | ${m.achievementsUnlocked}/${m.achievementsTotal}`,
     )
   }

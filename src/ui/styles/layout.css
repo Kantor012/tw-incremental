@@ -651,6 +651,50 @@ html {
   filter: drop-shadow(0 0 3px var(--accent));
 }
 
+/* ---- Forteca (M7): znacznik bossa — GWIAZDA, odrębny kształt I barwa ----- */
+/* Forteca to skończony cel-boss, wizualnie odrębny od okrągłych, czerwonych obozów:
+ * pięcioramienna gwiazda w barwie „fioletu łupu" (token --cat-plunder, NIE --bad).
+ * Rozróżnienie niesie KSZTAŁT + etykieta, nie sam kolor (WCAG 1.4.1). `fill` kaskaduje
+ * z <g> na gwiazdę (<polygon>); obrys w kolorze tła oddziela sąsiadów, a
+ * non-scaling-stroke trzyma stałą grubość przy zoomie viewBox (jak u barbarzyńców). */
+.map-node--fortress {
+  fill: var(--cat-plunder);
+  stroke: var(--border);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Hover — jaśniejszy, grubszy obrys (sygnał poza kolorem). */
+.map-node--fortress:hover {
+  stroke: var(--accent-2);
+  stroke-width: 2;
+}
+
+/* Zaznaczona forteca — złoty obrys + poświata (spójnie z zaznaczonym obozem). */
+.map-node--fortress.is-selected {
+  stroke: var(--accent);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 3px var(--accent));
+}
+
+/* Zniszczona forteca (razed) — przygaszona i PRZEKREŚLONA: stan niosą też kształt
+ * (ukośna kreska) i przezroczystość, nie sam kolor. */
+.map-node--fortress.is-razed {
+  opacity: 0.4;
+}
+
+/* Ukośna kreska „przekreślenia" — ukryta, dopóki węzeł nie ma klasy .is-razed. */
+.map-node-fortress-strike {
+  display: none;
+  stroke: var(--text);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.map-node--fortress.is-razed .map-node-fortress-strike {
+  display: inline;
+}
+
 /* ---- Linie marszów (SVG <line>/<path> aktywnej wioski) ----------------- */
 /* Nieinteraktywne (nie zasłaniają kliknięć w węzły). Stała grubość przy zoomie.
  * Przerywana linia „płynie" subtelną animacją w kierunku zależnym od fazy. */
@@ -782,6 +826,17 @@ html {
 
 .map-legend-swatch.is-barb {
   background-color: var(--bad);
+}
+
+/* Forteca w legendzie — barwa znacznika bossa, ale WYCIĘTA w gwiazdę, więc legenda
+ * powtarza rozróżnienie kształtem (nie tylko kolorem). */
+.map-legend-swatch.is-fortress {
+  background-color: var(--cat-plunder);
+  border-radius: 0;
+  clip-path: polygon(
+    50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%,
+    50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%
+  );
 }
 
 /* „Linia marszu" — krótka przerywana kreska zamiast kropki. */

@@ -12,6 +12,7 @@ import {
 } from '../engine/state'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
+import { fortressTarget } from '../content/fortresses'
 import {
   battleOutcome,
   armyAttackPower,
@@ -23,7 +24,7 @@ import {
 } from './combat'
 import { RNG } from '../engine/rng'
 import { barracksUnlocked } from './recruitment'
-import { distance, barbarianById } from './world'
+import { distance, barbarianById, fortressById } from './world'
 import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
 
 /**
@@ -175,11 +176,34 @@ export function marchTime(
 }
 
 /**
+ * Shared army gate for a dispatch: every per-type count is a non-negative integer that
+ * does not exceed the units AT HOME ({@link stationedUnits}), and the army is non-empty.
+ * The barracks / target-specific guards are checked by the caller FIRST (so each target
+ * kind orders its own reasons), keeping {@link canAttack} (camp) and
+ * {@link canAttackFortress} (M7) from duplicating this roster validation.
+ */
+function homeArmyOk(
+  v: Village,
+  units: Record<UnitId, number>,
+): { ok: boolean; reason?: string } {
+  const home = stationedUnits(v)
+  let total = 0
+  for (const id of UNIT_IDS) {
+    const n = units[id] ?? 0
+    if (!Number.isInteger(n) || n < 0) return { ok: false, reason: 'Niepoprawna armia.' }
+    if (n > home[id]) return { ok: false, reason: 'Za mało jednostek w domu.' }
+    total += n
+  }
+  if (total <= 0) return { ok: false, reason: 'Pusta armia.' }
+  return { ok: true }
+}
+
+/**
  * Whether an attack from `v` against the concrete barbarian village `target` can be
  * launched right now, with a PL reason when not. Gates on: the barracks (the
  * military unlock), a valid camp tier (the target's `level` must be in
- * [1, MAX_TARGET_LEVEL]), integer non-negative per-type counts that do not exceed
- * the units AT HOME, and a non-empty army.
+ * [1, MAX_TARGET_LEVEL]), and the shared roster gate ({@link homeArmyOk}: integer
+ * non-negative per-type counts within the units AT HOME, and a non-empty army).
  */
 export function canAttack(
   v: Village,
@@ -194,16 +218,25 @@ export function canAttack(
   ) {
     return { ok: false, reason: 'Niepoprawny cel.' }
   }
-  const home = stationedUnits(v)
-  let total = 0
-  for (const id of UNIT_IDS) {
-    const n = units[id] ?? 0
-    if (!Number.isInteger(n) || n < 0) return { ok: false, reason: 'Niepoprawna armia.' }
-    if (n > home[id]) return { ok: false, reason: 'Za mało jednostek w domu.' }
-    total += n
-  }
-  if (total <= 0) return { ok: false, reason: 'Pusta armia.' }
-  return { ok: true }
+  return homeArmyOk(v, units)
+}
+
+/**
+ * Whether a FORTRESS assault from `v` against `fortress` (M7) can be launched right now,
+ * with a PL reason when not. Mirrors {@link canAttack} but for the boss target: gates on
+ * the barracks, the fortress NOT being razed (a razed fortress is permanently out of
+ * play), and the same shared roster gate ({@link homeArmyOk}). There is deliberately NO
+ * camp-tier ceiling — a fortress sits beyond MAX_TARGET_LEVEL — and no scouting/loyalty
+ * gate (a fortress is never scouted or conquered).
+ */
+export function canAttackFortress(
+  v: Village,
+  fortress: { razed: boolean },
+  units: Record<UnitId, number>,
+): { ok: boolean; reason?: string } {
+  if (!barracksUnlocked(v)) return { ok: false, reason: 'Wymaga koszar (poziom 1).' }
+  if (fortress.razed) return { ok: false, reason: 'Forteca już zniszczona.' }
+  return homeArmyOk(v, units)
 }
 
 /**
@@ -236,16 +269,20 @@ export function canScout(
 }
 
 /**
- * Dispatch an attack from `v` at the barbarian village `targetId` (looked up in
- * `world`). No-op returning false when the target is absent (e.g. a stale id) or
- * {@link canAttack} rejects. Records the march as a snapshot — the dispatched army,
- * the target's id, its camp tier (`targetLevel`) and its map coordinates
+ * Dispatch an attack from `v` at the target `targetId` (looked up in `world`). The
+ * trailing `targetType` (M7) selects the target class: `'camp'` (default — so EVERY
+ * existing caller is unchanged) looks up a {@link BarbarianVillage} and gates with
+ * {@link canAttack}; `'fortress'` looks up a {@link Fortress} and gates with
+ * {@link canAttackFortress} (rejecting a razed/missing fortress). No-op returning false
+ * when the target is absent (e.g. a stale id), a fortress is already razed, or the gate
+ * rejects. Records the march as a snapshot — the dispatched army, the target's id, the
+ * resolved `targetType`, the target tier (`targetLevel`) and its map coordinates
  * (`targetX`/`targetY`) — WITHOUT debiting `v.units`: those units remain owned (and
- * population-counted) while away; {@link stationedUnits} subtracts them so they
- * can't be sent twice. Freezing the level + coordinates here means a world
- * regenerated/edited later never perturbs an army already in flight. The global
- * battle `log` is taken explicitly (unused on dispatch; resolution happens in
- * {@link advanceMarches}) to keep the combat-entry-point signatures uniform.
+ * population-counted) while away; {@link stationedUnits} subtracts them so they can't be
+ * sent twice. Freezing the type + level + coordinates here means a world regenerated/
+ * edited later never perturbs an army already in flight. The global battle `log` is taken
+ * explicitly (unused on dispatch; resolution happens in {@link advanceMarches}) to keep
+ * the combat-entry-point signatures uniform.
  */
 export function sendAttack(
   v: Village,
@@ -254,14 +291,27 @@ export function sendAttack(
   targetId: string,
   units: Record<UnitId, number>,
   mods: TechModifiers = NO_TECH_MODS,
+  targetType: 'camp' | 'fortress' = 'camp',
 ): boolean {
-  const target = barbarianById(world, targetId)
-  if (target === undefined) return false
-  if (!canAttack(v, target, units).ok) return false
+  // Resolve the concrete target to its common geometry/tier and apply the kind-specific
+  // gate. A missing camp, or a missing/razed fortress, is a silent no-op (no march).
+  let target: { id: string; level: number; x: number; y: number }
+  if (targetType === 'fortress') {
+    const fortress = fortressById(world, targetId)
+    if (fortress === undefined || fortress.razed) return false
+    if (!canAttackFortress(v, fortress, units).ok) return false
+    target = fortress
+  } else {
+    const barb = barbarianById(world, targetId)
+    if (barb === undefined) return false
+    if (!canAttack(v, barb, units).ok) return false
+    target = barb
+  }
   const sent = emptyUnits()
   for (const id of UNIT_IDS) sent[id] = units[id] ?? 0
   v.marches.push({
     kind: 'attack',
+    targetType,
     targetId: target.id,
     targetLevel: target.level,
     targetX: target.x,
@@ -301,6 +351,8 @@ export function sendScout(
   sent.scout = scoutCount
   v.marches.push({
     kind: 'scout',
+    // Scouting is camp-only (M7): a fortress is never scouted (no fog — always revealed).
+    targetType: 'camp',
     targetId: target.id,
     targetLevel: target.level,
     targetX: target.x,
@@ -314,25 +366,26 @@ export function sendScout(
 }
 
 /**
- * Loot actually hauled: min(effective carry, total camp loot), split proportionally,
- * floored. The army's raw carry capacity is scaled by `mods.lootMult` (M3.2 tech
- * "plunder" multiplier, >= 1; {@link NO_TECH_MODS} = 1 = no bonus), so plunder perks let
- * the SAME survivors haul more — still capped by what the camp actually holds
+ * Loot actually hauled: min(effective carry, total target loot), split proportionally,
+ * floored. Takes the TARGET's total loot map directly — `barbarianTarget(level).loot` for
+ * a camp or `fortressTarget(level).loot` for a fortress (M7) — so the SAME carry-cap
+ * maths serves both classes. The army's raw carry capacity is scaled by `mods.lootMult`
+ * (M3.2 tech "plunder" multiplier, >= 1; {@link NO_TECH_MODS} = 1 = no bonus), so plunder
+ * perks let the SAME survivors haul more — still capped by what the target actually holds
  * (totalTarget), so it never invents resources. Deterministic.
  */
 function computeLoot(
   survivors: Record<UnitId, number>,
-  targetLevel: number,
+  targetLoot: ResourceMap,
   mods: TechModifiers,
 ): ResourceMap {
-  const target = barbarianTarget(targetLevel)
   const carry = D(armyCarry(survivors)).mul(mods.lootMult)
-  const totalTarget = target.loot.wood.add(target.loot.clay).add(target.loot.iron)
+  const totalTarget = targetLoot.wood.add(targetLoot.clay).add(targetLoot.iron)
   if (carry.lte(0) || totalTarget.lte(0)) return emptyLoot()
   const haul: Decimal = carry.lt(totalTarget) ? carry : totalTarget
   const loot = {} as ResourceMap
   for (const id of RESOURCE_IDS) {
-    loot[id] = haul.mul(target.loot[id]).div(totalTarget).floor()
+    loot[id] = haul.mul(targetLoot[id]).div(totalTarget).floor()
   }
   return loot
 }
@@ -408,6 +461,14 @@ function lootSum(loot: ResourceMap): string {
  * true (no battle, no casualties, no loot, no conquest event) and flips to the return
  * leg; returning completion simply drops the march (the scouts, still counted in
  * `v.units`, are home). No battle report is logged for a scout.
+ *
+ * FORTRESS marches (M7, `targetType === 'fortress'`) resolve through the SAME battle
+ * maths as a camp attack — fortressTarget supplies a much higher defence + a much bigger
+ * loot cache, rams crack the wall and luck applies identically — but on a WIN they raze
+ * the {@link Fortress} PERMANENTLY (`razed = true`, one-time), bump `stats.fortressesRazed`
+ * and haul the carry-capped cache home; there is NO catapult tier-razing, NO loyalty/
+ * conquest and NO scouting (a fortress is a finite boss, not a grindable/conquerable camp).
+ * On a LOSS the army is wiped exactly like a camp loss. A camp attack stays byte-identical.
  *
  * Every report is tagged with `villageId: v.id`. Iterates back-to-front so a
  * completed march can be spliced without disturbing the indices still to process.
@@ -496,11 +557,17 @@ export function advanceMarches(
         continue
       }
 
-      // ATTACK → resolve the engagement. Rams (M5.3) crack the wall: the camp's base
-      // defence is scaled down by ramDefenseFactor(m.units) (clamped, ramless = ×1) for
-      // THIS battle only, so a stack carrying rams can break a tier a same-size ramless
-      // army would lose to. Loot/losses still derive from the snapshotted tier.
-      const target = barbarianTarget(m.targetLevel)
+      // ATTACK → resolve the engagement. Pick the target's curves by kind (M7): a camp
+      // resolves via barbarianTarget, a FORTRESS (boss) via fortressTarget — both expose
+      // the same { defensePower, loot } shape, so the rest of the resolution is shared.
+      // Rams (M5.3) crack EITHER wall: the base defence is scaled down by
+      // ramDefenseFactor(m.units) (clamped, ramless = ×1) for THIS battle only, so a stack
+      // carrying rams can break a tier a same-size ramless army would lose to. Loot/losses
+      // still derive from the snapshotted tier.
+      const isFortress = m.targetType === 'fortress'
+      const target = isFortress
+        ? fortressTarget(m.targetLevel)
+        : barbarianTarget(m.targetLevel)
       const effDef = target.defensePower * ramDefenseFactor(m.units)
       // LUCK (M5.5): when the tick threads in an RNG, draw exactly ONE symmetric
       // +/-25% multiplier for THIS resolved attack and apply it to the army's power
@@ -535,7 +602,53 @@ export function advanceMarches(
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
       const losses = applyCasualties(v, sent, survivors)
       if (stats !== undefined) stats.attacksWon += 1 // M5.4: lifetime counter
-      const loot = computeLoot(survivors, m.targetLevel, mods)
+
+      if (isFortress) {
+        // FORTRESS WIN (M7): raze the boss PERMANENTLY (one-time — a razed fortress is
+        // never attackable again), bump the lifetime trophy counter, and log the victory.
+        // No catapult tier-razing, no loyalty/conquest, no scouting — a fortress is a
+        // FINITE boss, not a grindable/conquerable camp.
+        const fortress = fortressById(world, m.targetId)
+        // The one-time cache is gated on the raze TRANSITION: ONLY the army that flips razed
+        // false->true hauls it. The send-time gate blocks a fresh assault on an ALREADY-razed
+        // fortress, but not several stacks dispatched at the same un-razed fortress before any
+        // resolves — so without this, every winning stack would haul a full cache and the prize
+        // could be multiplied N-fold. A stack arriving after the boss is already razed (another
+        // army cracked it earlier this sub-step) still wins and returns its survivors, but with
+        // an EMPTY haul (no cache, no lootHauled credit).
+        let cache = emptyLoot()
+        if (fortress !== undefined && !fortress.razed) {
+          fortress.razed = true
+          if (stats !== undefined) stats.fortressesRazed += 1
+          cache = computeLoot(survivors, target.loot, mods)
+        }
+        const fortressReport: BattleReport = {
+          kind: 'attack',
+          villageId: v.id,
+          targetLevel: m.targetLevel,
+          won: true,
+          lootSum: lootSum(cache),
+          losses,
+        }
+        if (luck !== undefined) fortressReport.luck = luck // M5.5: record the roll
+        pushBattleReport(log, fortressReport)
+        if (totalUnits(survivors) <= 0) {
+          // Won but the whole army attrited to zero — no one carries the cache home.
+          marches.splice(i, 1)
+          break
+        }
+        // Symmetric return (see the camp path below): survivors haul the cache home (empty
+        // when this stack did not flip the raze, so nothing is double-delivered).
+        m.units = survivors
+        m.loot = cache
+        m.phase = 'returning'
+        m.remaining = marchTime(v, { x: m.targetX, y: m.targetY }, sent, mods)
+        continue
+      }
+
+      // CAMP WIN: the carry-capped haul (computed only on the camp path now — the fortress
+      // branch above computes its cache conditionally on the one-time raze).
+      const loot = computeLoot(survivors, target.loot, mods)
 
       // Siege razing (M5.3): on a WON attack, catapults in the DISPATCHED stack
       // permanently lower the live target's camp tier by catapultLevelDamage(m.units),

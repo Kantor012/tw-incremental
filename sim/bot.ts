@@ -5,6 +5,7 @@ import {
   type GameState,
   type Village,
   type World,
+  type Fortress,
   type TechModifiers,
 } from '../src/engine/state'
 import { BUILDING_IDS, type BuildingId } from '../src/content/buildings'
@@ -17,15 +18,18 @@ import {
   freePopulation,
 } from '../src/systems/recruitment'
 import { stationedUnits } from '../src/systems/marches'
-import { targetsByDistance } from '../src/systems/world'
+import { targetsByDistance, distance } from '../src/systems/world'
 import {
   battleOutcome,
   armyAttackPower,
   armyDefensePower,
   armyCarry,
   applyLosses,
+  ramDefenseFactor,
+  WORST_LUCK,
 } from '../src/systems/combat'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../src/content/barbarians'
+import { fortressTarget } from '../src/content/fortresses'
 import { foundCost, findFoundingSpot, canFound, playerVillageCount } from '../src/systems/villages'
 import { raidPower } from '../src/systems/raids'
 import { nobleCount, LOYALTY_NOBLE_HIT } from '../src/systems/conquest'
@@ -98,6 +102,7 @@ export type BotAction =
   | { kind: 'build'; id: BuildingId }
   | { kind: 'recruit'; unitId: UnitId; count: number }
   | { kind: 'attack'; targetId: string; targetLevel: number; units: Record<UnitId, number> }
+  | { kind: 'assault'; fortressId: string; fortressLevel: number; units: Record<UnitId, number> }
   | { kind: 'found'; x: number; y: number }
 
 /**
@@ -619,6 +624,166 @@ export function chooseConquest(state: GameState): Extract<BotAction, { kind: 're
     const batch = Math.min(need, recruitBatch(v, 'noble', freePopulation(v).toNumber()))
     if (batch >= 1 && canRecruit(v, 'noble', batch).ok) {
       return { kind: 'recruit', unitId: 'noble', count: batch }
+    }
+  }
+  return null
+}
+
+// --- M7 fortress assault (finite boss targets) ------------------------------------------
+//
+// A SEPARATE strike pipeline, mirroring the M2.4 conquest pipeline: fortresses are FINITE,
+// far-ring boss targets that need a REAL siege army to crack. The bot accumulates a siege
+// train (Tarany / rams) behind the raid-repelling wall, then — the moment its home strike
+// force (the whole siege train + the combat surplus) would crack the NEAREST un-razed
+// fortress EVEN ON THE UNLUCKIEST luck roll — assaults it, razing it for a one-time loot
+// cache. Kept OUT of {@link chooseAction} (the no-softlock probe) on purpose, like
+// conquest / founding: "you can always prep a fortress" must not mask a per-village economy
+// stall. Pure functions of state + the catalogues, so determinism / save-load continuation
+// hold with fortresses in play — and a run that never fields a beatable strike force simply
+// never assaults one (only a modest siege-train recruit ever fires), so the existing combat
+// loop is barely perturbed.
+
+/**
+ * Siege train size the bot holds at home for a fortress assault (M7). {@link ramDefenseFactor}
+ * floors at RAM_DEF_MIN (a -60% wall) once a stack carries (1 - 0.4)/RAM_DEF_RED = 30 Tarany,
+ * so 30 buys the FULL wall reduction — past it a ram adds only its tiny attack. Held behind the
+ * raid wall and EXCLUDED from the camp-raid surplus (treated like the noble strike force in
+ * {@link marchSurplus}), so the camp loop never marches the siege train off to a barbarian camp.
+ */
+const FORTRESS_TARGET_RAMS = 30
+
+/**
+ * Highest fraction of the assault army the bot will accept losing to raze a fortress. Set above
+ * {@link MAX_ATTACK_LOSS} (a fortress is a one-time prize worth a costlier win) but still
+ * bounded, so paired with the WORST-luck win check and the surviving-carry check below the bot
+ * only ever assaults a fortress it cracks even on the unluckiest roll AND still hauls the cache
+ * home.
+ */
+const MAX_FORTRESS_LOSS = 0.5
+
+/**
+ * A COPY of `world.fortresses` sorted ascending by Euclidean distance from village `v` (nearest
+ * first), with the numeric id index ('f0','f1',…) as a deterministic tiebreak — mirrors
+ * {@link targetsByDistance} for camps so the assault always picks the closest beatable fortress
+ * (the shortest siege march). The source array is never mutated; pure + deterministic.
+ */
+function fortressesByDistance(v: Village, world: World): Fortress[] {
+  return world.fortresses
+    .map((f) => ({ f, d: distance(v.x, v.y, f.x, f.y) }))
+    .sort((p, q) =>
+      p.d !== q.d ? p.d - q.d : Number(p.f.id.slice(1)) - Number(q.f.id.slice(1)),
+    )
+    .map((p) => p.f)
+}
+
+/**
+ * The fortress strike force for `v` (M7): the WHOLE home siege train (every Taran) plus the
+ * combat SURPLUS beyond the raid-repelling garrison. Mirrors {@link chooseConquestAttack}'s
+ * "marchSurplus + all nobles", with rams as the special hoarded unit instead of nobles — rams
+ * are EXCLUDED from the protected garrison baseline (exactly as nobles are in {@link marchSurplus}),
+ * so sending the whole siege train never eats into the wall the home keeps against raids: the
+ * surplus is sized so the NON-ram garrison left behind still holds the raid threshold. Returns an
+ * all-zero roster when no surplus can be spared.
+ */
+function fortressStrikeForce(
+  v: Village,
+  mods: TechModifiers = NO_TECH_MODS,
+): Record<UnitId, number> {
+  const home = stationedUnits(v)
+  const out = emptyRoster()
+  out.ram = home.ram // the whole siege train marches
+  // Surplus of the NON-siege combat units, treating rams (and nobles) as already committed —
+  // excluded from the defended garrison — so the wall stays >= threshold when the rams leave.
+  const combatHome = { ...home, noble: 0, ram: 0 }
+  const homeDef = armyDefensePower(combatHome, mods)
+  if (homeDef <= 0) return out
+  const surplusDef = homeDef - raidThreshold(v)
+  if (surplusDef <= 0) return out
+  const frac = surplusDef / homeDef
+  for (const id of UNIT_IDS) {
+    if (id === 'noble' || id === 'ram') continue
+    out[id] = Math.floor(combatHome[id] * frac)
+  }
+  return out
+}
+
+/**
+ * Pick a fortress assault for the strike force currently AT HOME in `v` (M7), or null when none
+ * is winnable. Scans fortresses nearest-first ({@link fortressesByDistance}) and takes the first
+ * still-un-razed one the strike force beats with the rams' wall reduction applied
+ * ({@link ramDefenseFactor}) EVEN AT WORST-CASE LUCK ({@link WORST_LUCK}) — so the bot never
+ * throws its siege train at a fortress a bad roll could lose — within the {@link MAX_FORTRESS_LOSS}
+ * budget AND with at least one surviving hauler (so the loot cache actually comes home). Needs at
+ * least one ram (a fortress wall is uncrackable without siege) and a strike force above
+ * {@link STRIKE_MIN_ARMY}. Pure over (village + world); safe to call repeatedly.
+ */
+function chooseFortressTarget(
+  v: Village,
+  world: World,
+  mods: TechModifiers = NO_TECH_MODS,
+): Extract<BotAction, { kind: 'assault' }> | null {
+  const army = fortressStrikeForce(v, mods)
+  if ((army.ram ?? 0) < 1) return null // a fortress wall is uncrackable without siege
+  if (homeArmySize(army) < STRIKE_MIN_ARMY) return null
+  // Plan for the UNLUCKIEST roll: the army's power × WORST_LUCK must still beat the (ram-reduced)
+  // wall, so the assault wins on every possible luck draw — never a coin-flip with the siege train.
+  const atkWorst = armyAttackPower(army, mods) * WORST_LUCK
+  if (atkWorst <= 0) return null
+  for (const f of fortressesByDistance(v, world)) {
+    if (f.razed) continue
+    const target = fortressTarget(f.level)
+    const effDef = target.defensePower * ramDefenseFactor(army)
+    const outcome = battleOutcome(atkWorst, effDef)
+    if (!outcome.attackerWins) continue
+    if (outcome.attackerLossFrac > MAX_FORTRESS_LOSS) continue
+    // Survivors must still carry the cache home, else the assault nets nothing.
+    if (armyCarry(applyLosses(army, outcome.attackerLossFrac)) <= 0) continue
+    return { kind: 'assault', fortressId: f.id, fortressLevel: f.level, units: army }
+  }
+  return null
+}
+
+/**
+ * FORTRESS pipeline (M7): the capital's one fortress move this step, or null. Mirrors
+ * {@link chooseConquest}:
+ *
+ *  1. GATE on the academy — the Taran (siege) is academy-gated, so until the Pałac stands there
+ *     is nothing to do here (the bot builds it via {@link chooseAction}'s priority).
+ *  2. STRIKE when a home strike force cracks the nearest un-razed fortress even at worst luck
+ *     ({@link chooseFortressTarget}) — razes it for the one-time cache.
+ *  3. Otherwise TRAIN the siege train toward {@link FORTRESS_TARGET_RAMS} rams, but only once the
+ *     home garrison repels raids (a raid would wipe the whole home stack, rams included), so the
+ *     wall always comes first — exactly like the noble accumulation in {@link chooseConquest}.
+ *
+ * State-level (like {@link chooseConquest} / {@link chooseFounding}) and consulted once per step
+ * by the runner; pure + deterministic, so determinism / save-load continuation hold. It naturally
+ * self-limits: a razed fortress is skipped forever, and there are only FORTRESS_COUNT of them.
+ */
+export function chooseFortressAssault(
+  state: GameState,
+): Extract<BotAction, { kind: 'recruit' | 'assault' }> | null {
+  const v = state.villages[state.villageOrder[0]]
+  if (!barracksUnlocked(v)) return null
+  if (v.buildings.academy <= 0) return null // the siege (Taran) gate
+
+  // M3.2: project power/defence with the account-wide tech bonuses, matching what the engine
+  // resolves with. Derived from state.tech (deterministic). It only ever UNDER-counts when
+  // prestige is active (prestige's attackMult is omitted) — which is SAFE here, since the bot
+  // just stays more conservative about whether a fortress is winnable.
+  const mods = aggregateTechMods(state.tech)
+
+  const assault = chooseFortressTarget(v, state.world, mods)
+  if (assault !== null) return assault
+
+  // Build the siege train behind the raid wall (rams accumulate like nobles; a successful raid
+  // would otherwise wipe the whole home stack, the siege train included).
+  if (!homeRepelsRaid(v, mods)) return null
+  const haveRams = v.units.ram + queuedUnits(v, 'ram')
+  if (haveRams < FORTRESS_TARGET_RAMS) {
+    const need = FORTRESS_TARGET_RAMS - haveRams
+    const batch = Math.min(need, recruitBatch(v, 'ram', freePopulation(v).toNumber()))
+    if (batch >= 1 && canRecruit(v, 'ram', batch).ok) {
+      return { kind: 'recruit', unitId: 'ram', count: batch }
     }
   }
   return null

@@ -125,6 +125,27 @@ mountApp(root, {
     }
     return ok
   },
+  onAssaultFortress: (villageId: VillageId, fortressId: string, units: Record<UnitId, number>) => {
+    // ASSAULT a fortress (M7): the SAME dispatch path as onAttack, with the trailing
+    // targetType set to 'fortress' so sendAttack looks the target up in world.fortresses,
+    // gates it via canAttackFortress (rejecting a razed/missing fortress) and snapshots the
+    // 'fortress' class onto the march. The army folds in the EFFECTIVE modifiers (march_speed
+    // / attack_mult / loot_mult) exactly like a camp attack. Commit + persist only on a send.
+    const ok = sendAttack(
+      store.state.villages[villageId],
+      store.state.world,
+      store.state.battleLog,
+      fortressId,
+      units,
+      effectiveMods(store.state),
+      'fortress',
+    )
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onScout: (villageId: VillageId, targetId: string, scoutCount: number) => {
     // Dispatch a SCOUT march (M5.2): the scouts travel to the camp, flip its
     // `scouted` flag on arrival (revealing defence/loot in the UI), and return
@@ -252,7 +273,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.20.0',
+  version: '0.21.0',
   offlineSeconds,
 })
 

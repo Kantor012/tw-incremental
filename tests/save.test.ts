@@ -49,6 +49,7 @@ import { WORLD_CENTER } from '../src/systems/world'
 function sampleMarch(): March {
   return {
     kind: 'attack',
+    targetType: 'camp',
     targetId: 'b0',
     targetLevel: 3,
     targetX: 212,
@@ -753,6 +754,7 @@ function v11State(): GameState {
   v.marches = [
     {
       kind: 'scout',
+      targetType: 'camp',
       targetId: target.id,
       targetLevel: target.level,
       targetX: target.x,
@@ -843,6 +845,7 @@ function v12State(): GameState {
   v.marches = [
     {
       kind: 'attack',
+      targetType: 'camp',
       targetId: target.id,
       targetLevel: target.level,
       targetX: target.x,

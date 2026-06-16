@@ -225,6 +225,17 @@ export interface RunMetrics {
   /** Attacks the AUTO-ATTACK routine dispatched-and-resolved over the coverage run. */
   automationAttacked: number
 
+  // --- M7 fortress (boss-target) reachability ---
+  /**
+   * Fortresses razed in the SEPARATE fortress-driving run (see runner.runFortress) — the bot-
+   * reachability proof for the M7 boss target. Measured apart from the MAIN run on purpose: the main
+   * loop CHURNS its population (recruit -> march -> attrition), so its standing army never accumulates
+   * into a boss-cracking stack and {@link lifetime}.fortressesRazed stays 0 there; the dedicated run
+   * instead amasses a real all-in army + the full siege train on the proven endgame economy and razes
+   * the nearest far-ring fortress. The fortresses-razed balance target reads THIS, not the main run.
+   */
+  fortressDriveRazed: number
+
   // --- M5.4 lifetime stats + achievements ---
   /**
    * The permanent lifetime {@link import('../src/engine/state').Stats} counters at the END of the
@@ -250,6 +261,8 @@ export interface LifetimeStatsMetrics {
   raidsRepelled: number
   raidsLost: number
   campsRazed: number
+  /** Lifetime FORTRESSES razed (M7) — the boss-target trophy counter, mirrors {@link campsRazed}. */
+  fortressesRazed: number
   scoutsReturned: number
   villagesFounded: number
   villagesConquered: number
@@ -475,6 +488,7 @@ export function collect(
   era: EraRunStats,
   dynasty: DynastyRunStats,
   automation: AutomationRunStats,
+  fortressDriveRazed: number,
 ): RunMetrics {
   const first = firstVillage(state)
 
@@ -602,6 +616,9 @@ export function collect(
     automationRecruited: automation.recruited,
     automationAttacked: automation.attacked,
 
+    // M7: fortresses razed by the dedicated boss-target run (bot reachability).
+    fortressDriveRazed,
+
     // M5.4: snapshot the final lifetime counters + the achievement unlock tally straight off
     // the state (both bumped only on the deterministic tick path). lootHauled → exact string.
     lifetime: {
@@ -611,6 +628,7 @@ export function collect(
       raidsRepelled: state.stats.raidsRepelled,
       raidsLost: state.stats.raidsLost,
       campsRazed: state.stats.campsRazed,
+      fortressesRazed: state.stats.fortressesRazed,
       scoutsReturned: state.stats.scoutsReturned,
       villagesFounded: state.stats.villagesFounded,
       villagesConquered: state.stats.villagesConquered,

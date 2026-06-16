@@ -9,10 +9,21 @@ import { simulate } from '../src/engine/tick'
 import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
 import { BUILDING_IDS, BUILDINGS } from '../src/content/buildings'
-import { recruit } from '../src/systems/recruitment'
-import { sendAttack } from '../src/systems/marches'
+import { recruit, canRecruit, freePopulation } from '../src/systems/recruitment'
+import { sendAttack, stationedUnits } from '../src/systems/marches'
 import { foundVillage } from '../src/systems/villages'
 import { purchaseTech } from '../src/systems/tech'
+import { TECH_NODES, TECH_NODE_IDS } from '../src/content/tech'
+import { fortressTarget } from '../src/content/fortresses'
+import { UNIT_IDS, UNITS } from '../src/content/units'
+import {
+  armyAttackPower,
+  ramDefenseFactor,
+  battleOutcome,
+  applyLosses,
+  armyCarry,
+  WORST_LUCK,
+} from '../src/systems/combat'
 import {
   effectiveMods,
   ascend,
@@ -49,6 +60,10 @@ import {
   checkRamCracks,
   checkCatapultRazes,
   checkM53Determinism,
+  checkFortressConsistency,
+  checkFortressDeterminism,
+  checkFortressSaveLoad,
+  checkFortressRazeOnce,
   checkTechTree,
   checkTechState,
   checkPrestigeTree,
@@ -80,6 +95,7 @@ import {
   chooseAction,
   chooseFounding,
   chooseConquest,
+  chooseFortressAssault,
   chooseTech,
   chooseAscend,
   choosePrestige,
@@ -174,6 +190,27 @@ const ERA_TICKS = 12000
  * dynasty + era + ascension caps, so the loop always terminates regardless of the budget.
  */
 const DYNASTY_TICKS = 16000
+
+/**
+ * Step budget for the SEPARATE M7 fortress (boss-target) run. Sized so a maxed capital can train its
+ * all-in siege strike force (the full ram train, then axemen up to the popCap — sequential training on
+ * the recruit queue) AND march it to the nearest far-ring fortress and back, with headroom. The run is
+ * a single pass (no determinism/split replays — it measures bot REACHABILITY, not save fidelity, which
+ * {@link checkFortressRazeOnce} / {@link checkFortressSaveLoad} already pin), so the budget is a small
+ * add over the main run.
+ */
+const FORTRESS_TICKS = 16000
+
+/** Full ram train the fortress run holds — {@link ramDefenseFactor} floors the wall at 30 Tarany. */
+const FORTRESS_DRIVE_RAMS = 30
+
+/**
+ * Loss budget the fortress driver assaults within (mirrors the bot's MAX_FORTRESS_LOSS): it waits until
+ * its all-in stack wins at WORST luck losing no more than this fraction, so > 40% survive to haul the
+ * one-time cache home — and so the win has real margin (a thin win is fragile to any future drift in the
+ * economy / fortress curves) rather than razing on a 99.7%-casualty coin-flip.
+ */
+const FORTRESS_DRIVE_MAX_LOSS = 0.5
 
 /**
  * Span (game-seconds) of the SEPARATE M5.1 automation coverage run. One hour is long enough
@@ -271,6 +308,26 @@ function step(
         rec += conquest.count
       }
     } else if (sendAttack(v, state.world, state.battleLog, conquest.targetId, conquest.units, mods)) {
+      attacked++
+    }
+  }
+
+  // M7 fortress pipeline, consulted AFTER conquest but BEFORE the per-village economy so the
+  // siege strike force gets first claim on the combat surplus (before camp raids drain it).
+  // One fortress move per step (train a Taran OR assault the nearest beatable un-razed fortress
+  // via sendAttack(…, 'fortress')); self-limited and pure, so determinism / save-load continuation
+  // hold. Capital-scoped, like the loop. chooseFortressAssault derives its own (identical) mods to
+  // project power; the live recruit / sendAttack here are charged with this step's `mods`.
+  const fortress = chooseFortressAssault(state)
+  if (fortress !== null) {
+    if (fortress.kind === 'recruit') {
+      if (recruit(v, fortress.unitId, fortress.count, mods)) {
+        recruited[fortress.unitId] += fortress.count
+        rec += fortress.count
+      }
+    } else if (
+      sendAttack(v, state.world, state.battleLog, fortress.fortressId, fortress.units, mods, 'fortress')
+    ) {
       attacked++
     }
   }
@@ -392,6 +449,7 @@ function runContinuous(
       invariants.push(...tag(runInvariants(state), phase))
       invariants.push(...tag([checkArmyConsistency(state)], phase))
       invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkFortressConsistency(state)], phase))
       invariants.push(...tag([checkVillagePlacement(state)], phase))
       invariants.push(...tag([checkLoyalty(state)], phase))
       invariants.push(...tag([checkTechState(state)], phase))
@@ -417,6 +475,7 @@ function runContinuous(
     invariants.push(...tag(runInvariants(state), 'final'))
     invariants.push(...tag([checkArmyConsistency(state)], 'final'))
     invariants.push(...tag([checkWorldConsistency(state)], 'final'))
+    invariants.push(...tag([checkFortressConsistency(state)], 'final'))
     invariants.push(...tag([checkVillagePlacement(state)], 'final'))
     invariants.push(...tag([checkLoyalty(state)], 'final'))
     invariants.push(...tag([checkTechState(state)], 'final'))
@@ -1147,6 +1206,112 @@ function runAutomationCoverage(seed: string, seconds: number): AutomationRun {
  *  - 'offline-determinism': chunked offline catch-up vs one big step (combat-armed),
  *  - 'marches-terminate': a dispatched army always resolves within bounded time.
  */
+/** Units of `unitId` still queued for training in `v` (mirrors bot.queuedUnits). */
+function queuedCount(v: GameState['villages'][string], unitId: UnitId): number {
+  let n = 0
+  for (const o of v.recruitQueue) if (o.unitId === unitId) n += o.count
+  return n
+}
+
+/** A fresh all-zero roster over every unit id. */
+function zeroRoster(): Record<UnitId, number> {
+  const r = {} as Record<UnitId, number>
+  for (const id of UNIT_IDS) r[id] = 0
+  return r
+}
+
+/**
+ * Recruit `unitId` up to `target` total (trained + queued) in `v`, paying real cost from the real
+ * coffers and respecting the real popCap — the batch is the shortfall, clamped by the affordable count
+ * and the free population. No-op when already at target, broke, or out of population. Returns the units
+ * actually ordered (0 when nothing could be).
+ */
+function recruitToward(
+  v: GameState['villages'][string],
+  unitId: UnitId,
+  target: number,
+  mods: ReturnType<typeof effectiveMods>,
+): number {
+  const have = v.units[unitId] + queuedCount(v, unitId)
+  if (have >= target) return 0
+  const def = UNITS[unitId]
+  const room = Math.floor(freePopulation(v).toNumber() / def.pop)
+  const afford = Math.min(
+    Math.floor(v.resources.wood.toNumber() / def.cost.wood),
+    Math.floor(v.resources.clay.toNumber() / def.cost.clay),
+    Math.floor(v.resources.iron.toNumber() / def.cost.iron),
+  )
+  const batch = Math.min(target - have, room, afford)
+  if (batch < 1 || !canRecruit(v, unitId, batch).ok) return 0
+  recruit(v, unitId, batch, mods)
+  return batch
+}
+
+/**
+ * M7 fortress (boss-target) run — the BOT-reachability proof the main run cannot give. The main loop
+ * CHURNS its population (recruit -> march -> ~30% attrition), so its standing army never accumulates
+ * into a boss-cracking stack; the fortress is a finite ONE-TIME prize, not a grind, so a real player
+ * instead commits: amass a real army + the full siege train, then march it at the wall once. This
+ * driver does exactly that on a fresh seeded capital handed the PROVEN endgame economy — every building
+ * AND every tech node at its data-defined max (deterministic, the very state the main run reaches), the
+ * warehouse the main run sits pinned at, and (raids frozen, like {@link checkFortressRazeOnce}, so the
+ * mechanic — not raid survival, covered elsewhere — is what is measured) recruits the ram train then
+ * axemen toward the real popCap, HOLDING them home, and assaults the nearest un-razed fortress the home
+ * stack beats even at WORST luck (rams applied). The economy is REAL — real popCap from the maxed farm,
+ * real recruit cost/time, real production refilling the coffers; only the slow grind to the maxed state
+ * is short-circuited, and the army is recruited honestly within the popCap (no army/pop cheat, unlike
+ * the engine-path {@link checkFortressRazeOnce}). Pure + deterministic. Returns how many it razed.
+ */
+export function runFortress(seed: string, ticks: number, dt: number): number {
+  const state = createInitialState(seed, 0)
+  const v = state.villages[state.villageOrder[0]]
+  // The proven endgame economy, set deterministically (data-driven — no army/pop cheat).
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  for (const nodeId of TECH_NODE_IDS) state.tech[nodeId] = TECH_NODES[nodeId].maxLevel
+  recomputeDerived(state)
+  // Start at the cap the main run sits pinned at; production refills it as the strike force trains.
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  v.raidTimer = ticks * dt + 1e9 // freeze raids: isolate the fortress mechanic from raid attrition.
+  const mods = effectiveMods(state)
+
+  for (let i = 0; i < ticks; i++) {
+    // Train the siege train first (it gates the assault), then fill the rest of the popCap with axemen.
+    recruitToward(v, 'ram', FORTRESS_DRIVE_RAMS, mods)
+    recruitToward(v, 'axeman', Number.MAX_SAFE_INTEGER, mods)
+
+    // Assault the nearest un-razed fortress the HOME stack beats at worst luck — but only when no
+    // fortress march is already in flight (one all-in at a time). Fortresses are stored level-ascending
+    // (f0,f1,…), so the first un-razed is the nearest/weakest.
+    const inFlight = v.marches.some((m) => m.targetType === 'fortress')
+    if (!inFlight) {
+      const home = stationedUnits(v)
+      const strike = zeroRoster()
+      strike.axeman = home.axeman
+      strike.ram = Math.min(home.ram, FORTRESS_DRIVE_RAMS)
+      if (strike.ram >= 1 && strike.axeman >= 1) {
+        const atkWorst = armyAttackPower(strike, mods) * WORST_LUCK
+        const wallFactor = ramDefenseFactor(strike)
+        for (const f of state.world.fortresses) {
+          if (f.razed) continue
+          const effDef = fortressTarget(f.level).defensePower * wallFactor
+          const outcome = battleOutcome(atkWorst, effDef)
+          // Hold until the all-in stack wins even on the UNLUCKIEST roll AND keeps it to the loss
+          // budget (so > 40% survive to haul the big cache home) — a player commits a real army, not
+          // a coin-flip suicide stack. Below the bar the driver keeps recruiting toward the popCap.
+          if (!outcome.attackerWins) continue
+          if (outcome.attackerLossFrac > FORTRESS_DRIVE_MAX_LOSS) continue
+          if (armyCarry(applyLosses(strike, outcome.attackerLossFrac)) <= 0) continue
+          sendAttack(v, state.world, state.battleLog, f.id, strike, mods, 'fortress')
+          break
+        }
+      }
+    }
+
+    simulate(state, dt)
+  }
+  return state.stats.fortressesRazed
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -1351,6 +1516,19 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkCatapultRazes(seed))
   invariants.push(checkM53Determinism(seed, OFFLINE_CHECK_SECONDS))
 
+  // M7 fortress (finite boss targets) — deterministic proof-of-mechanic checks (no bot, no RNG
+  // beyond the seeded combat luck). Fortresses are an additive separate array from a separate
+  // rng stream, so a no-fortress run is byte-identical to pre-M7 (the world-consistency /
+  // determinism / round-trip checks above stay unchanged). These assert: the fortress world is
+  // well-shaped + deterministic from the seed with the barbarian list byte-identical
+  // (fortress-determinism); a (razed) fortress survives the real save/load path
+  // (fortress-save-load); and a winning assault razes the boss exactly once, refuses any second
+  // assault, and never strands the run (fortress-raze-once). The bot-driven fortress assaults are
+  // exercised on the MAIN run above (their well-shapedness sampled via checkFortressConsistency).
+  invariants.push(checkFortressDeterminism(seed))
+  invariants.push(checkFortressSaveLoad(seed))
+  invariants.push(checkFortressRazeOnce(seed))
+
   // M5.4 lifetime stats + achievements. The MAIN run's deterministic tick path bumps the
   // counters (combat / founding / conquest) and runs checkAchievements every sub-step, so the
   // final primary state already carries an accumulated, settled record. We assert it ACCUMULATED
@@ -1408,6 +1586,12 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkAutoAttackLuckSafe(seed))
   invariants.push(checkLuckDeterminism(seed, OFFLINE_CHECK_SECONDS))
 
+  // M7: SEPARATE fortress (boss-target) run — the bot-reachability proof the main run cannot give (the
+  // main loop churns its population, so its standing army never accumulates into a boss-cracking stack).
+  // Single pass: it measures REACHABILITY, not save fidelity (checkFortressRazeOnce / checkFortressSaveLoad
+  // already pin the engine + save paths), so no determinism/split replays are needed.
+  const fortressDriveRazed = runFortress(seed, FORTRESS_TICKS, dt)
+
   const metrics = collect(
     seed,
     ticks,
@@ -1418,6 +1602,7 @@ export function runOne(seed: string, ticks: number): RunResult {
     era.stats,
     dynasty.stats,
     automation.stats,
+    fortressDriveRazed,
   )
   const ok = invariants.every((r) => r.ok)
   return { metrics, invariants, ok }

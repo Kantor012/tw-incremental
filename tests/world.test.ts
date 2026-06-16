@@ -210,6 +210,7 @@ describe('targetsByDistance', () => {
         { id: 'b1', x: 50, y: 0, level: 2, name: 'b', loyalty: 100, scouted: false },
         { id: 'b2', x: 0, y: 10, level: 3, name: 'c', loyalty: 100, scouted: false },
       ],
+      fortresses: [],
     }
     const sorted = targetsByDistance(villageAt(0, 0), tieWorld)
     expect(sorted.map((b) => b.id)).toEqual(['b0', 'b2', 'b1'])

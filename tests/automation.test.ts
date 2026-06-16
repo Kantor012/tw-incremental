@@ -416,7 +416,7 @@ function singleCampState(level: number, seed = 'worst-luck'): GameState {
   const s = createInitialState(seed, 0)
   const v = s.villages.v0
   v.buildings.barracks = 1
-  s.world = { barbarians: [camp(level, v)] }
+  s.world = { fortresses: [], barbarians:[camp(level, v)] }
   return s
 }
 

@@ -51,7 +51,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 16
+export const SAVE_VERSION = 17
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -507,6 +507,51 @@ export function migrate(raw: any): any {
         : { points: 0, totalEarned: 0, dynasties: 0, nodes: {} },
       version: 16,
     }),
+    // v16 -> v17: fortresses (M7). A v16 save predates the FINITE class of boss targets and
+    // the per-march target discriminant, so backfill three additive bits WITHOUT disturbing
+    // the player's progress or the barbarian world:
+    //  - `world.fortresses` — DETERMINISTICALLY regenerated from the run seed via
+    //    generateWorld(s.seed).fortresses (its OWN rng stream, so the barbarian list is left
+    //    byte-identical). A fresh, all-unrazed set is the honest start: razing is an EVENT
+    //    that leaves no recoverable trace on an old save. A forward-compat save that already
+    //    carries an array `world.fortresses` keeps it verbatim;
+    //  - every in-flight march gains `targetType: 'camp'` (every pre-M7 march is a camp
+    //    attack/scout) unless it already carries a string one (forward-compat);
+    //  - `stats.fortressesRazed` — the lifetime trophy counter — seeded to 0.
+    // Malformed entries are left as-is so validateState rejects them loudly. Nothing else is
+    // touched (no new economic multiplier/currency — the reward is loot + a trophy stat only),
+    // so a migrated run is byte-identical to pre-M7 until a fortress is actually assaulted.
+    // Nothing is recomputed here; importSave's recomputeDerived pass runs afterwards exactly
+    // as for every other migration.
+    16: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        const marches = Array.isArray(v.marches)
+          ? v.marches.map((m: any) =>
+              isObject(m)
+                ? { ...m, targetType: typeof m.targetType === 'string' ? m.targetType : 'camp' }
+                : m,
+            )
+          : v.marches
+        villages[id] = { ...v, marches }
+      }
+      const fortresses = Array.isArray(s.world?.fortresses)
+        ? s.world.fortresses
+        : generateWorld(s.seed).fortresses
+      const world = isObject(s.world) ? { ...s.world, fortresses } : s.world
+      const stats = isObject(s.stats)
+        ? { ...s.stats, fortressesRazed: typeof s.stats.fortressesRazed === 'number' ? s.stats.fortressesRazed : 0 }
+        : s.stats
+      return { ...s, villages, world, stats, version: 17 }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -622,16 +667,23 @@ function validateVillage(v: unknown, id: string): void {
     if (m.kind !== 'attack' && m.kind !== 'scout') {
       throw new Error(`save: village ${id} invalid march kind`)
     }
-    // targetLevel is the SNAPSHOT combat/loot tier (1..MAX_TARGET_LEVEL); the M2.2
-    // fields (targetId + the targetX/targetY geometry snapshot) drive line drawing
-    // and the return-leg distance, so coords must be finite. targetId is 'legacy'
-    // for marches carried over by the v5->v6 migration.
-    if (
-      typeof m.targetLevel !== 'number' ||
-      !Number.isInteger(m.targetLevel) ||
-      m.targetLevel < 1 ||
-      m.targetLevel > MAX_TARGET_LEVEL
-    ) {
+    // targetType (M7) is the target-class discriminant: 'camp' (the targetId points at a
+    // world.barbarians entry) or 'fortress' (a world.fortresses entry). The v16->v17
+    // migration backfills 'camp' on every pre-M7 march, so a migrated save always carries a
+    // valid one; anything else means a corrupt/tampered save.
+    if (m.targetType !== 'camp' && m.targetType !== 'fortress') {
+      throw new Error(`save: village ${id} invalid march targetType`)
+    }
+    // targetLevel is the SNAPSHOT combat/loot tier; the M2.2 fields (targetId + the
+    // targetX/targetY geometry snapshot) drive line drawing and the return-leg distance,
+    // so coords must be finite. targetId is 'legacy' for marches carried over by the
+    // v5->v6 migration. A 'camp' march's tier is bounded by [1, MAX_TARGET_LEVEL]; a
+    // 'fortress' march (M7) snapshots a far-ring boss tier that sits ABOVE MAX_TARGET_LEVEL,
+    // so its only ceiling is "a positive integer" (mirrors the unbounded attack-report tier).
+    if (typeof m.targetLevel !== 'number' || !Number.isInteger(m.targetLevel) || m.targetLevel < 1) {
+      throw new Error(`save: village ${id} invalid march targetLevel`)
+    }
+    if (m.targetType === 'camp' && m.targetLevel > MAX_TARGET_LEVEL) {
       throw new Error(`save: village ${id} invalid march targetLevel`)
     }
     if (typeof m.targetId !== 'string') {
@@ -683,8 +735,11 @@ function validateVillage(v: unknown, id: string): void {
  * never references a missing entry), every village passes {@link validateVillage},
  * the spatial `world` (M2.2) is checked (its `barbarians` list, each with a finite
  * coordinate, a level in [1, MAX_TARGET_LEVEL], a `loyalty` in [0, 100] since M2.4 and
- * a boolean `scouted` since M5.2), every village's marches now also carry a `kind`
- * discriminant in {`attack`, `scout`} (M5.2) and the new `wall` building / `scout` unit
+ * a boolean `scouted` since M5.2, PLUS the M7 `fortresses` list — finite coords, an integer
+ * level >= 1 with no camp ceiling, a string id/name and a boolean `razed`), every village's
+ * marches now also carry a `kind` discriminant in {`attack`, `scout`} (M5.2) and an M7
+ * `targetType` in {`camp`, `fortress`} (a camp march keeps the [1, MAX_TARGET_LEVEL] tier
+ * ceiling; a fortress march's tier is only bounded below) and the new `wall` building / `scout` unit
  * and the M5.3 siege units (`ram` / `catapult`, appended to UNIT_IDS) validate like any
  * other roster entry (the lists simply grew — siege is a per-unit role tag plus pure
  * combat/march logic, so it adds no new persisted field of its own), the GLOBAL battle log is validated (each report's `villageId`, plus the
@@ -697,8 +752,8 @@ function validateVillage(v: unknown, id: string): void {
  * follows the same known-id / [0, maxLevel] rule as `tech`), and finally the M5.1
  * `automation` record is checked (the three switches are booleans, `recruitUnit` is
  * `null` or a known unit id, and `recruitTarget` is a non-negative integer), and finally
- * the M5.4 lifetime `stats` record (eight non-negative integer event counters plus the
- * Decimal `lootHauled`, finite + non-negative) and the M5.4 `achievements` map (every
+ * the M5.4 lifetime `stats` record (nine non-negative integer event counters — including the
+ * M7 `fortressesRazed` — plus the Decimal `lootHauled`, finite + non-negative) and the M5.4 `achievements` map (every
  * present key a known ACHIEVEMENT_ID, every value a finite, non-negative unlock marker).
  */
 export function validateState(s: unknown): GameState {
@@ -777,6 +832,38 @@ export function validateState(s: unknown): GameState {
     // migrated world always carries a boolean; anything else means a corrupt/tampered save.
     if (typeof b.scouted !== 'boolean') {
       throw new Error('save: invalid barbarian scouted')
+    }
+  }
+
+  // Fortresses (M7) — the FINITE set of boss targets, mirroring the barbarian list above:
+  // an array of plain descriptors deterministically generated from the seed (on a separate
+  // rng stream). marches.ts indexes into it by id and reads `level` to resolve combat (via
+  // fortressTarget), so each entry must be well-formed — a bad level/coord would mis-resolve
+  // an assault and then get autosaved. The one mutable field is `razed` (a boolean one-shot,
+  // unlike a barbarian's loyalty/scouted). The v16->v17 migration backfills the whole array
+  // from the seed, so a migrated world always carries a (possibly empty, but well-shaped) list.
+  if (!Array.isArray(world.fortresses)) throw new Error('save: invalid world.fortresses')
+  for (const f of world.fortresses) {
+    if (!isObject(f)) throw new Error('save: invalid fortress')
+    if (typeof f.id !== 'string') throw new Error('save: invalid fortress id')
+    if (typeof f.x !== 'number' || !Number.isFinite(f.x)) {
+      throw new Error('save: invalid fortress x')
+    }
+    if (typeof f.y !== 'number' || !Number.isFinite(f.y)) {
+      throw new Error('save: invalid fortress y')
+    }
+    // A fortress tier sits at a FAR ring ABOVE the camp ceiling, so the only bound is
+    // "a positive integer" (no MAX_TARGET_LEVEL cap — mirrors the fortress march tier).
+    if (typeof f.level !== 'number' || !Number.isInteger(f.level) || f.level < 1) {
+      throw new Error('save: invalid fortress level')
+    }
+    if (typeof f.name !== 'string') throw new Error('save: invalid fortress name')
+    // Razed flag (M7) — a plain boolean one-shot: false until a victorious assault razes the
+    // fortress for good, then true (a razed fortress is permanently out of play). generateWorld
+    // seeds false and the v16->v17 migration backfills the array fresh, so a fresh or migrated
+    // world always carries a boolean; anything else means a corrupt/tampered save.
+    if (typeof f.razed !== 'boolean') {
+      throw new Error('save: invalid fortress razed')
     }
   }
 
@@ -1015,9 +1102,10 @@ export function validateState(s: unknown): GameState {
     throw new Error('save: invalid automation recruitTarget')
   }
 
-  // PERMANENT lifetime stats (M5.4) — the account-wide career counters that survive
-  // every ascension. Eight of the nine are plain non-negative, finite INTEGERS (event
-  // tallies — battles won/lost, raids, camps razed, scouts, villages founded/conquered);
+  // PERMANENT lifetime stats (M5.4; +fortressesRazed M7) — the account-wide career counters
+  // that survive every ascension. Nine of the ten are plain non-negative, finite INTEGERS
+  // (event tallies — battles won/lost, raids, camps razed, fortresses razed, scouts, villages
+  // founded/conquered);
   // a NaN/Infinity/negative/fractional would corrupt the career record and then get
   // autosaved (CLAUDE.md hard rule #3). `lootHauled` is the one Decimal (the economy
   // rule — the lifetime haul grows past 2^53), value-checked finite + non-negative
@@ -1031,6 +1119,7 @@ export function validateState(s: unknown): GameState {
     'raidsRepelled',
     'raidsLost',
     'campsRazed',
+    'fortressesRazed',
     'scoutsReturned',
     'villagesFounded',
     'villagesConquered',

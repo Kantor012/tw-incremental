@@ -80,7 +80,7 @@ function armed(seed = 'm'): GameState {
   v.buildings.barracks = 1
   // Controlled world: one level-1 camp at distance 3 from the capital (at v.x,v.y =
   // WORLD_CENTER), so marchTime(v, b0, units) = 3 * slowest-speed * scale.
-  s.world = { barbarians: [barb('b0', 1, v.x + 3, v.y)] }
+  s.world = { fortresses: [], barbarians:[barb('b0', 1, v.x + 3, v.y)] }
   recomputeDerived(s)
   return s
 }
@@ -483,7 +483,7 @@ describe('advanceMarches — scout cycle (M5.2)', () => {
     v.units = army(0, 0, 0, 0, 2)
     sendScout(v, s.world, s.battleLog, 'b0', 2)
     // Remove the target mid-flight.
-    s.world = { barbarians: [] }
+    s.world = { fortresses: [], barbarians:[] }
     advanceMarches(v, s.world, s.battleLog, 1000)
     expect(v.marches.length).toBe(0)
     expect(v.units.scout).toBe(2) // all scouts safely home
@@ -507,7 +507,7 @@ describe('advanceMarches — ram role (M5.3 siege)', () => {
     // Ramless attack → loss (the camp's full wall stands).
     const lose = armed('ram-lose')
     const lv = lose.villages.v0
-    lose.world = { barbarians: [barb('b0', L, lv.x + 3, lv.y)] }
+    lose.world = { fortresses: [], barbarians:[barb('b0', L, lv.x + 3, lv.y)] }
     lv.units = ramless
     sendAttack(lv, lose.world, lose.battleLog, 'b0', ramless)
     advanceMarches(lv, lose.world, lose.battleLog, 1000)
@@ -516,7 +516,7 @@ describe('advanceMarches — ram role (M5.3 siege)', () => {
     // Same-power attack WITH rams → win: the rams cut the wall below the army's power.
     const win = armed('ram-win')
     const wv = win.villages.v0
-    win.world = { barbarians: [barb('b0', L, wv.x + 3, wv.y)] }
+    win.world = { fortresses: [], barbarians:[barb('b0', L, wv.x + 3, wv.y)] }
     wv.units = rammed
     sendAttack(wv, win.world, win.battleLog, 'b0', rammed)
     advanceMarches(wv, win.world, win.battleLog, 1000)
@@ -531,7 +531,7 @@ describe('advanceMarches — catapult role (M5.3 siege)', () => {
     const L = 5
     const s = armed('cata-win')
     const v = s.villages.v0
-    s.world = { barbarians: [barb('b0', L, v.x + 3, v.y)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', L, v.x + 3, v.y)] }
     v.units = army(0, 0, 10, 0, 0, 0, 5) // 10 axemen (the win) + 5 catapults (one level razed)
     sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10, 0, 0, 0, 5))
     advanceMarches(v, s.world, s.battleLog, 1000)
@@ -558,7 +558,7 @@ describe('advanceMarches — catapult role (M5.3 siege)', () => {
     const L = 5
     const s = armed('cata-none')
     const v = s.villages.v0
-    s.world = { barbarians: [barb('b0', L, v.x + 3, v.y)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', L, v.x + 3, v.y)] }
     v.units = army(0, 0, 10) // wins, but no siege → no razing
     sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10))
     advanceMarches(v, s.world, s.battleLog, 1000)
@@ -570,7 +570,7 @@ describe('advanceMarches — catapult role (M5.3 siege)', () => {
     const L = 9
     const s = armed('cata-loss')
     const v = s.villages.v0
-    s.world = { barbarians: [barb('b0', L, v.x + 3, v.y)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', L, v.x + 3, v.y)] }
     v.units = army(1, 0, 0, 0, 0, 0, 5) // far too weak to win, even with the catapults
     sendAttack(v, s.world, s.battleLog, 'b0', army(1, 0, 0, 0, 0, 0, 5))
     advanceMarches(v, s.world, s.battleLog, 1000)
@@ -584,7 +584,7 @@ describe('determinism — a siege march replays identically (M5.3)', () => {
     const withSiege = (seed: string): GameState => {
       const s = armed(seed)
       const v = s.villages.v0
-      s.world = { barbarians: [barb('b0', 5, v.x + 3, v.y)] }
+      s.world = { fortresses: [], barbarians:[barb('b0', 5, v.x + 3, v.y)] }
       v.units = army(0, 0, 10, 0, 0, 4, 5) // axemen + rams + catapults
       sendAttack(v, s.world, s.battleLog, 'b0', army(0, 0, 10, 0, 0, 4, 5))
       return s

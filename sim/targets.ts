@@ -89,6 +89,22 @@ export interface BalanceTargets {
    */
   minVillagesConquered: number
 
+  // --- M7 fortress (finite boss targets) goal (warning) ---
+  /**
+   * The bot must RAZE at least this many fortresses in the SEPARATE fortress-driving run
+   * (runner.runFortress) — proof the M7 boss-target pipeline (amass a real all-in army + the full
+   * siege train, then assault a far-ring fortress whose wall the rams crack and whose one-time loot
+   * cache the survivors haul home) is reachable within the budget. Measured APART from the main run on
+   * purpose: a fortress is a finite one-time prize, NOT a grind, so a player commits a real army to it
+   * — but the main loop churns its population (recruit -> march -> ~30% attrition), so its standing
+   * army never accumulates into a boss-cracking stack (main-run lifetime.fortressesRazed stays 0). The
+   * dedicated run hands the capital the PROVEN endgame economy and amasses the strike force honestly
+   * within the real popCap. >= 1 confirms the one-time raze mechanic actually completes. If it cannot be
+   * hit, the fortress defence curves (content/fortresses.ts) need tuning against a maxed single capital
+   * (popCap ~1.5k, attackMult ~1.75) — see CHANGELOG "Balance".
+   */
+  minFortressesRazed: number
+
   // --- M3.1 tech (global passive tree) goal (warning) ---
   /**
    * The bot must BUY at least this many tech-node levels from the global pool over a run
@@ -261,6 +277,13 @@ export const TARGETS: BalanceTargets = {
   // minimum proof-of-mechanic (the bot self-limits conquests so founding keeps room
   // under the village cap — see sim/bot.chooseConquest).
   minVillagesConquered: 1,
+
+  // M7: fortresses online. A mature empire should be able to field a siege train (Tarany) and a
+  // strike force big enough to crack a far-ring fortress at worst-case luck and haul home its
+  // one-time cache — razing at least one within the budget. Sized at the minimum proof-of-mechanic
+  // (the bot self-limits to the finite FORTRESS_COUNT). If it cannot be hit without starving the
+  // M1/M2 targets, the fortress defence / loot curves (content/fortresses.ts) need tuning.
+  minFortressesRazed: 1,
 
   // M4.1: prestige online. A matured run should be able to ascend (reset for prestige
   // points) and spend them on the permanent, account-wide prestige tree, with the resulting

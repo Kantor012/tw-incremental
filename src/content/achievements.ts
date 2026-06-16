@@ -24,9 +24,9 @@ import type { BuildingId } from './buildings'
  *    techNodesBought, prestigeNodesBought) all iterate the stable state maps so they are
  *    deterministic and total on any well-formed state.
  *
- * THE CATALOGUE: 30 achievements across six categories — gospodarka / militaria /
- * oblężenie i zwiad / ekspansja / drzewo / prestiż — with RISING thresholds within each
- * theme (e.g. attacksWon 1 → 10 → 50 → 250). None of them confers any in-game effect.
+ * THE CATALOGUE: 33 achievements across seven categories — gospodarka / militaria /
+ * oblężenie i zwiad / ekspansja / drzewo / prestiż / fortece — with RISING thresholds within
+ * each theme (e.g. attacksWon 1 → 10 → 50 → 250). None of them confers any in-game effect.
  *
  * Import discipline: this module imports ONLY *types* — {@link GameState}/{@link Stats}
  * from state.ts and {@link BuildingId} from buildings.ts — all erased at runtime, so it
@@ -105,7 +105,22 @@ function prestigeNodesBought(state: GameState): number {
 }
 
 /**
- * The achievements catalogue, keyed by id. 30 entries across six categories with
+ * Whether EVERY fortress in the CURRENT run's world has been razed (M7). Returns false
+ * when the world holds no fortresses, so an empty/fortress-less world never trivially
+ * satisfies it. Reads the live `razed` flags (a fortress is never removed from the world,
+ * only flagged), and a world reset regenerates a fresh, all-unrazed set — so this tracks
+ * "cleared them all THIS run", not a lifetime tally.
+ */
+function allFortressesRazed(state: GameState): boolean {
+  const list = state.world.fortresses
+  // Defensive (the condition must be TOTAL — never throw): a malformed/partial world that
+  // somehow lacks the array, or an empty one, simply hasn't "cleared them all".
+  if (!Array.isArray(list) || list.length === 0) return false
+  return list.every((f) => f.razed)
+}
+
+/**
+ * The achievements catalogue, keyed by id. 33 entries across seven categories with
  * rising thresholds. Every condition is pure, total and safe on a fresh state (a
  * Decimal haul is compared with `.gte`); none grants any gameplay bonus.
  */
@@ -342,6 +357,32 @@ export const ACHIEVEMENTS: Record<string, AchievementDef> = {
     desc: 'Zdobądź łącznie 50 punktów prestiżu w całej karierze.',
     category: 'prestiż',
     condition: (state) => state.prestige.totalEarned >= 50,
+  },
+
+  // =====================================================================
+  // FORTECE — razing the finite, high-value boss fortresses (M7). Two read the
+  // lifetime `fortressesRazed` counter; the last reads the live world (all razed).
+  // =====================================================================
+  first_fortress: {
+    id: 'first_fortress',
+    name: 'Padła forteca',
+    desc: 'Zdobądź i zrównaj z ziemią swoją pierwszą fortecę.',
+    category: 'fortece',
+    condition: (_state, stats) => stats.fortressesRazed >= 1,
+  },
+  fortress_breaker: {
+    id: 'fortress_breaker',
+    name: 'Pogromca fortec',
+    desc: 'Zrównaj z ziemią łącznie 3 fortece.',
+    category: 'fortece',
+    condition: (_state, stats) => stats.fortressesRazed >= 3,
+  },
+  fortress_purge: {
+    id: 'fortress_purge',
+    name: 'Czystka',
+    desc: 'Zrównaj z ziemią wszystkie fortece w jednym świecie.',
+    category: 'fortece',
+    condition: (state) => allFortressesRazed(state),
   },
 }
 

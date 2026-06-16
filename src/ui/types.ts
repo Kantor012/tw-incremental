@@ -46,6 +46,21 @@ export interface UiCtx {
    */
   onAttack: (villageId: VillageId, targetId: string, units: Record<UnitId, number>) => boolean
   /**
+   * Dispatch an army from `villageId` to ASSAULT the fortress `fortressId` (M7; an id from
+   * `store.state.world.fortresses`); returns true on a successful send (an `attack` march
+   * with `targetType: 'fortress'` is queued and the dispatched units leave the home garrison
+   * until they return). On a won assault the fortress is RAZED for good (one-time) and the
+   * big loot cache is hauled home (carry-capped like any attack); a razed/missing fortress is
+   * rejected. Mirrors {@link onAttack} but for a fortress target — the panel reads
+   * `canAttackFortress` (systems/marches) itself for the disabled cue; this callback is the
+   * commit, not the validation.
+   */
+  onAssaultFortress: (
+    villageId: VillageId,
+    fortressId: string,
+    units: Record<UnitId, number>,
+  ) => boolean
+  /**
    * Send `scoutCount` scouts from `villageId` to RECON the barbarian village `targetId`
    * (an id from `store.state.world.barbarians`); returns true on a successful send (a
    * `scout` march is queued and the scouts leave the home garrison until they return).

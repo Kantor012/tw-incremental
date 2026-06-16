@@ -119,6 +119,7 @@ describe('advanceWorldLoyalty', () => {
         barb('b1', 2, 2, 2, 99.5),
         barb('b2', 3, 3, 3, LOYALTY_MAX),
       ],
+      fortresses: [],
     }
     advanceWorldLoyalty(world, 100) // + LOYALTY_REGEN_PER_SEC * 100
 
@@ -130,14 +131,14 @@ describe('advanceWorldLoyalty', () => {
   })
 
   it('never exceeds LOYALTY_MAX even for a huge dt', () => {
-    const world: World = { barbarians: [barb('b0', 1, 1, 1, 1)] }
+    const world: World = { fortresses: [], barbarians:[barb('b0', 1, 1, 1, 1)] }
     advanceWorldLoyalty(world, 1e9)
     expect(world.barbarians[0].loyalty).toBe(LOYALTY_MAX)
     expect(world.barbarians[0].loyalty).toBeLessThanOrEqual(LOYALTY_MAX)
   })
 
   it('is a no-op on an empty world (no captured camps to regenerate)', () => {
-    const world: World = { barbarians: [] }
+    const world: World = { fortresses: [], barbarians:[] }
     expect(() => advanceWorldLoyalty(world, 100)).not.toThrow()
     expect(world.barbarians.length).toBe(0)
   })
@@ -146,7 +147,7 @@ describe('advanceWorldLoyalty', () => {
 describe('advanceMarches — noble erodes loyalty / queues a capture', () => {
   it('a won attack with a surviving noble erodes the live target loyalty', () => {
     const s = armed()
-    s.world = { barbarians: [barb('b0', 1, 203, 200, LOYALTY_MAX)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 1, 203, 200, LOYALTY_MAX)] }
     recomputeDerived(s)
 
     const events = attackOnce(s, army(0, 0, 30, 2)) // crushing win, a noble survives
@@ -167,7 +168,7 @@ describe('advanceMarches — noble erodes loyalty / queues a capture', () => {
 
   it('a won attack WITHOUT a noble leaves loyalty untouched', () => {
     const s = armed()
-    s.world = { barbarians: [barb('b0', 1, 203, 200, LOYALTY_MAX)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 1, 203, 200, LOYALTY_MAX)] }
     recomputeDerived(s)
 
     const events = attackOnce(s, army(0, 0, 10, 0)) // pure axeman win, no noble
@@ -178,7 +179,7 @@ describe('advanceMarches — noble erodes loyalty / queues a capture', () => {
   it('drives a low-loyalty camp to <= 0 and returns one conquest event (clamped to 0)', () => {
     const s = armed()
     // Loyalty below a single noble hit, so one surviving noble bottoms it out.
-    s.world = { barbarians: [barb('b0', 1, 203, 200, LOYALTY_NOBLE_HIT - 5)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 1, 203, 200, LOYALTY_NOBLE_HIT - 5)] }
     recomputeDerived(s)
 
     const events = attackOnce(s, army(0, 0, 30, 2))
@@ -194,7 +195,7 @@ describe('advanceMarches — noble erodes loyalty / queues a capture', () => {
 
   it('a LOST attack with a noble does not erode loyalty (no win, no event)', () => {
     const s = armed()
-    s.world = { barbarians: [barb('b0', 1, 203, 200, LOYALTY_MAX)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 1, 203, 200, LOYALTY_MAX)] }
     recomputeDerived(s)
 
     // 1 noble alone (atk 30) cannot beat a level-1 wall (def 30 → tie loses).
@@ -207,7 +208,7 @@ describe('advanceMarches — noble erodes loyalty / queues a capture', () => {
 describe('applyConquest', () => {
   it('captures the camp into a player village at its coordinates and logs a report', () => {
     const s = armed()
-    s.world = { barbarians: [barb('b0', 2, 210, 195, 0)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 2, 210, 195, 0)] }
     const villagesBefore = s.villageOrder.length
 
     const newId = applyConquest(s, 'b0', 'v0')
@@ -244,7 +245,7 @@ describe('applyConquest', () => {
 
   it('is idempotent — a second capture of the same (now stale) id is a null no-op', () => {
     const s = armed()
-    s.world = { barbarians: [barb('b0', 1, 205, 200, 0)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 1, 205, 200, 0)] }
 
     const first = applyConquest(s, 'b0', 'v0')
     expect(first).toBe('v1')
@@ -262,7 +263,7 @@ describe('applyConquest', () => {
 
   it('returns null for an unknown id without mutating state', () => {
     const s = armed()
-    s.world = { barbarians: [barb('b0', 1, 205, 200, 100)] }
+    s.world = { fortresses: [], barbarians:[barb('b0', 1, 205, 200, 100)] }
     const villagesBefore = s.villageOrder.length
     const logBefore = s.battleLog.length
 

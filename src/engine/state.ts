@@ -87,9 +87,22 @@ export interface March {
    */
   kind: MarchKind
   /**
-   * Id of the targeted {@link BarbarianVillage} (`'b0'`, `'b1'`, …). `'legacy'` for
-   * marches carried over by the v5→v6 save migration, which predates map coordinates
-   * (their geometry is reconstructed into targetX/targetY from the old distance).
+   * What KIND of target {@link targetId} points at (M7): `'camp'` = an entry in
+   * {@link World.barbarians} (the classic grindable camp — resolves via barbarianTarget,
+   * supports loot/conquest/scouting/siege razing), `'fortress'` = an entry in
+   * {@link World.fortresses} (a one-time boss — resolves via fortressTarget, delivers a
+   * big loot cache and razes the fortress on a win; never conquered, never scouted).
+   * Snapshotted at dispatch so the resolution path is fixed for an army already in
+   * flight. The v16->v17 save migration backfills `'camp'` on every pre-M7 march (all
+   * existing marches are camp attacks/scouts). Scout marches are always `'camp'`.
+   */
+  targetType: 'camp' | 'fortress'
+  /**
+   * Id of the targeted {@link BarbarianVillage} (`'b0'`, `'b1'`, …) when
+   * {@link targetType} is `'camp'`, or the targeted {@link Fortress} (`'f0'`, `'f1'`, …)
+   * when it is `'fortress'`. `'legacy'` for marches carried over by the v5→v6 save
+   * migration, which predates map coordinates (their geometry is reconstructed into
+   * targetX/targetY from the old distance).
    */
   targetId: string
   /**
@@ -291,12 +304,55 @@ export interface BarbarianVillage {
 }
 
 /**
+ * One FORTRESS on the world map (M7) — a FINITE, high-value boss target, sharply
+ * distinct from the grindable barbarian camps. Mirrors {@link BarbarianVillage}'s
+ * spatial shape (id, map coordinates, level, display name) but carries a one-shot
+ * `razed` flag INSTEAD of `loyalty`/`scouted`: a fortress is never conquered (no
+ * loyalty), never scouted (no fog — its defence/loot are always revealed), and can
+ * be assaulted only ONCE — a victorious assault sets `razed = true` permanently for
+ * the run, and a razed fortress can never be attacked again. The STATIC combat
+ * numbers (a much higher defence, a much bigger loot cache) are NOT stored: they are
+ * derived on demand from `level` via {@link import('../content/fortresses').fortressTarget}
+ * (the single source of those curves), so the world stays a compact, Decimal-free bag
+ * of plain numbers/strings. Generated deterministically from the seed by
+ * `generateWorld` (systems/world.ts), on a SEPARATE rng stream from the barbarians.
+ */
+export interface Fortress {
+  /** Stable id (`'f0'`, `'f1'`, …) — what a {@link March.targetId} points at when targetType is `'fortress'`. */
+  id: string
+  /** Integer map x coordinate (field), in [0, WORLD_SIZE]. */
+  x: number
+  /** Integer map y coordinate (field), in [0, WORLD_SIZE]. */
+  y: number
+  /** Fortress tier — drives defence/loot via fortressTarget(level). Placed at FAR rings (high level). */
+  level: number
+  /** Display name (PL). */
+  name: string
+  /**
+   * Whether this fortress has been RAZED (M7). Starts `false`. A won assault flips it
+   * `true` PERMANENTLY for the run — a razed fortress is removed from play (not
+   * grindable, not conquerable, never attacked again). MUTABLE world state, so it
+   * serializes and migrates; `generateWorld` seeds it `false` for fresh fortresses and
+   * the v16->v17 save migration backfills the whole `fortresses` array from the seed.
+   */
+  razed: boolean
+}
+
+/**
  * The spatial world: the deterministic, seed-generated set of barbarian villages
- * the player can march at. Ordered (stable index = id suffix) so iteration/render
- * is reproducible. Holds only plain JSON (no Decimal), so it serializes verbatim.
+ * the player can march at, plus the FINITE set of {@link Fortress} boss targets
+ * (M7). Both lists are ordered (stable index = id suffix) so iteration/render is
+ * reproducible. Holds only plain JSON (no Decimal), so it serializes verbatim.
  */
 export interface World {
   barbarians: BarbarianVillage[]
+  /**
+   * The FINITE set of fortresses (M7) — high-value, one-time boss targets placed at
+   * far rings beyond every camp tier, drawn from a SEPARATE rng stream so the
+   * barbarian list stays byte-identical. Regenerated fresh by every world reset
+   * (ascension / era / dynasty), giving each run a repeatable set to clear.
+   */
+  fortresses: Fortress[]
 }
 
 /**
@@ -437,6 +493,8 @@ export interface Stats {
   raidsLost: number
   /** Barbarian camp levels knocked down by catapults (>= 1 level removed counts one). */
   campsRazed: number
+  /** Fortresses RAZED across the run's life (M7; bumped once per won fortress assault). */
+  fortressesRazed: number
   /** Scout marches that completed and returned home. */
   scoutsReturned: number
   /** New villages FOUNDED by the player. */
@@ -743,6 +801,7 @@ export function createInitialStats(): Stats {
     raidsRepelled: 0,
     raidsLost: 0,
     campsRazed: 0,
+    fortressesRazed: 0,
     scoutsReturned: 0,
     villagesFounded: 0,
     villagesConquered: 0,
