@@ -10,6 +10,7 @@ import {
 } from '../../systems/villages'
 import type { UiCtx, Panel } from '../types'
 import { h, RESOURCE_NAMES } from '../dom'
+import { villageCrest } from '../crest'
 
 /**
  * Villages panel (M2.3) — the GLOBAL, cross-village view that makes the
@@ -137,9 +138,22 @@ export function createVillagesPanel(ctx: UiCtx): Panel {
     const head = h('div')
     head.style.display = 'flex'
     head.style.justifyContent = 'space-between'
-    head.style.alignItems = 'baseline'
+    head.style.alignItems = 'center'
     head.style.gap = 'var(--space-2)'
-    head.appendChild(h('span', 'building-name', name))
+    // Lewa strona nagłówka: proceduralny HERB wioski + nazwa. Herb to czysta,
+    // deterministyczna funkcja id wioski (ten sam id ⇒ ten sam herb, również po
+    // przeładowaniu i wczytaniu zapisu — patrz crest.ts), więc każda karta ma
+    // stałą, rozpoznawalną tożsamość. Herb niesie własną etykietę ('Herb wioski',
+    // role=img w svgIcon) i jest dodatkiem skanowalności OBOK tekstu nazwy, nigdy
+    // jedynym nośnikiem znaczenia (WCAG 1.1.1/1.4.1). To główna powierzchnia herbu.
+    const left = h('div')
+    left.style.display = 'flex'
+    left.style.alignItems = 'center'
+    left.style.gap = 'var(--space-2)'
+    left.style.minWidth = '0'
+    left.appendChild(villageCrest(id))
+    left.appendChild(h('span', 'building-name', name))
+    head.appendChild(left)
     const badge = h('span', undefined, 'Aktywna')
     badge.style.color = 'var(--accent)'
     badge.style.fontSize = 'var(--text-xs)'

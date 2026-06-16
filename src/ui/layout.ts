@@ -4,6 +4,7 @@ import { formatNumber, formatInt, formatRate, formatTime } from '../engine/forma
 import { usedPopulation } from '../systems/recruitment'
 import type { UiCtx, Panel } from './types'
 import { h, resourceIcon, shieldIcon, RESOURCE_NAMES } from './dom'
+import { villageCrest } from './crest'
 
 /**
  * Dashboard shell. Replaces the old single vertical stack of panels with:
@@ -181,6 +182,14 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
       // so it is not duplicated.
       villageActiveName.textContent = ''
       const only = order[0]
+      // Mały herb obok nazwy jedynej wioski — czysta dekoracja (nazwę niesie już
+      // tekst .village-current), więc aria-hidden, by nie dokładał „Herb wioski"
+      // do odczytu czytnika ekranu (WCAG 1.1.1).
+      if (only) {
+        const crest = villageCrest(only)
+        crest.setAttribute('aria-hidden', 'true')
+        villageList.appendChild(crest)
+      }
       const label = h('span', 'village-current')
       label.textContent = only ? (s.villages[only]?.name ?? '—') : '—'
       villageList.appendChild(label)
@@ -203,7 +212,13 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
       btn.setAttribute('role', 'radio')
       btn.setAttribute('aria-setsize', order.length.toString())
       btn.setAttribute('aria-posinset', (i + 1).toString())
-      btn.textContent = s.villages[id].name
+      // Mały herb wioski w pigułce. Dostępną nazwę radia niosą tekst (poniżej) +
+      // atrybuty ARIA, więc herb jest aria-hidden — czysta dekoracja, by nie
+      // dopisywał „Herb wioski" do dostępnej nazwy kontrolki (WCAG 1.1.1).
+      const crest = villageCrest(id)
+      crest.setAttribute('aria-hidden', 'true')
+      btn.appendChild(crest)
+      btn.appendChild(h('span', 'village-btn-name', s.villages[id].name))
       btn.addEventListener('click', () => selectVillage(id))
       villageList.appendChild(btn)
       villageBtns.push({ id, btn })

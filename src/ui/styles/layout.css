@@ -329,6 +329,31 @@ html {
   content: '\2713\FE0E\00A0';
 }
 
+/* HERB WIOSKI (proceduralny, deterministyczny z id wioski — patrz crest.ts).
+ * Sam SVG nie ma własnych wymiarów (viewBox 0 0 48 48); rozmiar nadajemy tu,
+ * zależnie od kontekstu. Herb jest dekoracją obok ZAWSZE obecnej nazwy wioski,
+ * nigdy jedynym nośnikiem znaczenia (WCAG 1.1.1). Bazowy rozmiar pasuje do
+ * nagłówka karty wioski; warianty niżej zmniejszają go w przełączniku HUD. */
+.village-crest {
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+/* Obok nazwy jedynej wioski w HUD (tryb pojedynczy, bezpośrednie dziecko listy). */
+.village-switch > .village-crest {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+/* W pigułce przełącznika — mniejszy, wyrównany do tekstu, z lekkim odstępem. */
+.village-btn .village-crest {
+  width: 1.15rem;
+  height: 1.15rem;
+  margin-right: var(--space-1);
+  vertical-align: -0.18em;
+}
+
 /* ============================================================================
  * b) PASEK ZAKŁADEK (tablist)
  * ========================================================================== */

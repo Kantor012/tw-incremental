@@ -1,5 +1,5 @@
 import type { UiCtx, Panel } from '../types'
-import { h, resourceIcon, unitIcon, RESOURCE_NAMES } from '../dom'
+import { h, resourceIcon, unitIcon, buildingIcon, RESOURCE_NAMES } from '../dom'
 import { formatNumber, formatRate } from '../../engine/format'
 import { RESOURCE_IDS, type ResourceId, type AutomationKind } from '../../engine/state'
 import { BUILDINGS, BUILDING_IDS, type BuildingEffect } from '../../content/buildings'
@@ -281,7 +281,10 @@ function buildBuildings(body: HTMLElement): void {
   grid.setAttribute('role', 'list')
   for (const id of BUILDING_IDS) {
     const def = BUILDINGS[id]
-    const li = card(def.name)
+    // Ikona budynku jako wiodący glif karty — identyczny idiom jak Surowce/Jednostki
+    // (resourceIcon/unitIcon). Dekoracyjna podpórka skanowalności: nazwa w <h4> niesie
+    // etykietę, a sama ikona ma własny aria-label z DANYCH (BUILDINGS[id].name) z svgIcon.
+    const li = card(def.name, buildingIcon(id))
     li.appendChild(h('p', 'codex-text muted', def.desc))
     li.appendChild(h('p', 'codex-text', buildingEffectText(def.effect)))
     li.appendChild(

@@ -698,6 +698,19 @@ a:hover {
   height: 1.25rem;
 }
 
+/* Ikona budynku w nagłówku karty — rozmiar wzorowany na .unit-icon, lekko
+   większy dla czytelności sylwetki przy ~24px; flex-shrink:0 chroni przed
+   ściśnięciem, gdy nazwa budynku jest długa. */
+.building-icon {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.building-icon-wrap {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
 .unit-stats,
 .unit-time {
   font-size: var(--text-xs);

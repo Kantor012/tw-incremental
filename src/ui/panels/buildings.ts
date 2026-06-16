@@ -16,7 +16,7 @@ import {
 import { nextCostAffordable, costReduction, villageDefenseMult } from '../../systems/buildings'
 import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
-import { h, RESOURCE_NAMES } from '../dom'
+import { h, RESOURCE_NAMES, buildingIcon } from '../dom'
 
 /**
  * Buildings panel — a RESPONSIVE GRID of building cards (replaces the old single
@@ -151,8 +151,20 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
     // comes from the shared .building-card class in layout.css — no inline styles.
     const card = h('div', 'building-card')
 
-    // -- header: name + category (left, stacked) · level (right) --------------
+    // -- header: ikona + (name + category, stacked) · level (right) -----------
+    // Ikona to DEKORACJA + szybsza skanowalność karty, nigdy jedyny nośnik
+    // znaczenia — pełna nazwa tekstowa (.building-name) zostaje. buildingIcon ma
+    // już role=img + aria-label, ale tu DUBLUJE etykietę nazwy obok, więc owijkę
+    // oznaczamy aria-hidden, żeby czytnik ekranu nie powtarzał nazwy budynku.
     const head = h('div', 'building-head')
+    const headLeft = h('div')
+    headLeft.style.display = 'flex'
+    headLeft.style.alignItems = 'center'
+    headLeft.style.gap = 'var(--space-2)'
+    const iconWrap = h('span', 'building-icon-wrap')
+    iconWrap.setAttribute('aria-hidden', 'true')
+    iconWrap.appendChild(buildingIcon(id))
+    headLeft.appendChild(iconWrap)
     const left = h('div')
     left.style.display = 'flex'
     left.style.flexDirection = 'column'
@@ -160,8 +172,9 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
     const cat = h('span', 'building-cat muted', CATEGORY_LABELS[def.category])
     cat.style.fontSize = 'var(--text-xs)'
     left.appendChild(cat)
+    headLeft.appendChild(left)
     const level = h('span', 'building-level num')
-    head.appendChild(left)
+    head.appendChild(headLeft)
     head.appendChild(level)
 
     // -- level progress bar (visual companion to the "poz. X / Y" text) -------
