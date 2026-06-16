@@ -8,7 +8,7 @@ import {
   type Fortress,
   type TechModifiers,
 } from '../src/engine/state'
-import { BUILDING_IDS, type BuildingId } from '../src/content/buildings'
+import { BUILDING_IDS, BUILDINGS, type BuildingId } from '../src/content/buildings'
 import { UNITS, UNIT_IDS, type UnitId } from '../src/content/units'
 import { nextCostAffordable } from '../src/systems/buildings'
 import {
@@ -155,13 +155,28 @@ function resourceSum(v: Village): Decimal {
  * uniformly to every building, so the cheapest RANKING is unchanged; only the
  * affordability cut moves. Defaults to {@link NO_TECH_MODS} (no discount).
  */
+/**
+ * Buildings the MAIN-run bot may erect. Identical to {@link BUILDING_IDS} EXCEPT the M9
+ * 'market' (Rynek): it is a PLAYER-INITIATED logistics building whose merchant_capacity
+ * effect folds into NO production/storage/pop/combat stat, so building it would only spend
+ * resources without advancing any balance target — and including it would drift the MAIN
+ * run off its pre-M9 trajectory. Excluding it keeps the MAIN run BYTE-IDENTICAL to pre-M9
+ * (every existing balance target untouched); the market is built + exercised by the
+ * dedicated market run instead. Driven by the same data-driven `autoBuildable` flag the
+ * in-game auto-build reads (content/buildings.ts), so any future player-managed building
+ * stays out of the MAIN run automatically — one source of truth, no hardcoded id.
+ */
+const MAIN_BUILD_IDS: readonly BuildingId[] = BUILDING_IDS.filter(
+  (id) => BUILDINGS[id].autoBuildable !== false,
+)
+
 function cheapestBuilding(
   v: Village,
   mods: TechModifiers = NO_TECH_MODS,
 ): { id: BuildingId; sum: Decimal } | null {
   let best: BuildingId | null = null
   let bestSum: Decimal | null = null
-  for (const id of BUILDING_IDS) {
+  for (const id of MAIN_BUILD_IDS) {
     const { cost, affordable, maxed } = nextCostAffordable(v, id, mods)
     if (maxed || !affordable) continue
     const sum = cost.wood.add(cost.clay).add(cost.iron)

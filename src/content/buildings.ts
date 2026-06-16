@@ -25,10 +25,11 @@ export type BuildingId =
   | 'barracks'
   | 'academy'
   | 'wall'
+  | 'market'
 
 /**
  * Stable iteration order for derived-stat recompute and UI listing. New buildings are
- * APPENDED (here `wall`, after `academy`) so older saves' building key order is never
+ * APPENDED (here `market`, after `wall`) so older saves' building key order is never
  * disturbed, keeping migration and round-trip deterministic.
  */
 export const BUILDING_IDS: readonly BuildingId[] = [
@@ -41,6 +42,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'barracks',
   'academy',
   'wall',
+  'market',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -68,6 +70,12 @@ export interface ResourceCost {
  *                   wall). Consumed by villageDefenseMult (systems/buildings.ts) to
  *                   raise the standing army's defence against incoming raids; NOT a
  *                   tick-derived stat, so recompute treats it as a no-op.
+ *  - merchant_capacity: +perLevel of merchant CARRY capacity per level (M9 rynek). Like
+ *                   storage/population it IS a tick-derived/cached stat — recompute folds it
+ *                   up and caches it onto the village (Village.merchantCapacity); the
+ *                   transport system (systems/market.ts) reads that cap to bound in-flight
+ *                   shipments. It touches NO production/storage/pop/combat stat, so a village
+ *                   with no market (level 0) is byte-identical to pre-M9.
  */
 export type BuildingEffect =
   | { kind: 'production'; resource: ResourceId; perLevel: number }
@@ -77,6 +85,7 @@ export type BuildingEffect =
   | { kind: 'recruit_speed'; perLevel: number }
   | { kind: 'noble_unlock' }
   | { kind: 'defense_bonus'; perLevel: number }
+  | { kind: 'merchant_capacity'; perLevel: number }
 
 export interface BuildingDef {
   id: BuildingId
@@ -98,6 +107,15 @@ export interface BuildingDef {
    * so a new building is a single edit to this file (CLAUDE.md hard rule #5).
    */
   initialLevel?: number
+  /**
+   * Whether the AUTO-BUILD automation (systems/automation.ts `autoBuildOnce`) may
+   * spend resources on this building. Default (absent) = true. Set false for a building
+   * whose value is purely PLAYER-managed and so should never be picked by the cheapest-
+   * affordable heuristic — e.g. the Rynek (M9): its merchant capacity is useless without
+   * a deliberately chosen transport, so auto-build would only waste resources on it.
+   * DATA, not engine (CLAUDE.md hard rule #5): the routine reads this flag, never an id.
+   */
+  autoBuildable?: boolean
 }
 
 /**
@@ -233,5 +251,29 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     effect: { kind: 'defense_bonus', perLevel: 0.05 },
     // Starts at 0: an optional defensive investment, not part of the core build order.
     initialLevel: 0,
+  },
+  market: {
+    id: 'market',
+    name: 'Rynek',
+    desc: 'Kupcy transportują surowce między twoimi wioskami. Każdy poziom zwiększa ładowność kupców.',
+    category: 'economy',
+    // Finite ceiling like every other building; at perLevel 2000 a maxed market is
+    // 40 000 merchant carry capacity — enough to move a meaningful slice of one
+    // village's warehouse to another in a single dispatch.
+    maxLevel: 20,
+    // ~tartak-tier baseCost scaled a bit higher (the market is a later economic build).
+    // provisional — the Balance phase tunes cost/factor/perLevel against the harness.
+    baseCost: { wood: 100, clay: 100, iron: 60 },
+    costFactor: 1.27,
+    // +2000 merchant CARRY capacity per level (M9). A tick-derived/cached stat
+    // (merchant_capacity → Village.merchantCapacity) read ONLY by the player-initiated
+    // transport system; it touches no production/storage/pop/combat stat, so a village
+    // with no market is byte-identical to pre-M9. perLevel provisional (Balance tunes it).
+    effect: { kind: 'merchant_capacity', perLevel: 2000 },
+    // Starts at 0: building the Rynek is the M9 logistics goal that unlocks transport.
+    initialLevel: 0,
+    // Player-managed logistics: auto-build must NOT spend on the Rynek (its merchant
+    // capacity is dead weight without a deliberately chosen transport). See autoBuildOnce.
+    autoBuildable: false,
   },
 }

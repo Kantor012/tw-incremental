@@ -9,6 +9,7 @@ import { createDynastyPanel } from './panels/dynasty'
 import { createChallengesPanel } from './panels/challenges'
 import { createAutomationPanel } from './panels/automation'
 import { createMapPanel } from './panels/map'
+import { createMarketPanel } from './panels/market'
 import { createArmyPanel } from './panels/army'
 import { createCampaignPanel } from './panels/campaign'
 import { createReportsPanel } from './panels/reports'
@@ -31,6 +32,7 @@ export type { UiCtx, Panel } from './types'
 const TABS: TabSpec[] = [
   { id: 'buildings', label: 'Budynki', create: createBuildingsPanel },
   { id: 'villages', label: 'Wioski', create: createVillagesPanel },
+  { id: 'market', label: 'Rynek', create: createMarketPanel },
   { id: 'tech', label: 'Rozwój', create: createTechPanel },
   { id: 'prestige', label: 'Prestiż', create: createPrestigePanel },
   { id: 'era', label: 'Era', create: createEraPanel },

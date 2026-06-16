@@ -10,7 +10,7 @@ import {
   type World,
 } from '../engine/state'
 import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
-import { BUILDING_IDS, type BuildingId } from '../content/buildings'
+import { BUILDING_IDS, BUILDINGS, type BuildingId } from '../content/buildings'
 import { barbarianTarget } from '../content/barbarians'
 import { build, nextCostAffordable } from './buildings'
 import { canRecruit, freePopulation, recruit, recruitCost } from './recruitment'
@@ -77,6 +77,10 @@ export function autoBuildOnce(v: Village, mods: TechModifiers = NO_TECH_MODS): b
   let bestId: BuildingId | null = null
   let bestCost: Decimal | null = null
   for (const id of BUILDING_IDS) {
+    // Skip player-managed buildings (data-driven flag, not a hardcoded id): the Rynek's
+    // merchant capacity is useless without a deliberately chosen transport, so auto-build
+    // would only waste resources on it (CLAUDE.md hard rule #5).
+    if (BUILDINGS[id].autoBuildable === false) continue
     const { cost, affordable, maxed } = nextCostAffordable(v, id, mods)
     if (maxed || !affordable) continue
     const total = cost.wood.add(cost.clay).add(cost.iron)

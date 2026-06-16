@@ -226,6 +226,22 @@ export interface BalanceTargets {
    */
   minChallengesCompleted: number
 
+  // --- M9 market (RYNEK — merchant transport between own villages) goal (warning) ---
+  /**
+   * At least this many merchant shipments must DELIVER in the SEPARATE market-driving run
+   * (runner.runMarket) — proof the M9 transport pipeline (build a Rynek for merchant capacity, found a
+   * second village, dispatch cargo that leaves the source immediately and arrives at the destination
+   * over a map-distance travel time, clamped to its storage cap) is reachable within the budget.
+   * Measured APART from the main run on purpose: transport is a PLAYER-INITIATED action (like
+   * sendAttack) that never runs in the tick and never folds into effectiveMods, so a run that never
+   * transports is BYTE-IDENTICAL to pre-M9 (the main + meta runs never transport, so their 17 core +
+   * meta targets stay measured exactly as before). >= 1 confirms the dispatch -> in-transit -> deliver
+   * mechanic actually completes; mirrors {@link minFortressesRazed} (a dedicated-run reachability
+   * floor). If it cannot be hit, the merchant_capacity / MARKET_TIME_SCALE knobs (content/buildings.ts /
+   * systems/market.ts) need tuning — see CHANGELOG "Balance".
+   */
+  minShipmentsDelivered: number
+
   // --- M5.1 automation (idle routines) goals (HARD — see runner.runAutomationCoverage) ---
   // These are proof-of-mechanic floors for the SEPARATE automation coverage run (automation
   // ON), NOT balance-curve warnings: with the deterministic seeded scenario each routine
@@ -370,6 +386,15 @@ export const TARGETS: BalanceTargets = {
   // mods fold to identity when no challenge is active/completed, as in the main + meta runs). If it
   // cannot be hit, tune the goal target / constraint magnitude (content/challenges.ts) — see CHANGELOG.
   minChallengesCompleted: 1,
+
+  // M9: market online. The dedicated run builds a Rynek (merchant capacity), founds a second village
+  // and dispatches a merchant shipment that arrives at the destination over a map-distance travel time.
+  // Floor at the proof-of-mechanic level (>= 1 delivered). Measured by a SEPARATE run (see
+  // sim/runner.runMarket) so the M1–M8 + meta targets stay byte-identical to pre-M9 (transport is a
+  // player-initiated action the main + meta runs never take, so it folds into nothing there). If it
+  // cannot be hit, tune the merchant_capacity / travel-time knobs (content/buildings.ts /
+  // systems/market.ts) — see CHANGELOG "Balance".
+  minShipmentsDelivered: 1,
 
   // M5.1: automation online. With the three gateways unlocked and every toggle ON, the
   // SEPARATE coverage run (automation OFF in the main run, so the goals above are untouched)

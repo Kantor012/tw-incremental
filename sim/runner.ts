@@ -6,13 +6,15 @@ import {
   type GameState,
   type BattleReport,
 } from '../src/engine/state'
+import { D } from '../src/engine/decimal'
 import { simulate } from '../src/engine/tick'
 import { serialize, exportSave, importSave } from '../src/engine/save'
 import { build } from '../src/systems/buildings'
 import { BUILDING_IDS, BUILDINGS } from '../src/content/buildings'
 import { recruit, canRecruit, freePopulation } from '../src/systems/recruitment'
 import { sendAttack, stationedUnits } from '../src/systems/marches'
-import { foundVillage } from '../src/systems/villages'
+import { foundVillage, findFoundingSpot } from '../src/systems/villages'
+import { sendShipment } from '../src/systems/market'
 import { purchaseTech } from '../src/systems/tech'
 import { TECH_NODES, TECH_NODE_IDS } from '../src/content/tech'
 import { fortressTarget } from '../src/content/fortresses'
@@ -104,6 +106,11 @@ import {
   checkChallengeRewardStacks,
   checkChallengeNoSoftlock,
   checkChallengeRoundTrip,
+  checkMarketCapacity,
+  checkMarketConservation,
+  checkMarketDeterminism,
+  checkMarketNoSoftlock,
+  checkMarketSaveLoad,
   type InvariantResult,
 } from './invariants'
 import {
@@ -130,6 +137,7 @@ import {
   type EraRunStats,
   type DynastyRunStats,
   type ChallengeRunStats,
+  type MarketRunStats,
   type AutomationRunStats,
 } from './metrics'
 
@@ -1463,6 +1471,159 @@ function runChallenge(seed: string, ticks: number = CHALLENGE_TICKS): ChallengeR
   return { state, invariants, metrics: { completed, completedMap, rewardActive } }
 }
 
+// --- M9 market (RYNEK — merchant transport between own villages) run ----------------------------
+//
+// A SEPARATE run from every measurement above, mirroring the fortress/challenge rationale: transport
+// is a PLAYER-INITIATED action (like sendAttack) that never runs in the tick and never folds into
+// effectiveMods, so a run that never transports is BYTE-IDENTICAL to pre-M9 — the main + meta runs
+// never transport, so their 17 core + meta targets stay measured exactly as before. The main-run bot
+// also EXCLUDES 'market' from its build candidates (see sim/bot.MAIN_BUILD_IDS), so adding the building
+// to the catalogue cannot drift the main build order. This dedicated run hands a fresh seeded capital
+// the PROVEN endgame economy (every building + tech at its data max — the very state the main run
+// reaches), founds a second village, then dispatches merchant shipments and steps until
+// advanceShipments delivers them on the fixed grid, proving the dispatch -> in-transit -> deliver
+// pipeline is reachable. Pure + deterministic (transport draws NO rng).
+
+/**
+ * Step budget for the SEPARATE M9 market run. Tiny on purpose: the run only needs to dispatch a few
+ * shipments and let them arrive — merchant travel time is the (short) map distance between two adjacent
+ * villages × MARKET_TIME_SCALE (a handful of seconds), so the shipments resolve almost immediately and
+ * the loop breaks the moment the source is drained of in-flight cargo. The generous ceiling bounds the
+ * worst case (an unusually distant second village) rather than the common one.
+ */
+const MARKET_TICKS = 4000
+
+/**
+ * Cargo PER RESOURCE the market run loads into each shipment. Sized so {@link MARKET_SHIPMENTS} of them
+ * fit SIMULTANEOUSLY inside a maxed Rynek's merchant capacity (perLevel × maxLevel) — they are all
+ * dispatched up front, so the peak in-use (MARKET_SHIPMENTS × 3 × this) must stay under that cap — and
+ * so each is comfortably covered by the source's full warehouse. Provisional, matching the building
+ * numbers the Balance phase tunes.
+ */
+const MARKET_SHIP_CARGO = 4000
+
+/** Shipments the market run dispatches up front (proves the multi-shipment capacity accounting holds). */
+const MARKET_SHIPMENTS = 3
+
+/** What a market run yields: the final state, sampled invariants, and the transport tally. */
+interface MarketRun {
+  state: GameState
+  invariants: InvariantResult[]
+  metrics: MarketRunStats
+}
+
+/**
+ * Drive a fresh seeded capital through the M9 transport loop and prove shipments deliver. Hands the
+ * capital the PROVEN endgame economy (every building + tech maxed — DIRECTLY, the dedicated-run helper
+ * pattern, NOT via the main bot build candidates, so the main run stays byte-identical and the market is
+ * excluded there), founds a second village, maxes the destination's warehouse so deliveries never
+ * overflow (transport conserves — the full cargo lands), then dispatches {@link MARKET_SHIPMENTS}
+ * merchant shipments and steps until {@link import('../src/systems/market').advanceShipments} delivers
+ * them on the fixed grid. Samples the hard invariants (incl. the merchant-capacity bound) at every step
+ * a shipment is in flight, then a final pass, plus a bare 'shipments-delivered' proof. Records the
+ * shipments delivered + total resources transported. Deterministic: transport draws NO rng.
+ */
+export function runMarket(seed: string, ticks: number = MARKET_TICKS): MarketRun {
+  const dt = TARGETS.tickSeconds
+  const state = createInitialState(seed, 0)
+  const invariants: InvariantResult[] = []
+  const fromId = state.villageOrder[0]
+  const from = state.villages[fromId]
+
+  // Proven economy on the source (mirrors runFortress): every building + tech at its data max, so the
+  // Rynek grants its full merchant capacity and the warehouse holds the coffers we load.
+  for (const id of BUILDING_IDS) from.buildings[id] = BUILDINGS[id].maxLevel
+  for (const nodeId of TECH_NODE_IDS) state.tech[nodeId] = TECH_NODES[nodeId].maxLevel
+  recomputeDerived(state)
+  from.resources = { wood: from.storageCap, clay: from.storageCap, iron: from.storageCap }
+
+  // Ensure >= 2 villages: found a second near the capital (a fresh dedicated run starts single-village).
+  if (state.villageOrder.length < 2) {
+    const spot = findFoundingSpot(state, fromId)
+    if (spot === null || foundVillage(state, fromId, spot.x, spot.y) === null) {
+      invariants.push({
+        name: 'shipments-delivered',
+        ok: false,
+        detail: 'could not found a second village to transport to',
+      })
+      return { state, invariants, metrics: { shipmentsDelivered: 0, resourcesTransported: D(0) } }
+    }
+  }
+  const toId = state.villageOrder[1]
+  const to = state.villages[toId]
+  // Maxed warehouse on the destination so a delivery never overflows its cap (the dispatched cargo is
+  // fully collected — transport conserves), then refresh derived stats after the bulk building change.
+  for (const id of BUILDING_IDS) to.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+
+  // Freeze raids + the global horde across the whole run so the ONLY resource movement is the transport
+  // (isolates the mechanic from raid/horde attrition — exactly as runFortress freezes raids).
+  for (const vid of state.villageOrder) state.villages[vid].raidTimer = ticks * dt + 1e9
+  state.horde.timer = ticks * dt + 1e9
+
+  // Dispatch the merchant shipments UP FRONT (player-initiated, like sendAttack): cargo leaves the
+  // source immediately and is held in transit, occupying merchant capacity until delivered. All
+  // identical, so the per-shipment cargo sum is a constant.
+  const cargo = { wood: MARKET_SHIP_CARGO, clay: MARKET_SHIP_CARGO, iron: MARKET_SHIP_CARGO }
+  const perShipment = D(MARKET_SHIP_CARGO).mul(RESOURCE_IDS.length)
+  let sent = 0
+  for (let i = 0; i < MARKET_SHIPMENTS; i++) {
+    if (!sendShipment(state, fromId, toId, cargo)) break
+    sent += 1
+  }
+
+  let prevTotal = totalResources(state)
+  for (let i = 0; i < ticks; i++) {
+    const inFlightBefore = from.shipments.length
+    simulate(state, dt)
+    // Sample the hard invariants (incl. the merchant-capacity bound) at every IN-FLIGHT step — cheap
+    // (only a handful before the shipments arrive) and exactly the "every village every sampled step"
+    // the capacity contract requires.
+    if (inFlightBefore > 0) {
+      const phase = `mkt t${i + 1}`
+      invariants.push(...tag([checkMarketCapacity(state)], phase))
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkVillagePlacement(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, true)], phase))
+      prevTotal = totalResources(state)
+    }
+    if (from.shipments.length === 0) break
+  }
+
+  // Final pass: the post-delivery state stays valid + playable, the capacity bound still holds (now at 0
+  // in use), and the whole-run no-softlock (the run made progress iff a shipment delivered).
+  const shipmentsDelivered = sent - from.shipments.length
+  invariants.push(...tag([checkMarketCapacity(state)], 'mktfinal'))
+  invariants.push(...tag(runInvariants(state), 'mktfinal'))
+  invariants.push(...tag([checkArmyConsistency(state)], 'mktfinal'))
+  invariants.push(...tag([checkWorldConsistency(state)], 'mktfinal'))
+  invariants.push(...tag([checkNoSoftlock(state, totalResources(state), shipmentsDelivered > 0)], 'mktfinal'))
+
+  // Bare-named HARD invariant: the dedicated run must DELIVER at least one shipment within budget.
+  invariants.push({
+    name: 'shipments-delivered',
+    ok: shipmentsDelivered >= 1,
+    detail:
+      shipmentsDelivered >= 1
+        ? `delivered ${shipmentsDelivered}/${sent} shipment(s) (${perShipment.mul(shipmentsDelivered).toString()} resources transported)`
+        : `dedicated run delivered no shipments within ${ticks} ticks (sent ${sent})`,
+  })
+
+  return {
+    state,
+    invariants,
+    metrics: {
+      shipmentsDelivered,
+      // No overflow at the maxed-warehouse destination, so the delivered total is exactly the
+      // dispatched cargo of the shipments that arrived.
+      resourcesTransported: perShipment.mul(shipmentsDelivered),
+    },
+  }
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -1663,6 +1824,29 @@ export function runOne(seed: string, ticks: number): RunResult {
   startChallenge(chalRt, CHALLENGE_IDS[1] ?? CHALLENGE_IDS[0])
   invariants.push(checkChallengeRoundTrip(chalRt))
 
+  // M9 market (RYNEK) — a SEPARATE merchant-transport run, the ONLY one that ever dispatches a
+  // shipment. Transport is a player-initiated action (like sendAttack) that never runs in the tick and
+  // never folds into effectiveMods, so a run that never transports is BYTE-IDENTICAL to pre-M9 — the
+  // main + meta runs above never transport, so their 17 core + prestige/era/dynasty/fortress/horde/
+  // challenge targets STILL evaluate here unchanged (the market identity the contract pins). The run's
+  // invariants (sampled validity + the merchant-capacity bound + the bare 'shipments-delivered' proof)
+  // are folded in here, and its metrics feed the market balance target.
+  const market = runMarket(seed)
+  invariants.push(...market.invariants)
+
+  // M9 market proof-of-mechanic checks (self-contained, deterministic — transport draws NO rng):
+  // transport CONSERVES the empire total and never creates resources (market-conservation); merchant
+  // capacity is never exceeded with cargo in flight (market-capacity); a continuous run is byte-
+  // identical to a chunked-offline run WITH a shipment in flight (market-determinism); a run with
+  // resources in transit never softlocks and the cargo always arrives in bounded time
+  // (market-no-softlock); and a state carrying in-flight shipments round-trips through the v20 save
+  // (market-save-load).
+  invariants.push(checkMarketConservation(seed))
+  invariants.push(checkMarketCapacity(market.state))
+  invariants.push(checkMarketDeterminism(seed, OFFLINE_CHECK_SECONDS))
+  invariants.push(checkMarketNoSoftlock(seed))
+  invariants.push(checkMarketSaveLoad(seed))
+
   // M5.1 automation (idle routines) — a SEPARATE coverage run with the three gateways
   // unlocked and every toggle ON (the main run keeps automation OFF, so the targets above are
   // untouched). Asserts each routine demonstrably fires (auto build/recruit/attack) and that
@@ -1800,6 +1984,7 @@ export function runOne(seed: string, ticks: number): RunResult {
     era.stats,
     dynasty.stats,
     challenge.metrics,
+    market.metrics,
     automation.stats,
     fortressDriveRazed,
   )

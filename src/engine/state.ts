@@ -126,6 +126,34 @@ export interface March {
 }
 
 /**
+ * One MERCHANT transport in transit between two OWNED villages (M9 rynek). Defined
+ * inline here (not in market.ts) so the state shape — the single serialized source of
+ * truth — has no runtime dependency on a system module: market.ts imports this TYPE
+ * back, and state.ts imports nothing from market.ts, so there is no initialisation
+ * cycle (mirrors the {@link March} discipline exactly).
+ *
+ * CONVENTION (documented once, used everywhere): a shipment is dispatched FROM a
+ * village (it lives on {@link Village.shipments}) and its `cargo` is DEDUCTED from that
+ * village's resources at dispatch — the resources leave the source immediately and are
+ * held IN TRANSIT, occupying the source's merchant capacity until delivered. Transport
+ * CONSERVES resources: nothing is created; on arrival the cargo is added to the
+ * destination, clamped to its storage cap (overflow spilled, mirroring deliverLoot).
+ * `cargo` is on Decimal (the economy rule); `remaining` is a plain number of seconds
+ * (like {@link March.remaining}), advanced on the SAME fixed tick grid so online /
+ * offline / sim stay byte-identical.
+ */
+export interface Shipment {
+  /** Source village id (the dispatcher; this shipment lives on its {@link Village.shipments}). */
+  fromVillageId: VillageId
+  /** Destination village id (a DIFFERENT existing own village; cargo is delivered here on arrival). */
+  toVillageId: VillageId
+  /** Resources IN TRANSIT, already debited from the source at dispatch. On Decimal. */
+  cargo: ResourceMap
+  /** Seconds left until arrival (advanced on the tick grid; delivered when it reaches 0). */
+  remaining: number
+}
+
+/**
  * One entry in the rolling battle log (last ~20 events). Plain JSON only — loot is
  * pre-summed to a decimal STRING, never a live Decimal — so the log serializes and
  * round-trips without any Decimal tagging. `won` is always from the PLAYER's point
@@ -282,6 +310,15 @@ export interface Village {
   /** Population cap, DERIVED from buildings (farm). Cached; unit upkeep budget. */
   popCap: Decimal
   /**
+   * Merchant CARRY capacity, DERIVED from the market building (M9 rynek) and cached
+   * here like storageCap/popCap. On Decimal so it compounds with the economy. The
+   * transport system (systems/market.ts) reads it to bound in-flight shipments
+   * (capacity in use = Σ cargo of {@link shipments}); it folds into NO production /
+   * storage / pop / combat stat, so a village with no market has merchantCapacity 0
+   * and is byte-identical to pre-M9. Recompute after any change to `buildings`.
+   */
+  merchantCapacity: Decimal
+  /**
    * Owned level per building (0..maxLevel). The authoritative economy input:
    * production / storageCap / popCap are DERIVED from these levels by
    * {@link recomputeVillageDerived}.
@@ -306,6 +343,15 @@ export interface Village {
    * "village.units = all owned" convention.
    */
   marches: March[]
+  /**
+   * Merchant transports dispatched FROM this village (M9 rynek). Each {@link Shipment}'s
+   * cargo was debited from this village's resources at dispatch and is held in transit,
+   * occupying this village's {@link merchantCapacity} until delivered to its destination.
+   * Advanced on the SAME fixed tick grid as marches/recruitment (see tick.ts /
+   * advanceShipments) so transport timing is identical online / offline / sim. Empty by
+   * default, so a run that never transports is byte-identical to pre-M9.
+   */
+  shipments: Shipment[]
   /**
    * Seconds until the next incoming raid. Counts down only while the village is
    * "worth raiding" (it has grown past its starting footprint — see raids.ts), so
@@ -780,6 +826,9 @@ export function recomputeVillageDerived(v: Village, mods: TechModifiers = NO_TEC
   const production: Record<ResourceId, Decimal> = { wood: D(0), clay: D(0), iron: D(0) }
   let storageCap = BASE_STORAGE_CAP
   let popCap = BASE_POP_CAP
+  // M9: base 0 merchant capacity — a village with no market grants none, keeping it
+  // byte-identical to pre-M9. Accumulated from the market building below.
+  let merchantCapacity = D(0)
 
   for (const id of BUILDING_IDS) {
     const level = v.buildings[id]
@@ -805,6 +854,9 @@ export function recomputeVillageDerived(v: Village, mods: TechModifiers = NO_TEC
         break // binary gate consumed by recruitment (unitUnlocked), not a tick-derived stat
       case 'defense_bonus':
         break // M5.2 wall: consumed by villageDefenseMult (raids), not a tick-derived stat
+      case 'merchant_capacity':
+        merchantCapacity = merchantCapacity.add(D(effect.perLevel).mul(level))
+        break // M9 market: a tick-derived/cached stat (Village.merchantCapacity)
     }
   }
 
@@ -819,6 +871,10 @@ export function recomputeVillageDerived(v: Village, mods: TechModifiers = NO_TEC
   v.production = production
   v.storageCap = storageCap
   v.popCap = popCap
+  // M9: merchant capacity is a pure building roll-up (NOT scaled by tech mods — it is not
+  // a production/storage/pop axis), so it is set straight from the accumulator. With no
+  // market it is 0, leaving the village byte-identical to pre-M9.
+  v.merchantCapacity = merchantCapacity
 }
 
 /**
@@ -873,10 +929,16 @@ export function createVillage(id: VillageId, name: string, x = 0, y = 0): Villag
     production: { wood: D(0), clay: D(0), iron: D(0) },
     storageCap: D(0),
     popCap: D(0),
+    // M9: seeded to 0 so the object has its final shape (and key order) before the
+    // recompute below overwrites it. With market initialLevel 0 a fresh village keeps
+    // merchantCapacity 0 (byte-identical to pre-M9).
+    merchantCapacity: D(0),
     buildings: { ...INITIAL_BUILDINGS },
     units: { ...INITIAL_UNITS },
     recruitQueue: [],
     marches: [],
+    // M9: no transports in flight for a fresh village.
+    shipments: [],
     raidTimer: RAID_BASE_INTERVAL,
   }
   // Make production / storageCap / popCap consistent with the starting buildings.

@@ -4,6 +4,7 @@ import { isFiniteDecimal } from './decimal'
 import { RNG } from './rng'
 import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
+import { advanceShipments } from '../systems/market'
 import { advanceRaids } from '../systems/raids'
 import { advanceHorde } from '../systems/hordes'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
@@ -49,6 +50,13 @@ export const TICK_RATE = 1 / 20
  * in this fixed position (after every per-village march/raid draw), so the luck stream's
  * draw count and order are invariant to how `dt` is sliced — keeping online / offline /
  * sim byte-identical with hordes active.
+ *
+ * Merchant transports (M9 rynek) ALSO resolve ONCE per sub-step here on the fixed grid
+ * ({@link advanceShipments}, in a FIXED position next to advanceHorde): every in-flight
+ * {@link Shipment}'s clock decrements and a delivery lands (clamped to the destination's
+ * storage cap) on arrival. It draws NO rng (so its order vs the rng draws is irrelevant)
+ * and does NOT fold into effectiveMods, so a run that never transports is byte-identical to
+ * pre-M9 — online == offline == sim.
  *
  * Challenges (M8) are checked ONCE per sub-step too, AFTER the village loop (next to
  * checkAchievements): {@link checkChallengeCompletion} records an active challenge whose
@@ -145,6 +153,13 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // runAutomation below never draws (it plans against WORST_LUCK, a constant), so this is the
   // last RNG consumer before the writeback.
   advanceHorde(state, state.battleLog, dt, mods, state.stats, rng)
+  // Merchant transports (M9 rynek) resolve here on the fixed grid, ONCE per sub-step in this
+  // FIXED position next to advanceHorde, AFTER the per-village loop. It draws NO rng (so its
+  // order vs the rng draws above is irrelevant — pinned for determinism) and does NOT fold into
+  // effectiveMods, so a run that never transports is BYTE-IDENTICAL to pre-M9. Shipments advance
+  // on the same TICK_RATE sub-step grid as marches, so online == offline == sim stay
+  // byte-identical; cargo is delivered to its destination (clamped to storage cap) on arrival.
+  advanceShipments(state, dt)
   // Automation (M5.1) runs LAST, after the world has fully settled this sub-step
   // (captures applied + barbarians removed by applyConquest, loyalty regenerated): so
   // auto-attack never targets a camp that was floored-and-removed this very step, and

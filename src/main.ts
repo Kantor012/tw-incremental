@@ -18,6 +18,7 @@ import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
 import { sendAttack, sendScout } from './systems/marches'
 import { foundVillage } from './systems/villages'
+import { sendShipment } from './systems/market'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
@@ -174,6 +175,19 @@ mountApp(root, {
     }
     return id
   },
+  onTransport: (fromVillageId, toVillageId, cargo) => {
+    // Dispatch a MERCHANT shipment (M9 rynek): the cargo leaves the source village
+    // immediately (debited and held in transit, occupying its merchant capacity) and is
+    // delivered to the destination on arrival (clamped to its storage cap, overflow
+    // spilled). sendShipment re-validates via canTransport and no-ops (returns false) when
+    // the transport is not sendable; we commit + persist only on a successful send.
+    const ok = sendShipment(store.state, fromVillageId, toVillageId, cargo)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onPurchaseTech: (nodeId: string) => {
     // purchaseTech spends from the GLOBAL resource pool and recomputes derived
     // multipliers internally; we only persist + commit on success.
@@ -299,7 +313,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.23.0',
+  version: '0.24.0',
   offlineSeconds,
 })
 

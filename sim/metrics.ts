@@ -230,6 +230,17 @@ export interface RunMetrics {
    */
   challengeRewardActive: boolean
 
+  // --- M9 market (RYNEK — merchant transport between own villages) ---
+  // Measured by a SEPARATE run (see runner.runMarket) that builds a market, founds a second
+  // village and dispatches merchant shipments — kept apart from the main + meta runs, which never
+  // transport (transport is a player-initiated action that never runs in the tick and never folds
+  // into effectiveMods), so a run that never transports is BYTE-IDENTICAL to pre-M9 and the 17 core
+  // + meta targets stay untouched.
+  /** Shipments DELIVERED over the dedicated market run (dispatched from one village, arrived at another). */
+  shipmentsDelivered: number
+  /** Total resources moved by the delivered shipments over the run — exact decimal string (transport throughput). */
+  resourcesTransported: string
+
   // --- M5.1 automation (idle routines) ---
   // Measured by a SEPARATE coverage run (see runner.runAutomationCoverage) with the three
   // automation gateways unlocked and every toggle ON — kept apart from the MAIN run, which
@@ -409,6 +420,21 @@ export interface ChallengeRunStats {
 }
 
 /**
+ * Market (M9 — RYNEK) counters from the SEPARATE merchant-transport run (see runner.runMarket).
+ * Kept apart from {@link RunStats} / the meta run stats because it is produced by a different run —
+ * the only one that ever DISPATCHES a merchant shipment (transport is a player-initiated action that
+ * never runs in the tick and never folds into effectiveMods), so the main + meta targets stay
+ * measured BYTE-IDENTICAL to pre-M9 (a run that never transports is unchanged). {@link collect} folds
+ * these straight into the matching {@link RunMetrics} market fields. Mirrors {@link ChallengeRunStats}.
+ */
+export interface MarketRunStats {
+  /** Shipments DELIVERED over the run (dispatched from one village, arrived at another). */
+  shipmentsDelivered: number
+  /** Total resources moved by the delivered shipments (Decimal, exact) — the transport throughput. */
+  resourcesTransported: Decimal
+}
+
+/**
  * Automation (M5.1) counters from the SEPARATE coverage run (see
  * runner.runAutomationCoverage). Kept apart from {@link RunStats} because it is produced by
  * a different run (automation ON) than the main economy/combat metrics (automation OFF), so
@@ -547,6 +573,7 @@ export function collect(
   era: EraRunStats,
   dynasty: DynastyRunStats,
   challenge: ChallengeRunStats,
+  market: MarketRunStats,
   automation: AutomationRunStats,
   fortressDriveRazed: number,
 ): RunMetrics {
@@ -674,6 +701,10 @@ export function collect(
 
     challengesCompleted: challenge.completed,
     challengeRewardActive: challenge.rewardActive,
+
+    // M9: the dedicated market run's transport throughput (resourcesTransported → exact string).
+    shipmentsDelivered: market.shipmentsDelivered,
+    resourcesTransported: market.resourcesTransported.toString(),
 
     automationBuilt: automation.built,
     automationRecruited: automation.recruited,

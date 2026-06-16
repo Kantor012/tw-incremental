@@ -1,4 +1,4 @@
-import type { AutomationSettings, GameStore, VillageId } from '../engine/state'
+import type { AutomationSettings, GameStore, VillageId, ResourceId } from '../engine/state'
 import type { Signal } from '../engine/store'
 import type { GameBus } from '../engine/eventbus'
 import type { BuildingId } from '../content/buildings'
@@ -77,6 +77,21 @@ export interface UiCtx {
    * panel checks `canFound`/`foundCost` from systems/villages directly for cues).
    */
   onFound: (payerVillageId: VillageId, x: number, y: number) => VillageId | null
+  /**
+   * Dispatch a MERCHANT shipment (M9 rynek) carrying `cargo` (wood/clay/iron amounts) from
+   * `fromVillageId` to another OWNED village `toVillageId`; returns true on a successful send.
+   * On success the cargo LEAVES the source immediately (debited and held in transit, occupying
+   * the source's merchant capacity) and is delivered to the destination on arrival (clamped to
+   * its storage cap, overflow spilled). Transport CONSERVES resources — it never creates any —
+   * and is benign/reversible, so no confirmation is needed. The market panel reads
+   * `canTransport` (systems/market) itself for the disabled/affordability cue; this callback is
+   * the commit, not the validation. Mirrors {@link onAttack} / {@link onFound}.
+   */
+  onTransport: (
+    fromVillageId: VillageId,
+    toVillageId: VillageId,
+    cargo: Record<ResourceId, number>,
+  ) => boolean
   /**
    * Purchase the NEXT level of the global tech node `nodeId`, paid from the GLOBAL
    * resource pool (summed across all villages); returns true on success (cost spent,

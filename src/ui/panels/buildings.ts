@@ -102,6 +102,10 @@ function effectText(v: Village, id: BuildingId, mods: TechModifiers = NO_TECH_MO
       // by raids.ts) — show the resulting bonus as a percentage so it reads like the
       // other global-effect lines (e.g. "+50%" for a maxed wall at perLevel 0.05).
       return 'Obrona wioski: +' + Math.round((villageDefenseMult(v) - 1) * 100) + '%'
+    case 'merchant_capacity':
+      // The market grants merchant CARRY capacity (cached as Village.merchantCapacity);
+      // show the level's total like the other linear-per-level lines (storage/population).
+      return 'Ładowność kupców: +' + formatNumber(D(e.perLevel).mul(level))
     default: {
       const _exhaustive: never = e
       return String(_exhaustive)

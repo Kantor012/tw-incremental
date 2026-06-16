@@ -263,10 +263,11 @@ describe('academy (Pałac — noble-unlock building)', () => {
   })
 
   it('appears right before the M5.2 wall in the stable BUILDING_IDS order', () => {
-    // The academy was appended before the wall; the wall (M5.2) is now the last key, so
-    // the academy sits second-to-last. Both checks pin the stable, append-only order.
-    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('academy')
-    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('wall')
+    // Append-only order: ... academy, wall, market (M9 appended the market after the wall).
+    // The academy still sits immediately before the wall — pin that relative order so the
+    // check survives further append-only growth of the trailing keys.
+    const academyIdx = BUILDING_IDS.indexOf('academy')
+    expect(BUILDING_IDS[academyIdx + 1]).toBe('wall')
   })
 
   it('recomputeVillageDerived ignores it — raising the academy changes no derived stat', () => {
@@ -329,8 +330,11 @@ describe('wall (Mur — defensive building)', () => {
     expect(def.initialLevel ?? 0).toBe(0)
   })
 
-  it('appears LAST in the stable BUILDING_IDS order (appended for M5.2)', () => {
-    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('wall')
+  it('appears right before the M9 market in the stable BUILDING_IDS order (was last until M9)', () => {
+    // The wall (M5.2) was the last key until M9 appended the market after it; the wall now
+    // sits second-to-last, still after the academy. Pins the stable, append-only order.
+    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('market')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('wall')
   })
 
   it('recomputeVillageDerived ignores it — raising the wall changes no derived stat', () => {

@@ -79,6 +79,8 @@ import {
 } from '../src/systems/dynasty'
 import { startChallenge, checkChallengeCompletion } from '../src/systems/challenges'
 import { CHALLENGES, CHALLENGE_IDS, type ChallengeMods } from '../src/content/challenges'
+import { sendShipment, merchantCapacityInUse } from '../src/systems/market'
+import { foundVillage, findFoundingSpot } from '../src/systems/villages'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
@@ -3647,5 +3649,297 @@ export function checkMetaResetClearsHorde(seed: string): InvariantResult {
       issues.length === 0
         ? `ascend / newEra / newDynasty each re-armed the horde to {timer:${HORDE_INTERVAL},level:0}`
         : issues.join('; '),
+  }
+}
+
+// --- M9 market (RYNEK — merchant transport between own villages) coverage ----------------------
+// Self-contained proof-of-mechanic checks for the market engine (systems/market.ts), mirroring the
+// fortress/horde checks above: no bot, and — unlike combat — NO randomness at all (transport draws no
+// rng). Transport is a PLAYER-INITIATED action (like sendAttack) that never runs in the tick and never
+// folds into effectiveMods, so a run that never transports is BYTE-IDENTICAL to pre-M9; these checks
+// isolate the guarantees the brief pins for the transport primitive itself: it CONSERVES resources
+// (never creates any), it never exceeds merchant capacity, it replays byte-identically online vs
+// chunked-offline with cargo in flight, it never strands a run (cargo always arrives in bounded time),
+// and an in-flight shipment survives the real save/load path.
+
+/** Travel-time horizon (seconds) the market checks step within — far past any two-adjacent-village hop. */
+const MARKET_DELIVERY_HORIZON = 100000
+
+/**
+ * Set up a fresh state for a transport: a maxed Rynek + full warehouse on the capital (the source) and
+ * a SECOND village founded nearby with a maxed warehouse (so a delivery never overflows its cap — the
+ * dispatched cargo lands in full, transport conserving it). Returns the two ids; `fromId === toId` means
+ * no valid founding site was found (the caller fails the check rather than testing a degenerate scenario).
+ * Built directly (the dedicated-helper pattern), so it is deterministic and bot-free.
+ */
+function seedMarket(state: GameState): { fromId: string; toId: string } {
+  const fromId = state.villageOrder[0]
+  const from = state.villages[fromId]
+  // Proven economy on the source: every building at its data max, so the Rynek grants its full merchant
+  // capacity and the warehouse holds the coffers we load.
+  for (const id of BUILDING_IDS) from.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  from.resources = { wood: from.storageCap, clay: from.storageCap, iron: from.storageCap }
+
+  const spot = findFoundingSpot(state, fromId)
+  if (spot !== null) foundVillage(state, fromId, spot.x, spot.y)
+  const toId = state.villageOrder[1] ?? fromId
+  if (toId !== fromId) {
+    const to = state.villages[toId]
+    // Maxed warehouse → a delivery never overflows the destination's cap; start it empty so the
+    // delivered cargo is the only thing in its pool.
+    for (const id of BUILDING_IDS) to.buildings[id] = BUILDINGS[id].maxLevel
+    recomputeDerived(state)
+    to.resources = { wood: ZERO, clay: ZERO, iron: ZERO }
+  }
+  return { fromId, toId }
+}
+
+/**
+ * Transport CONSERVES resources (M9): the empire-wide resource total immediately AFTER a delivery
+ * equals the total immediately BEFORE dispatch (no resource is created), and never exceeds it. Drives
+ * the REAL engine ({@link sendShipment} + {@link simulate}'s advanceShipments) on a seeded two-village
+ * scenario with EVERY other resource flux frozen — production zeroed, raids + the global horde frozen —
+ * so the transport is the SOLE resource mover and the before/after totals are directly comparable. The
+ * destination has a maxed warehouse so the cargo lands without spilling (the no-overflow case the
+ * contract pins for the equality). Deterministic; pure of the bot.
+ */
+export function checkMarketConservation(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const { fromId, toId } = seedMarket(state)
+  if (fromId === toId) {
+    return { name: 'market-conservation', ok: false, detail: 'could not found a second village to transport to' }
+  }
+  // Freeze every flux that is NOT the transport: zero production (so totals only move via the shipment),
+  // freeze raids + the global horde so nothing is stolen. Then transport is the sole resource mover.
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    v.production = { wood: ZERO, clay: ZERO, iron: ZERO }
+    v.raidTimer = MARKET_DELIVERY_HORIZON * 1e3
+  }
+  state.horde.timer = MARKET_DELIVERY_HORIZON * 1e3
+
+  const before = totalResources(state)
+  if (!sendShipment(state, fromId, toId, { wood: 10000, clay: 10000, iron: 10000 })) {
+    return { name: 'market-conservation', ok: false, detail: 'sendShipment refused a valid transport' }
+  }
+  const from = state.villages[fromId]
+  const CHUNK = 5
+  let t = 0
+  for (; t < MARKET_DELIVERY_HORIZON && from.shipments.length > 0; t += CHUNK) simulate(state, CHUNK)
+
+  const delivered = from.shipments.length === 0
+  const after = totalResources(state)
+  const conserved = after.eq(before)
+  const neverExceeds = after.lte(before)
+  const ok = delivered && conserved && neverExceeds
+  return {
+    name: 'market-conservation',
+    ok,
+    detail: ok
+      ? `transport conserved the empire total (${before.toString()} == ${after.toString()}, no overflow) and created nothing`
+      : !delivered
+        ? `shipment never arrived within ${MARKET_DELIVERY_HORIZON}s (stranded in transit)`
+        : !neverExceeds
+          ? `total ROSE across transport (${before.toString()} -> ${after.toString()}) — transport created resources`
+          : `total changed across transport (${before.toString()} -> ${after.toString()}) — not conserved`,
+  }
+}
+
+/**
+ * Merchant capacity is NEVER exceeded (M9): for EVERY village, the cargo currently in flight from it
+ * ({@link merchantCapacityInUse}) stays within its {@link import('../src/engine/state').Village.merchantCapacity},
+ * and every in-flight shipment is well-formed (finite non-negative `remaining`, finite non-negative
+ * Decimal cargo — a corrupt shipment would leak resources). A per-STATE check (like
+ * {@link checkArmyConsistency}), so the market run can sample it at every step a shipment is in flight
+ * ("every village every sampled step"). Pure / Node-safe.
+ */
+export function checkMarketCapacity(state: GameState): InvariantResult {
+  const issues: string[] = []
+  for (const vid of state.villageOrder) {
+    const v = state.villages[vid]
+    const used = merchantCapacityInUse(v)
+    if (used.gt(v.merchantCapacity)) {
+      issues.push(`${vid}: in-use ${used.toString()} > capacity ${v.merchantCapacity.toString()}`)
+    }
+    for (const s of v.shipments) {
+      if (!Number.isFinite(s.remaining) || s.remaining < 0) issues.push(`${vid}: shipment.remaining=${s.remaining}`)
+      for (const r of RESOURCE_IDS) {
+        const amt = s.cargo[r]
+        if (!isFiniteDecimal(amt) || amt.lt(0)) issues.push(`${vid}: shipment.cargo.${r}=${amt.toString()}`)
+      }
+    }
+  }
+  return {
+    name: 'market-capacity',
+    ok: issues.length === 0,
+    detail: issues.length ? issues.join('; ') : undefined,
+  }
+}
+
+/**
+ * Put a fresh state into the SAME live scenario as {@link seedRecruitment} (a training queue, an
+ * in-flight march AND active raids on the capital) and ADDITIONALLY found a second village and dispatch a
+ * merchant shipment to it, so the dt-chunk determinism is tested WITH a transport crossing the window.
+ * advanceShipments draws no rng, but it advances on the fixed TICK_RATE grid alongside the rng-drawing
+ * raid/march clocks, so a regression that resolves a shipment on the wrong sub-step (or off-grid) would
+ * desync the persisted state — exactly what the byte-identity check below catches. Both branches seed
+ * this identically. RETURNS the number of shipments actually dispatched (>= 1 on success, 0 if the
+ * second village could not be founded or sendShipment refused) so the caller can prove non-vacuity.
+ */
+function seedMarketDue(state: GameState): number {
+  const fromId = state.villageOrder[0]
+  const from = state.villages[fromId]
+  // A maxed Rynek (merchant capacity) + a barracks for the live training/march clocks, a prestige
+  // multiplier so effectiveMods is non-trivial, and stocked coffers (set directly, mirroring
+  // seedRecruitment — decoupled from building prices).
+  from.buildings.market = BUILDINGS.market.maxLevel
+  from.buildings.barracks = 1
+  state.prestige.nodes.prosperity_root = 2
+  from.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+  const spot = findFoundingSpot(state, fromId)
+  if (spot !== null) foundVillage(state, fromId, spot.x, spot.y)
+  const toId = state.villageOrder[1] ?? fromId
+  if (toId !== fromId) {
+    state.villages[toId].buildings.warehouse = BUILDINGS.warehouse.maxLevel
+  }
+  recomputeDerived(state)
+  from.popCap = D(1000) // headroom: queued + trained + away units all count
+
+  // Live clocks (mirror seedRecruitment): a training queue + an in-flight march at a concrete tier-6 camp.
+  recruit(from, 'spearman', 100)
+  from.units.axeman = 60
+  const army = {} as Record<UnitId, number>
+  for (const id of UNIT_IDS) army[id] = 0
+  army.axeman = 40
+  sendAttack(from, state.world, state.battleLog, targetOfLevel(state.world, 6).id, army)
+  // A merchant shipment in flight (the M9 path under test): cargo well within the maxed Rynek's
+  // capacity, crossing the window so advanceShipments resolves it on the fixed grid in both branches.
+  if (toId !== fromId && sendShipment(state, fromId, toId, { wood: 5000, clay: 5000, iron: 5000 })) {
+    return from.shipments.length // >= 1: positive evidence a transport was dispatched
+  }
+  return 0
+}
+
+/**
+ * Transport DETERMINISM at INTEGRATION level (M9): a shipment resolving inside the deterministic tick
+ * sub-step advances on the fixed TICK_RATE grid, so crediting a span as one big {@link simulate} (online
+ * catch-up) must be byte-identical to the chunked offline path ({@link applyOffline}) — even with a
+ * shipment in flight. Mirrors {@link checkOfflineDeterminism} / {@link checkHordeDeterminism} but on
+ * {@link seedMarketDue}. Asserts NON-VACUITY with POSITIVE evidence (mirroring
+ * {@link checkHordeDeterminism}'s `>= 1` discipline): seedMarketDue ACTUALLY dispatched >= 1 shipment
+ * (captured BEFORE simulate) AND the source's shipments then cleared — sent-then-delivered, not
+ * never-sent — so "identical" can never pass by leaving the transport untouched (e.g. if founding the
+ * second village or sendShipment ever failed, dispatched would be 0 and the check fails loudly instead
+ * of vacuously). `seconds` stays within
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller uses an hour).
+ */
+export function checkMarketDeterminism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  const dispatched = seedMarketDue(big) // >= 1 iff a transport was actually launched
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedMarketDue(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const equal = serialize(big) === serialize(chunked)
+  const fromBig = big.villages[big.villageOrder[0]]
+  const inFlight = fromBig?.shipments.length ?? -1
+  const resolved = dispatched >= 1 && inFlight === 0 // sent-then-cleared, never the never-sent case
+  const ok = equal && resolved
+  return {
+    name: 'market-determinism',
+    ok,
+    detail: ok
+      ? `transport stream identical online vs chunked-offline (${dispatched} shipment(s) delivered on the fixed grid)`
+      : !resolved
+        ? `no shipment dispatched-then-resolved in the window (dispatched ${dispatched}, in-flight ${inFlight}) — vacuous determinism check`
+        : 'chunked offline catch-up diverged from a single-step simulate WITH a shipment in flight',
+  }
+}
+
+/**
+ * A market run never SOFTLOCKS (M9): with cargo in transit, (a) the resources always arrive within a
+ * bounded idle horizon (in-flight cargo is never stranded), and (b) at every step SOME village still
+ * offers a progress action. Drives the REAL engine on a seeded two-village scenario, dispatches a
+ * shipment, and steps it to delivery asserting both. Deterministic; pure of the bot beyond the
+ * {@link chooseAction} availability probe.
+ */
+export function checkMarketNoSoftlock(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const { fromId, toId } = seedMarket(state)
+  if (fromId === toId) {
+    return { name: 'market-no-softlock', ok: false, detail: 'could not found a second village to transport to' }
+  }
+  if (!sendShipment(state, fromId, toId, { wood: 10000, clay: 10000, iron: 10000 })) {
+    return { name: 'market-no-softlock', ok: false, detail: 'sendShipment refused a valid transport' }
+  }
+  const from = state.villages[fromId]
+  const hasAction = (): boolean => {
+    const mods = effectiveMods(state)
+    for (const vid of state.villageOrder) {
+      if (chooseAction(state.villages[vid], state.world, mods) !== null) return true
+    }
+    return false
+  }
+
+  const issues: string[] = []
+  if (!hasAction()) issues.push('no progress action available with a shipment in flight (softlock)')
+  const CHUNK = 30
+  let t = 0
+  for (; t < MARKET_DELIVERY_HORIZON && from.shipments.length > 0; t += CHUNK) {
+    simulate(state, CHUNK)
+    if (!hasAction()) {
+      issues.push(`no progress action at t=${t}s (softlock)`)
+      break
+    }
+  }
+  if (from.shipments.length > 0) issues.push(`shipment still in flight after ${MARKET_DELIVERY_HORIZON}s (stranded cargo)`)
+
+  return {
+    name: 'market-no-softlock',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `shipment arrived within ${t}s and a progress action was always available`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * A market save/load ROUND-TRIPS with shipments in flight (M9, CLAUDE.md hard rule #3): the per-village
+ * `shipments` array — each with its Decimal cargo and its partial `remaining` clock — must survive the
+ * real export/import (base64) path byte-for-byte, so a mid-transit save resumes losslessly. Dispatches
+ * TWO shipments (so the array is multi-entry), advances a little so `remaining` is a partial value, then
+ * compares serialize(state) vs serialize(import(export(state))) AND asserts the cargo is still in flight
+ * after the round-trip. Mirrors {@link checkFortressSaveLoad} / {@link checkHordeSaveLoad}.
+ */
+export function checkMarketSaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const { fromId, toId } = seedMarket(state)
+  if (fromId === toId) {
+    return { name: 'market-save-load', ok: false, detail: 'could not found a second village to transport to' }
+  }
+  sendShipment(state, fromId, toId, { wood: 7000, clay: 3000, iron: 1000 })
+  sendShipment(state, fromId, toId, { wood: 1000, clay: 2000, iron: 4000 })
+  // Advance one step so `remaining` is a partial (non-initial) value — the load must resume mid-flight.
+  simulate(state, 1)
+
+  const restored = importSave(exportSave(state))
+  const a = serialize(state)
+  const b = serialize(restored)
+  const from = restored.villages[fromId]
+  const inFlight = from !== undefined && from.shipments.length >= 1
+  const ok = a === b && inFlight
+  return {
+    name: 'market-save-load',
+    ok,
+    detail: ok
+      ? `${from.shipments.length} in-flight shipment(s) (cargo + remaining) survived export/import byte-identically`
+      : a !== b
+        ? 'state with in-flight shipments changed across export/import'
+        : 'in-flight shipments did not survive export/import',
   }
 }

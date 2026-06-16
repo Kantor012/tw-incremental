@@ -154,6 +154,8 @@ function buildingEffectText(effect: BuildingEffect): string {
       return 'Odblokowuje szkolenie szlachcica i przejmowanie wiosek barbarzyńskich.'
     case 'defense_bonus':
       return 'Obrona wioski przed najazdami: +' + pct(effect.perLevel) + ' na poziom.'
+    case 'merchant_capacity':
+      return 'Ładowność kupców (transport między wioskami): +' + formatNumber(effect.perLevel, 0) + ' na poziom.'
     default: {
       const _exhaustive: never = effect
       return _exhaustive

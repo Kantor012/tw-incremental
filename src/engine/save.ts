@@ -54,7 +54,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 19
+export const SAVE_VERSION = 20
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -599,6 +599,39 @@ export function migrate(raw: any): any {
       challenge: isObject(s.challenge) ? s.challenge : { activeId: null, completed: {} },
       version: 19,
     }),
+    // v19 -> v20: market / merchant transport (M9 — RYNEK). A v19 save predates the new
+    // 'market' BUILDING key (appended to BUILDING_IDS after 'wall') and the per-village
+    // `shipments` list, so backfill both WITHOUT disturbing the player's progress:
+    //  - every village's `buildings` gains market:0 by spreading INITIAL_BUILDINGS *first*,
+    //    so the save's own levels win over the seed and existing progress is preserved
+    //    (exactly as the v2->v3 / v6->v7 / v10->v11 building backfills did). Without this,
+    //    validateVillage — which iterates the now-longer BUILDING_IDS — would reject the save;
+    //  - every village gains `shipments: []` (no transports in flight) unless it already
+    //    carries an array one (forward-compat).
+    // The merchant_capacity effect touches NO production/storage/pop/combat stat, so a
+    // migrated run with no market is byte-identical to pre-M9; the derived `merchantCapacity`
+    // is NOT seeded here (it is a cached derived stat, recomputed by importSave's
+    // recomputeDerived pass afterwards — exactly how prior migrations leave storageCap/popCap
+    // to recompute). Malformed entries are left as-is so validateState rejects them loudly.
+    19: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+          shipments: Array.isArray(v.shipments) ? v.shipments : [],
+        }
+      }
+      return { ...s, villages, version: 20 }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -622,8 +655,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
  * because a NaN / Infinity / negative would corrupt the economy and then get
  * autosaved (CLAUDE.md hard rule #3); importSave is reachable from arbitrary pasted
  * input, so this is the only semantic gate.
+ *
+ * `villageIds` is the set of all KNOWN village ids (the keys of `state.villages`), threaded
+ * in so the M9 `shipments` check can reject a transport whose from/to points at a village
+ * that does not exist — the one per-village check that needs cross-village knowledge.
  */
-function validateVillage(v: unknown, id: string): void {
+function validateVillage(v: unknown, id: string, villageIds: ReadonlySet<string>): void {
   if (!isObject(v)) throw new Error(`save: village ${id} not an object`)
   if (typeof v.id !== 'string') throw new Error(`save: village ${id} invalid id`)
   if (typeof v.name !== 'string') throw new Error(`save: village ${id} invalid name`)
@@ -768,6 +805,36 @@ function validateVillage(v: unknown, id: string): void {
   if (typeof raidTimer !== 'number' || !Number.isFinite(raidTimer) || raidTimer < 0) {
     throw new Error(`save: village ${id} invalid raidTimer`)
   }
+
+  // Shipments (M9 rynek) — merchant transports dispatched FROM this village. Each is a
+  // well-formed in-transit cargo, mirroring the march validation above: fromVillageId /
+  // toVillageId must be KNOWN village ids (a stray id would mis-deliver and then get
+  // autosaved), `cargo` a ResourceMap of finite, non-negative Decimals (a NaN/negative cargo
+  // would corrupt the destination economy on delivery), and `remaining` a finite, non-negative
+  // number of seconds. The v19->v20 migration backfills shipments = [] on every pre-M9 save,
+  // so a migrated save always carries a (possibly empty) array. The derived merchantCapacity is
+  // NOT validated here — it is recomputed on load (recomputeDerived), so it is not authoritative.
+  const { shipments } = v
+  if (!Array.isArray(shipments)) throw new Error(`save: village ${id} invalid shipments`)
+  for (const sh of shipments) {
+    if (!isObject(sh)) throw new Error(`save: village ${id} invalid shipment`)
+    if (typeof sh.fromVillageId !== 'string' || !villageIds.has(sh.fromVillageId)) {
+      throw new Error(`save: village ${id} invalid shipment fromVillageId`)
+    }
+    if (typeof sh.toVillageId !== 'string' || !villageIds.has(sh.toVillageId)) {
+      throw new Error(`save: village ${id} invalid shipment toVillageId`)
+    }
+    if (!isObject(sh.cargo)) throw new Error(`save: village ${id} invalid shipment cargo`)
+    for (const r of REQUIRED_RESOURCES) {
+      const n = sh.cargo[r]
+      if (!(n instanceof Decimal) || !isFiniteDecimal(n) || n.lt(0)) {
+        throw new Error(`save: village ${id} invalid shipment cargo ${r}`)
+      }
+    }
+    if (typeof sh.remaining !== 'number' || !Number.isFinite(sh.remaining) || sh.remaining < 0) {
+      throw new Error(`save: village ${id} invalid shipment remaining`)
+    }
+  }
 }
 
 /**
@@ -839,7 +906,10 @@ export function validateState(s: unknown): GameState {
       throw new Error(`save: village ${key} not in villageOrder`)
     }
   }
-  for (const id of villageOrder) validateVillage(villages[id], id)
+  // The known-id set (the keys of `villages`, == villageOrder by the bijection above) is
+  // threaded into each village check so the M9 shipment from/to ids can be vetted against it.
+  const villageIds = new Set<string>(villageKeys)
+  for (const id of villageOrder) validateVillage(villages[id], id, villageIds)
 
   // Spatial world (M2.2) — a Decimal-free bag of plain barbarian descriptors,
   // deterministically generated from the seed. The UI and marches.ts index into

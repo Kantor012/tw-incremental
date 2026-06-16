@@ -288,6 +288,16 @@ function evalTargets(r: RunResult): TargetCheck[] {
       ok: m.challengesCompleted >= TARGETS.minChallengesCompleted,
       detail: `completed ${m.challengesCompleted} challenge(s) in the dedicated run (reward active: ${m.challengeRewardActive}; target >= ${TARGETS.minChallengesCompleted})`,
     },
+    {
+      // M9: the bot must DELIVER at least minShipmentsDelivered merchant shipments in the separate
+      // market run. Added ALONGSIDE the 17 core + prestige/era/dynasty/fortress/horde/challenge targets
+      // above (all of which STILL evaluate here, unchanged): transport is a player-initiated action the
+      // main + meta runs never take and which folds into nothing, so those targets stay BYTE-IDENTICAL
+      // to pre-M9 (the market-identity the contract pins) — see the per-seed report below.
+      name: 'shipments-delivered',
+      ok: m.shipmentsDelivered >= TARGETS.minShipmentsDelivered,
+      detail: `delivered ${m.shipmentsDelivered} shipment(s) carrying ${m.resourcesTransported} resources in the dedicated market run (target >= ${TARGETS.minShipmentsDelivered})`,
+    },
   ]
 }
 
@@ -507,6 +517,44 @@ async function main(): Promise<void> {
     console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
     // Surface each detail so a passing completion / determinism / constraint / reward check is visible.
     for (const name of m8Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
+  // --- Market per seed (M9 RYNEK; SEPARATE merchant-transport run) ---
+  console.log('--- Market (end) ---')
+  console.log('seed     | shipments delivered | resources transported')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.shipmentsDelivered).padStart(19)} | ${m.resourcesTransported}`,
+    )
+  }
+  console.log('')
+
+  // --- M9 market coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M9 market: RYNEK transport (coverage) ---')
+  const m9Names = [
+    'shipments-delivered',
+    'market-conservation',
+    'market-capacity',
+    'market-determinism',
+    'market-no-softlock',
+    'market-save-load',
+  ]
+  for (const r of results) {
+    const line = m9Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing conservation / capacity / determinism / round-trip check is visible.
+    for (const name of m9Names) {
       const inv = r.invariants.find((i) => i.name === name)
       if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
     }
