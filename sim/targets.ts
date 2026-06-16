@@ -242,6 +242,22 @@ export interface BalanceTargets {
    */
   minShipmentsDelivered: number
 
+  // --- M9.2 market EXCHANGE (RYNEK — wymiana surowców) goal (warning) ---
+  /**
+   * At least this much GROSS input (any resource) must be TRADED AWAY via market exchange in the SEPARATE
+   * market-driving run (runner.runMarket) — proof the M9.2 exchange pipeline (convert one resource type
+   * into another AT THE SAME village, instantly, paying the spread: received = floor(input × rate) with
+   * rate < 1, so it is a convenience / surplus sink, never arbitrage) is reachable within the budget.
+   * Measured APART from the main run on purpose: exchange is a PLAYER-INITIATED action (like sendShipment)
+   * that never runs in the tick and never folds into effectiveMods, so a run that never exchanges is
+   * BYTE-IDENTICAL to pre-M9.2 (the main + meta runs never exchange, so their core + meta targets stay
+   * measured exactly as before — the only state delta is the new stats.resourcesExchanged counter, which
+   * starts at 0 in both a fresh and a migrated save). >= 1 confirms the debit -> floored-credit -> spread
+   * mechanic actually completes; mirrors {@link minShipmentsDelivered} (a dedicated-run reachability
+   * floor). If it cannot be hit, the EXCHANGE_RATE_* knobs (systems/market.ts) need tuning — see CHANGELOG.
+   */
+  minResourcesExchanged: number
+
   // --- M10 cavalry (KAWALERIA — Stajnia-gated mounted units) goal (warning) ---
   /**
    * The bot must TRAIN at least this many cavalry (light + heavy) in the SEPARATE cavalry-driving run
@@ -412,6 +428,15 @@ export const TARGETS: BalanceTargets = {
   // cannot be hit, tune the merchant_capacity / travel-time knobs (content/buildings.ts /
   // systems/market.ts) — see CHANGELOG "Balance".
   minShipmentsDelivered: 1,
+
+  // M9.2: market exchange (wymiana) online. The dedicated market run builds a Rynek and trades a slab of
+  // wood into iron AT the source village, instantly, paying the spread (received = floor(input × rate),
+  // rate < 1 — a strict loss, never arbitrage). Floor at the proof-of-mechanic level (>= 1 gross input
+  // traded). Measured by the SEPARATE market run (see sim/runner.runMarket) so the M1–M9 + meta targets
+  // stay BYTE-IDENTICAL to pre-M9.2 (exchange is a player-initiated action the main + meta runs never take,
+  // so it folds into nothing there — the only delta is the inert resourcesExchanged=0 counter). If it
+  // cannot be hit, tune the EXCHANGE_RATE_* knobs (systems/market.ts) — see CHANGELOG "Balance".
+  minResourcesExchanged: 1,
 
   // M10: cavalry online. The dedicated run builds the Stajnia (UNLOCKING the cavalry roster — the gate the
   // main run never opens, since the Stajnia is autoBuildable:false), recruits BOTH mounted units on the

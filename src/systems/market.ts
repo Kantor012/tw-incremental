@@ -209,3 +209,103 @@ export function advanceShipments(state: GameState, dtSeconds: number): void {
     }
   }
 }
+
+/* ─────────────────────────── Rynek: WYMIANA surowców (M9.2) ─────────────────────────── */
+
+/**
+ * Exchange-rate floor (level 1 with no per-level bonus would give BASE + PER_LEVEL). The rate
+ * is the SPREAD: you receive `input × rate` of the other resource, so a rate < 1 always returns
+ * LESS value than you put in.
+ */
+const EXCHANGE_RATE_BASE = 0.5
+/** Per market-level improvement to the exchange rate (a second progression purpose for the Rynek). */
+const EXCHANGE_RATE_PER_LEVEL = 0.02
+/**
+ * Hard ceiling on the exchange rate. STRICTLY < 1 by construction (0.9), which is what guarantees
+ * the core invariant below: no attainable market level can ever push the rate to 1, so a round-trip
+ * (wood→clay→wood) always nets a strict LOSS and exchange can never mint resources.
+ */
+const EXCHANGE_RATE_CAP = 0.9
+
+/**
+ * Market exchange rate at `marketLevel`: 0 with no market (level < 1, nothing to exchange),
+ * otherwise min(CAP, BASE + PER_LEVEL × marketLevel). It improves with the market level (a second
+ * progression reason to upgrade the Rynek) but is ALWAYS strictly < 1 — because EXCHANGE_RATE_CAP
+ * is 0.9 < 1 and clamps the sum from above at every level. INVARIANT (relied on everywhere): the
+ * received value is `input × rate < input`, so a wood→clay→wood round-trip strictly LOSES and the
+ * exchange is a convenience / surplus sink, never an arbitrage exploit. Pure / Node-safe — draws no
+ * rng and reads no clock.
+ */
+export function exchangeRate(marketLevel: number): number {
+  if (marketLevel < 1) return 0
+  return Math.min(EXCHANGE_RATE_CAP, EXCHANGE_RATE_BASE + EXCHANGE_RATE_PER_LEVEL * marketLevel)
+}
+
+/**
+ * Whether `amount` of `fromRes` can be exchanged into `toRes` AT village `villageId` right now,
+ * with a PL reason when not. Gates (in order):
+ *  - the village exists and has a market at level >= 1;
+ *  - the two resources DIFFER (you cannot exchange a resource for itself);
+ *  - `amount` is finite and > 0;
+ *  - the village actually holds it (amount <= resources[fromRes]).
+ * Pure / Node-safe — the panel reads this itself for the disabled cue; {@link exchangeResources}
+ * is the commit, not the validation. Mirrors {@link canTransport} in spirit.
+ */
+export function canExchange(
+  state: GameState,
+  villageId: VillageId,
+  fromRes: ResourceId,
+  toRes: ResourceId,
+  amount: number,
+): { ok: boolean; reason?: string } {
+  const v = state.villages[villageId]
+  if (v === undefined) return { ok: false, reason: 'Niepoprawna wioska.' }
+  if (!(v.buildings.market >= 1)) {
+    return { ok: false, reason: 'Zbuduj Rynek, aby wymieniać surowce.' }
+  }
+  if (fromRes === toRes) return { ok: false, reason: 'Wybierz dwa różne surowce.' }
+  if (!Number.isFinite(amount) || !(amount > 0)) {
+    return { ok: false, reason: 'Niepoprawna ilość surowców.' }
+  }
+  if (D(amount).gt(v.resources[fromRes])) {
+    return { ok: false, reason: 'Za mało surowców w wiosce.' }
+  }
+  return { ok: true }
+}
+
+/**
+ * Exchange `amount` of `fromRes` into `toRes` AT village `villageId`, INSTANTLY, at the market.
+ * No-op returning false when {@link canExchange} rejects; otherwise DEBITS `amount` of `fromRes`
+ * (Decimal) and CREDITS the floored received amount — `floor(amount × exchangeRate(marketLevel))`
+ * of `toRes` — CLAMPED to the village storage cap (overflow spilled, mirroring deliverLoot). Bumps
+ * {@link import('../engine/state').Stats.resourcesExchanged} by the GROSS input traded away (Decimal,
+ * like lootHauled). Returns true.
+ *
+ * Because the rate is ALWAYS strictly < 1 (see {@link exchangeRate}), the received value is strictly
+ * less than the input — exchange can NEVER create net resources. No derived stat is affected (only the
+ * resource pools change), so no recompute is needed. Player-initiated like {@link sendShipment}:
+ * deterministic, draws no rng and reads no clock.
+ */
+export function exchangeResources(
+  state: GameState,
+  villageId: VillageId,
+  fromRes: ResourceId,
+  toRes: ResourceId,
+  amount: number,
+): boolean {
+  if (!canExchange(state, villageId, fromRes, toRes, amount).ok) return false
+  const v = state.villages[villageId]
+  // DEBIT the input. canExchange already guaranteed input <= resources[fromRes], so this
+  // subtraction never drives the pool negative.
+  const input = D(amount)
+  v.resources[fromRes] = v.resources[fromRes].sub(input)
+  // CREDIT the floored received amount (always < input — rate < 1), clamped to the storage cap
+  // with overflow spilled (mirrors deliverLoot / advanceShipments).
+  const received = input.mul(exchangeRate(v.buildings.market)).floor()
+  let next = v.resources[toRes].add(received)
+  if (next.gt(v.storageCap)) next = v.storageCap
+  v.resources[toRes] = next
+  // Lifetime gross input traded away (Decimal, the economy rule — like lootHauled).
+  state.stats.resourcesExchanged = state.stats.resourcesExchanged.add(input)
+  return true
+}

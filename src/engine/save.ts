@@ -54,7 +54,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 21
+export const SAVE_VERSION = 22
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -680,6 +680,32 @@ export function migrate(raw: any): any {
       }
       return { ...s, villages, version: 21 }
     },
+    // v21 -> v22: market EXCHANGE / wymiana (M9.2). A v21 save predates the lifetime
+    // `stats.resourcesExchanged` counter (the gross resources ever traded away at the market),
+    // so backfill that single new Decimal stat to zero — an old save genuinely has no exchange
+    // history to recover (it is an EVENT tally that leaves no standing trace, exactly like
+    // lootHauled), and the exchange action itself is player-initiated and never runs in the tick,
+    // so a migrated run is byte-identical to pre-M9.2 until the player actually exchanges. Tagged
+    // as a real Decimal (`new Decimal(0)`, like the v1->v2 popCap backfill) so it round-trips via
+    // the `{ $d }` wire shape and passes the lootHauled-style validation. A forward-compat save
+    // that already carries a Decimal `resourcesExchanged` keeps it verbatim; a malformed `stats`
+    // is left as-is so validateState rejects it loudly. Nothing else is touched (the exchange adds
+    // no new economic multiplier/currency and no derived field); importSave's recomputeDerived pass
+    // runs afterwards exactly as for every other migration. Mirrors the v16->v17 fortressesRazed
+    // stat backfill.
+    21: (s) => ({
+      ...s,
+      stats: isObject(s.stats)
+        ? {
+            ...s.stats,
+            resourcesExchanged:
+              s.stats.resourcesExchanged instanceof Decimal
+                ? s.stats.resourcesExchanged
+                : new Decimal(0),
+          }
+        : s.stats,
+      version: 22,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -1349,6 +1375,18 @@ export function validateState(s: unknown): GameState {
   const lootHauled = stats.lootHauled
   if (!(lootHauled instanceof Decimal) || !isFiniteDecimal(lootHauled) || lootHauled.lt(0)) {
     throw new Error('save: invalid stats lootHauled')
+  }
+  // resourcesExchanged (M9.2) is the other Decimal stat — the lifetime gross resources traded
+  // away at the market — value-checked finite + non-negative exactly like lootHauled (a
+  // NaN/Infinity/negative would corrupt the career record and then get autosaved). The v21->v22
+  // migration guarantees the zero default, so a migrated save always passes.
+  const resourcesExchanged = stats.resourcesExchanged
+  if (
+    !(resourcesExchanged instanceof Decimal) ||
+    !isFiniteDecimal(resourcesExchanged) ||
+    resourcesExchanged.lt(0)
+  ) {
+    throw new Error('save: invalid stats resourcesExchanged')
   }
 
   // Unlocked ACHIEVEMENTS (M5.4) — a sparse `{ achievementId: marker }` map (absent key

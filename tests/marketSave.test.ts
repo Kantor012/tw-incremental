@@ -6,7 +6,7 @@ import {
   RESOURCE_IDS,
   type GameState,
 } from '../src/engine/state'
-import { D } from '../src/engine/decimal'
+import { D, Decimal } from '../src/engine/decimal'
 import { BUILDINGS } from '../src/content/buildings'
 import {
   serialize,
@@ -66,7 +66,7 @@ describe('market save — v19 -> v20 migration backfill (M9)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(21)
+    expect(m.version).toBe(22)
 
     for (const id of m.villageOrder) {
       expect(m.villages[id].buildings.market).toBe(0)
@@ -204,6 +204,90 @@ describe('market save — fresh state round-trip', () => {
     expect(s.villages.v0.shipments).toEqual([])
     expect(s.villages.v0.merchantCapacity.eq(0)).toBe(true)
 
+    const restored = importSave(exportSave(s))
+    expect(serialize(restored)).toBe(serialize(s))
+    expect(validateState(restored).version).toBe(SAVE_VERSION)
+  })
+})
+
+/**
+ * M9.2 save-engine tests for the EXCHANGE counter (v22). The exchange action adds exactly one new
+ * piece of state — the lifetime `stats.resourcesExchanged` Decimal — so the save engine owns:
+ *
+ *  1. v21 -> v22 MIGRATION — a pre-exchange save (no `stats.resourcesExchanged`) backfills it to
+ *     Decimal 0, then validates.
+ *  2. ROUND-TRIP — a NON-ZERO `resourcesExchanged` survives exportSave/importSave (the `{ $d }`
+ *     Decimal wire shape, like lootHauled).
+ *  3. validateState REJECTS a bad `resourcesExchanged` (negative / NaN / non-Decimal).
+ *  4. A fresh createInitialState carries `resourcesExchanged` 0 and round-trips byte-identically.
+ */
+
+/**
+ * A v21-shaped raw save (pre-exchange). Built like {@link rawV19}: serialise a real current-version
+ * state, deserialise to real Decimals, then DOWNGRADE by deleting the v22-only `stats.resourcesExchanged`
+ * counter and stamping version 21 (a v21 save already carries market + shipments, added back at v20).
+ */
+function rawV21(): Record<string, any> {
+  const fresh = createInitialState(SEED, 4242)
+  const raw = deserialize(serialize(fresh)) as unknown as Record<string, any>
+  delete raw.stats.resourcesExchanged
+  raw.version = 21
+  return raw
+}
+
+describe('market save — v21 -> v22 migration backfill (M9.2 exchange counter)', () => {
+  it('backfills stats.resourcesExchanged = Decimal 0 on a v21 save, then validates', () => {
+    const raw = rawV21()
+    // Precondition: the v21 save genuinely lacks the new counter.
+    expect('resourcesExchanged' in raw.stats).toBe(false)
+
+    const m = migrate(raw)
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.version).toBe(22)
+    // Backfilled as a REAL Decimal zero (round-trips via the `{ $d }` wire shape, like lootHauled).
+    expect(m.stats.resourcesExchanged instanceof Decimal).toBe(true)
+    expect(m.stats.resourcesExchanged.eq(0)).toBe(true)
+
+    // And the whole migrated save validates.
+    expect(validateState(m).version).toBe(SAVE_VERSION)
+  })
+
+  it('keeps a Decimal resourcesExchanged a forward-compat v21 save already carries', () => {
+    const raw = rawV21()
+    raw.stats.resourcesExchanged = D(777) // already present — kept verbatim, not reset to 0
+    const m = migrate(raw)
+    expect(m.version).toBe(SAVE_VERSION)
+    expect(m.stats.resourcesExchanged.eq(777)).toBe(true)
+    expect(validateState(m).version).toBe(SAVE_VERSION)
+  })
+})
+
+describe('market save — resourcesExchanged round-trip + validation', () => {
+  it('exportSave/importSave preserves a NON-ZERO resourcesExchanged byte-identically', () => {
+    const s = createInitialState('x-roundtrip', 99)
+    s.stats.resourcesExchanged = D(123456789)
+    const restored = importSave(exportSave(s))
+    expect(restored.stats.resourcesExchanged.eq(123456789)).toBe(true)
+    expect(serialize(restored)).toBe(serialize(s))
+  })
+
+  it('rejects a bad resourcesExchanged (negative / NaN / Infinity)', () => {
+    for (const amount of [D(-1), D(Number.NaN), D(Number.POSITIVE_INFINITY)]) {
+      const bad = createInitialState('x-bad', 7)
+      bad.stats.resourcesExchanged = amount
+      expect(() => validateState(bad)).toThrow()
+    }
+  })
+
+  it('rejects a non-Decimal resourcesExchanged', () => {
+    const bad = createInitialState('x-nondecimal', 8)
+    ;(bad.stats as { resourcesExchanged: unknown }).resourcesExchanged = 5 // plain number, not Decimal
+    expect(() => validateState(bad)).toThrow()
+  })
+
+  it('a fresh createInitialState carries resourcesExchanged 0 and round-trips byte-identically', () => {
+    const s = createInitialState('x-fresh', 2026)
+    expect(s.stats.resourcesExchanged.eq(0)).toBe(true)
     const restored = importSave(exportSave(s))
     expect(serialize(restored)).toBe(serialize(s))
     expect(validateState(restored).version).toBe(SAVE_VERSION)

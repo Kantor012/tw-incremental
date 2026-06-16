@@ -611,6 +611,8 @@ export interface Stats {
   attacksLost: number
   /** Lifetime resources actually DELIVERED home from marches (summed on return). On Decimal. */
   lootHauled: Decimal
+  /** Lifetime resources spent on market exchanges (the gross input traded away). On Decimal, like lootHauled. */
+  resourcesExchanged: Decimal
   /** Incoming barbarian raids REPELLED (defence held). */
   raidsRepelled: number
   /** Incoming barbarian raids that broke through (defence lost). */
@@ -957,6 +959,7 @@ export function createInitialStats(): Stats {
     attacksWon: 0,
     attacksLost: 0,
     lootHauled: D(0),
+    resourcesExchanged: D(0),
     raidsRepelled: 0,
     raidsLost: 0,
     hordesRepelled: 0,

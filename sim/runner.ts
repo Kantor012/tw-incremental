@@ -14,7 +14,7 @@ import { BUILDING_IDS, BUILDINGS } from '../src/content/buildings'
 import { recruit, canRecruit, freePopulation } from '../src/systems/recruitment'
 import { sendAttack, stationedUnits } from '../src/systems/marches'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
-import { sendShipment } from '../src/systems/market'
+import { sendShipment, exchangeResources } from '../src/systems/market'
 import { purchaseTech } from '../src/systems/tech'
 import { TECH_NODES, TECH_NODE_IDS } from '../src/content/tech'
 import { fortressTarget } from '../src/content/fortresses'
@@ -116,6 +116,10 @@ import {
   checkCavalryInert,
   checkCavalryUpkeep,
   checkCavalrySaveLoad,
+  checkExchangeLoses,
+  checkExchangeGated,
+  checkExchangeDeterminism,
+  checkExchangeInert,
   type InvariantResult,
 } from './invariants'
 import {
@@ -1511,6 +1515,15 @@ const MARKET_SHIP_CARGO = 4000
 /** Shipments the market run dispatches up front (proves the multi-shipment capacity accounting holds). */
 const MARKET_SHIPMENTS = 3
 
+/**
+ * Input the market run TRADES at the Rynek once (M9.2 wymiana): a fixed slab of wood exchanged into iron
+ * AT the source village. Well within the source's stocked warehouse, so the exchange always fires; the
+ * received credit (floor(input × rate), rate < 1) is always strictly less — exchange is a surplus sink,
+ * never arbitrage. The MAIN-run bot NEVER exchanges (so the main + meta runs stay byte-identical to
+ * pre-M9.2 bar the inert resourcesExchanged=0 counter); only this dedicated run exercises it.
+ */
+const MARKET_EXCHANGE_INPUT = 10000
+
 /** What a market run yields: the final state, sampled invariants, and the transport tally. */
 interface MarketRun {
   state: GameState
@@ -1552,7 +1565,11 @@ export function runMarket(seed: string, ticks: number = MARKET_TICKS): MarketRun
         ok: false,
         detail: 'could not found a second village to transport to',
       })
-      return { state, invariants, metrics: { shipmentsDelivered: 0, resourcesTransported: D(0) } }
+      return {
+        state,
+        invariants,
+        metrics: { shipmentsDelivered: 0, resourcesTransported: D(0), resourcesExchanged: D(0) },
+      }
     }
   }
   const toId = state.villageOrder[1]
@@ -1577,6 +1594,18 @@ export function runMarket(seed: string, ticks: number = MARKET_TICKS): MarketRun
     if (!sendShipment(state, fromId, toId, cargo)) break
     sent += 1
   }
+
+  // M9.2 EXCHANGE (wymiana): the Rynek also converts a surplus of one resource into another AT THE SAME
+  // village, INSTANTLY, paying the spread (received = floor(input × rate), rate < 1 — always a strict
+  // loss). The MAIN run never exchanges, but this dedicated market run exercises it once on the real
+  // engine: trade a fixed slab of wood into iron at the maxed Rynek (the dispatch above already drained a
+  // little iron headroom so the floored credit lands rather than fully spilling) and record the gross
+  // input traded away (the resourcesExchanged sink throughput, read straight off the stat the engine
+  // bumps) plus what was received — proof the exchange path is reachable and strictly loses value.
+  const ironBeforeExchange = from.resources.iron
+  exchangeResources(state, fromId, 'wood', 'iron', MARKET_EXCHANGE_INPUT)
+  const exchangeReceived = from.resources.iron.sub(ironBeforeExchange)
+  const resourcesExchanged = state.stats.resourcesExchanged
 
   let prevTotal = totalResources(state)
   for (let i = 0; i < ticks; i++) {
@@ -1618,6 +1647,16 @@ export function runMarket(seed: string, ticks: number = MARKET_TICKS): MarketRun
         : `dedicated run delivered no shipments within ${ticks} ticks (sent ${sent})`,
   })
 
+  // M9.2 bare-named HARD invariant (mirrors 'shipments-delivered'): the dedicated run must EXCHANGE
+  // resources, trading away a positive gross input for a strictly smaller received credit (rate < 1).
+  invariants.push({
+    name: 'resources-exchanged',
+    ok: resourcesExchanged.gt(0) && exchangeReceived.lt(MARKET_EXCHANGE_INPUT),
+    detail: resourcesExchanged.gt(0)
+      ? `traded ${resourcesExchanged.toString()} wood for ${exchangeReceived.toString()} iron at the Rynek (received < input — a strict loss)`
+      : `dedicated run exchanged nothing (gross input ${resourcesExchanged.toString()})`,
+  })
+
   return {
     state,
     invariants,
@@ -1626,6 +1665,8 @@ export function runMarket(seed: string, ticks: number = MARKET_TICKS): MarketRun
       // No overflow at the maxed-warehouse destination, so the delivered total is exactly the
       // dispatched cargo of the shipments that arrived.
       resourcesTransported: perShipment.mul(shipmentsDelivered),
+      // M9.2: the gross input traded away at the Rynek (the lifetime stat the exchange bumped).
+      resourcesExchanged,
     },
   }
 }
@@ -2037,6 +2078,19 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkMarketDeterminism(seed, OFFLINE_CHECK_SECONDS))
   invariants.push(checkMarketNoSoftlock(seed))
   invariants.push(checkMarketSaveLoad(seed))
+
+  // M9.2 market EXCHANGE (RYNEK wymiana) proof-of-mechanic checks (self-contained, deterministic — the
+  // exchange draws NO rng / clock): an exchange STRICTLY LOSES value (received = floor(input × rate) with
+  // rate < 1, so a wood→clay→wood round-trip can never net resources and the empire total never rises —
+  // checkExchangeLoses); it is GATED on the Rynek (refused with no market, allowed with one —
+  // checkExchangeGated); it replays byte-identically for identical inputs (checkExchangeDeterminism); and a
+  // no-exchange run is BYTE-IDENTICAL to pre-M9.2 (the inert resourcesExchanged=0 counter strips back to the
+  // v21 save shape and migrates forward identically — checkExchangeInert). The bot NEVER exchanges, so the
+  // core + meta targets above STILL evaluate here unchanged (the exchange identity the contract pins).
+  invariants.push(checkExchangeLoses(seed))
+  invariants.push(checkExchangeGated(seed))
+  invariants.push(checkExchangeDeterminism(seed))
+  invariants.push(checkExchangeInert(seed))
 
   // M5.1 automation (idle routines) — a SEPARATE coverage run with the three gateways
   // unlocked and every toggle ON (the main run keeps automation OFF, so the targets above are

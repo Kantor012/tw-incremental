@@ -19,6 +19,9 @@ import {
   canTransport,
   sendShipment,
   advanceShipments,
+  exchangeRate,
+  canExchange,
+  exchangeResources,
 } from '../src/systems/market'
 
 /**
@@ -352,5 +355,196 @@ describe('market — identity: a no-transport run is byte-identical to a pre-mar
     expect(stripM9(withMarket)).toBe(stripM9(preMarket))
     // Sanity: the run actually advanced the economy.
     expect(withMarket.villages.v0.resources.wood.gt(0)).toBe(true)
+  })
+})
+
+/* ─────────────────────────── Rynek: WYMIANA surowców (M9.2) ─────────────────────────── */
+
+/**
+ * Two distinct resources, read generically from RESOURCE_IDS (never hardcoded 'wood'/'clay'),
+ * so a content retune of the resource set never breaks these structural assertions.
+ */
+const FROM_RES = RESOURCE_IDS[0]
+const TO_RES = RESOURCE_IDS[1]
+
+/**
+ * A single-village state ('v0') with the market at `marketLevel` and a roomy storage cap, so
+ * the exchange credit is never clamped unless a test deliberately pins a small cap. Exchange is
+ * a SAME-village action, so one village suffices (no second village / distance needed).
+ */
+function exchangeVillage(seed = 'xchg', marketLevel = 1): GameState {
+  const s = createInitialState(seed, 0)
+  s.villages.v0.buildings.market = marketLevel
+  recomputeDerived(s)
+  s.villages.v0.storageCap = D(1_000_000_000)
+  return s
+}
+
+describe('market — exchangeRate rises with level but stays strictly < 1', () => {
+  it('is 0 with no market (level 0) — nothing to exchange', () => {
+    expect(exchangeRate(0)).toBe(0)
+  })
+
+  it('rises monotonically with the market level yet never reaches 1, up to maxLevel', () => {
+    const maxLevel = BUILDINGS.market.maxLevel
+    let prev = exchangeRate(1)
+    expect(prev).toBeGreaterThan(0)
+    expect(prev).toBeLessThan(1)
+    for (let level = 2; level <= maxLevel; level++) {
+      const rate = exchangeRate(level)
+      expect(rate).toBeGreaterThanOrEqual(prev) // never regresses
+      expect(rate).toBeLessThan(1) // CORE INVARIANT: received value < input at EVERY level
+      prev = rate
+    }
+    // The progression actually moves: the best (maxLevel) rate beats the level-1 rate.
+    expect(exchangeRate(maxLevel)).toBeGreaterThan(exchangeRate(1))
+  })
+
+  it('stays strictly < 1 even FAR beyond maxLevel (the cap, not just the level ceiling)', () => {
+    // maxLevel happens to sit exactly at the cap (0.5 + 0.02·20 = 0.9), so the level loop alone
+    // would still pass if EXCHANGE_RATE_CAP were removed. Pin the cap independently of maxLevel /
+    // perLevel so a future retune that pushes BASE+perLevel·level to >= 1 is caught here.
+    expect(exchangeRate(BUILDINGS.market.maxLevel + 1000)).toBeLessThan(1)
+  })
+})
+
+describe('market — canExchange gating', () => {
+  it('rejects when the village has no market', () => {
+    const s = exchangeVillage('xchg', 0) // market level 0
+    fund(s.villages.v0, 5000)
+    const res = canExchange(s, 'v0', FROM_RES, TO_RES, 100)
+    expect(res.ok).toBe(false)
+    expect(typeof res.reason).toBe('string')
+  })
+
+  it('rejects exchanging a resource for itself (fromRes === toRes)', () => {
+    const s = exchangeVillage()
+    fund(s.villages.v0, 5000)
+    const res = canExchange(s, 'v0', FROM_RES, FROM_RES, 100)
+    expect(res.ok).toBe(false)
+    expect(typeof res.reason).toBe('string')
+  })
+
+  it('rejects a non-positive amount (zero / negative)', () => {
+    const s = exchangeVillage()
+    fund(s.villages.v0, 5000)
+    expect(canExchange(s, 'v0', FROM_RES, TO_RES, 0).ok).toBe(false)
+    expect(canExchange(s, 'v0', FROM_RES, TO_RES, -50).ok).toBe(false)
+  })
+
+  it('rejects an amount exceeding the source resources', () => {
+    const s = exchangeVillage()
+    fund(s.villages.v0, 50) // only 50 of each
+    const res = canExchange(s, 'v0', FROM_RES, TO_RES, 100)
+    expect(res.ok).toBe(false)
+    expect(typeof res.reason).toBe('string')
+  })
+
+  it('accepts a valid exchange (market, distinct resources, amount within the pool)', () => {
+    const s = exchangeVillage()
+    fund(s.villages.v0, 5000)
+    const res = canExchange(s, 'v0', FROM_RES, TO_RES, 100)
+    expect(res.ok).toBe(true)
+    expect(res.reason).toBeUndefined()
+  })
+})
+
+describe('market — exchangeResources', () => {
+  it('debits the input, credits floor(input × rate) of the target, and bumps stats.resourcesExchanged', () => {
+    const s = exchangeVillage('xchg', 3)
+    const v = s.villages.v0
+    fund(v, 1000)
+    const rate = exchangeRate(v.buildings.market)
+    const input = 400
+    const expectedReceived = D(input).mul(rate).floor()
+
+    const fromBefore = v.resources[FROM_RES]
+    const toBefore = v.resources[TO_RES]
+    const exBefore = s.stats.resourcesExchanged
+
+    expect(exchangeResources(s, 'v0', FROM_RES, TO_RES, input)).toBe(true)
+
+    // Input debited exactly; target credited the floored received amount (cap is roomy, no clamp).
+    expect(v.resources[FROM_RES].eq(fromBefore.sub(input))).toBe(true)
+    expect(v.resources[TO_RES].eq(toBefore.add(expectedReceived))).toBe(true)
+    // Lifetime counter bumped by the GROSS input traded away.
+    expect(s.stats.resourcesExchanged.eq(exBefore.add(input))).toBe(true)
+    // STRICT loss: the received value is strictly less than the input (rate < 1).
+    expect(expectedReceived.lt(input)).toBe(true)
+  })
+
+  it('is a no-op returning false when canExchange rejects', () => {
+    const s = exchangeVillage()
+    fund(s.villages.v0, 5000)
+    const fromBefore = s.villages.v0.resources[FROM_RES]
+    const exBefore = s.stats.resourcesExchanged
+    // Same-resource exchange is rejected — nothing debited, counter untouched.
+    expect(exchangeResources(s, 'v0', FROM_RES, FROM_RES, 100)).toBe(false)
+    expect(s.villages.v0.resources[FROM_RES].eq(fromBefore)).toBe(true)
+    expect(s.stats.resourcesExchanged.eq(exBefore)).toBe(true)
+  })
+
+  it('clamps the credited amount to the storage cap and spills the overflow', () => {
+    const s = exchangeVillage('xchg', 5)
+    const v = s.villages.v0
+    fund(v, 1_000_000)
+    v.storageCap = D(1000)
+    v.resources[TO_RES] = D(950) // only 50 headroom; the credit (floor(1000·0.6)=600) overflows
+    expect(exchangeResources(s, 'v0', FROM_RES, TO_RES, 1000)).toBe(true)
+    // Target clamped exactly to the cap; the overflow is spilled (mirrors deliverLoot).
+    expect(v.resources[TO_RES].eq(D(1000))).toBe(true)
+  })
+
+  it('a from → to → from round-trip ends with STRICTLY LESS than it started (rate always < 1)', () => {
+    // Best attainable rate (maxLevel) — even the friendliest spread must still lose on a round-trip.
+    const s = exchangeVillage('round', BUILDINGS.market.maxLevel)
+    const v = s.villages.v0
+    fund(v, 0)
+    v.resources[FROM_RES] = D(10_000)
+    const startFrom = v.resources[FROM_RES]
+
+    // from -> to
+    expect(exchangeResources(s, 'v0', FROM_RES, TO_RES, 10_000)).toBe(true)
+    const got = v.resources[TO_RES] // exactly the floored received amount (cap is roomy)
+    expect(got.lt(startFrom)).toBe(true)
+
+    // to -> from: trade the whole received amount back
+    expect(exchangeResources(s, 'v0', TO_RES, FROM_RES, Number(got.toString()))).toBe(true)
+    // Strictly less of the original resource than we started with — no arbitrage possible.
+    expect(v.resources[FROM_RES].lt(startFrom)).toBe(true)
+  })
+})
+
+describe('market — identity: a no-exchange run is byte-identical to a pre-M9.2-shaped run', () => {
+  /**
+   * Serialize `s` with the M9.2-only `stats.resourcesExchanged` counter removed, reducing it to
+   * the pre-M9.2 shape. A run that never exchanges must agree under this normalisation — proving
+   * the new counter is the ONLY state delta (it starts at 0 and the tick / bot never bump it).
+   */
+  function stripM92(s: GameState): string {
+    const raw = JSON.parse(serialize(s)) as { stats: Record<string, unknown> }
+    delete raw.stats.resourcesExchanged
+    return JSON.stringify(raw)
+  }
+
+  it('simulate() over a no-exchange run matches a state with the M9.2 counter stripped', () => {
+    const seed = 'inert-exchange'
+    const withExchange = createInitialState(seed, 0)
+
+    // Pre-M9.2 twin: same seed, but with the M9.2 stats field deleted to the pre-M9.2 shape.
+    // The tick never touches resourcesExchanged, so a no-exchange run over it is well-defined.
+    const preExchange = createInitialState(seed, 0)
+    delete (preExchange.stats as { resourcesExchanged?: Decimal }).resourcesExchanged
+
+    const dt = 300 // < raid interval (900): a pure economy run, no combat / rng draws
+    simulate(withExchange, dt)
+    simulate(preExchange, dt)
+
+    // The counter starts and STAYS at zero (the deterministic tick / bot never exchanges).
+    expect(withExchange.stats.resourcesExchanged.eq(0)).toBe(true)
+    // Byte-identical once the inert M9.2 counter is normalised away.
+    expect(stripM92(withExchange)).toBe(stripM92(preExchange))
+    // Sanity: the run actually advanced the economy.
+    expect(withExchange.villages.v0.resources.wood.gt(0)).toBe(true)
   })
 })

@@ -56,7 +56,7 @@ describe('horde save — v17 -> v18 migration backfill (M7.2)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(21)
+    expect(m.version).toBe(22)
 
     // The horde clock starts a full interval out with escalation reset.
     expect(m.horde).toEqual({ timer: HORDE_INTERVAL, level: 0 })

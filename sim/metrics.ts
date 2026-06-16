@@ -240,6 +240,13 @@ export interface RunMetrics {
   shipmentsDelivered: number
   /** Total resources moved by the delivered shipments over the run — exact decimal string (transport throughput). */
   resourcesTransported: string
+  /**
+   * Gross input resources TRADED AWAY via market EXCHANGE over the dedicated market run (M9.2) — exact
+   * decimal string. The source resource debited at the Rynek (the received, floored, rate<1 credit is
+   * always strictly less, so this is the exchange SINK throughput). The main + meta runs never exchange,
+   * so this is measured solely by the dedicated market run (mirrors {@link resourcesTransported}).
+   */
+  resourcesExchanged: string
 
   // --- M10 cavalry (KAWALERIA — Stajnia-gated mounted units) ---
   // Measured by a SEPARATE run (see runner.runCavalry) that builds the Stajnia (excluded from the main
@@ -442,6 +449,13 @@ export interface MarketRunStats {
   shipmentsDelivered: number
   /** Total resources moved by the delivered shipments (Decimal, exact) — the transport throughput. */
   resourcesTransported: Decimal
+  /**
+   * Gross input resources TRADED AWAY via market EXCHANGE over the run (M9.2 — Decimal, exact). The
+   * source resource debited at the Rynek; the received (floored, rate < 1) credit is always strictly
+   * less, so this is the exchange SINK throughput. The MAIN run never exchanges, so this is measured
+   * solely by the dedicated market run (mirrors {@link resourcesTransported}).
+   */
+  resourcesExchanged: Decimal
 }
 
 /**
@@ -732,6 +746,8 @@ export function collect(
     // M9: the dedicated market run's transport throughput (resourcesTransported → exact string).
     shipmentsDelivered: market.shipmentsDelivered,
     resourcesTransported: market.resourcesTransported.toString(),
+    // M9.2: the dedicated market run's exchange throughput (gross input traded away → exact string).
+    resourcesExchanged: market.resourcesExchanged.toString(),
 
     // M10: the dedicated cavalry run's recruitment-sink throughput + the Stajnia level it reached.
     cavalryRecruited: cavalry.cavalryRecruited,

@@ -299,6 +299,17 @@ function evalTargets(r: RunResult): TargetCheck[] {
       detail: `delivered ${m.shipmentsDelivered} shipment(s) carrying ${m.resourcesTransported} resources in the dedicated market run (target >= ${TARGETS.minShipmentsDelivered})`,
     },
     {
+      // M9.2: the bot must TRADE at least minResourcesExchanged gross input via market exchange in the
+      // separate market run. Added ALONGSIDE the core + prestige/era/dynasty/fortress/horde/challenge/
+      // market/cavalry targets above (all of which STILL evaluate here, unchanged): exchange is a
+      // player-initiated action the main + meta runs never take and which folds into nothing, so those
+      // targets stay BYTE-IDENTICAL to pre-M9.2 (the exchange identity the contract pins) — see the
+      // per-seed report below.
+      name: 'resources-exchanged',
+      ok: D(m.resourcesExchanged).gte(TARGETS.minResourcesExchanged),
+      detail: `traded ${m.resourcesExchanged} resources via market exchange in the dedicated run (target >= ${TARGETS.minResourcesExchanged})`,
+    },
+    {
       // M10: the bot must TRAIN at least minCavalryRecruited cavalry in the separate cavalry run. Added
       // ALONGSIDE the 17 core + prestige/era/dynasty/fortress/horde/challenge/market targets above (all of
       // which STILL evaluate here, unchanged): the cavalry is Stajnia-gated and the Stajnia is
@@ -533,19 +544,19 @@ async function main(): Promise<void> {
   }
   console.log('')
 
-  // --- Market per seed (M9 RYNEK; SEPARATE merchant-transport run) ---
+  // --- Market per seed (M9 RYNEK transport + M9.2 wymiana; SEPARATE market-driving run) ---
   console.log('--- Market (end) ---')
-  console.log('seed     | shipments delivered | resources transported')
+  console.log('seed     | shipments delivered | resources transported | resources exchanged')
   for (const r of results) {
     const m = r.metrics
     console.log(
-      `${m.seed.padEnd(8)} | ${String(m.shipmentsDelivered).padStart(19)} | ${m.resourcesTransported}`,
+      `${m.seed.padEnd(8)} | ${String(m.shipmentsDelivered).padStart(19)} | ${m.resourcesTransported.padStart(21)} | ${m.resourcesExchanged}`,
     )
   }
   console.log('')
 
   // --- M9 market coverage (HARD proof-of-mechanic; reads the run's invariants) ---
-  console.log('--- M9 market: RYNEK transport (coverage) ---')
+  console.log('--- M9 market: RYNEK transport + M9.2 wymiana (coverage) ---')
   const m9Names = [
     'shipments-delivered',
     'market-conservation',
@@ -553,6 +564,11 @@ async function main(): Promise<void> {
     'market-determinism',
     'market-no-softlock',
     'market-save-load',
+    'resources-exchanged',
+    'exchange-loses',
+    'exchange-gated',
+    'exchange-determinism',
+    'exchange-inert',
   ]
   for (const r of results) {
     const line = m9Names

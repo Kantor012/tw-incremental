@@ -18,7 +18,7 @@ import { build } from './systems/buildings'
 import { recruit } from './systems/recruitment'
 import { sendAttack, sendScout } from './systems/marches'
 import { foundVillage } from './systems/villages'
-import { sendShipment } from './systems/market'
+import { sendShipment, canExchange, exchangeResources } from './systems/market'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
@@ -188,6 +188,22 @@ mountApp(root, {
     }
     return ok
   },
+  onExchange: (villageId, fromRes, toRes, amount) => {
+    // Exchange (M9.2 rynek): convert one resource type into another AT THE SAME village,
+    // INSTANTLY, at the market. The input is debited and the floored received amount of the
+    // other resource credited (clamped to the storage cap, overflow spilled). The rate is
+    // ALWAYS < 1, so the exchange pays a spread and can never mint resources — a benign
+    // convenience / surplus sink. We re-validate via canExchange (the panel reads it too for
+    // the disabled cue), call exchangeResources (which no-ops when not exchangeable), and
+    // commit + persist only on a successful conversion. Player-initiated like onTransport.
+    if (!canExchange(store.state, villageId, fromRes, toRes, amount).ok) return false
+    const ok = exchangeResources(store.state, villageId, fromRes, toRes, amount)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onPurchaseTech: (nodeId: string) => {
     // purchaseTech spends from the GLOBAL resource pool and recomputes derived
     // multipliers internally; we only persist + commit on success.
@@ -313,7 +329,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.25.0',
+  version: '0.26.0',
   offlineSeconds,
 })
 

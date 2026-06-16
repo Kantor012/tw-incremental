@@ -93,6 +93,22 @@ export interface UiCtx {
     cargo: Record<ResourceId, number>,
   ) => boolean
   /**
+   * Exchange (M9.2 rynek) `amount` of `fromRes` into `toRes` AT the SAME village `villageId`,
+   * INSTANTLY, at the market; returns true on a successful exchange. On success the input is
+   * DEBITED and the floored received amount of the other resource is CREDITED (clamped to the
+   * storage cap, overflow spilled). The exchange pays a SPREAD — the rate is ALWAYS < 1, so you
+   * receive LESS value than you put in — so it can NEVER create net resources; it is a benign
+   * convenience / surplus sink, so no confirmation is needed. The market panel reads
+   * `canExchange` (systems/market) itself for the disabled cue; this callback is the commit, not
+   * the validation. Mirrors {@link onTransport} but for an at-village resource conversion.
+   */
+  onExchange: (
+    villageId: VillageId,
+    fromRes: ResourceId,
+    toRes: ResourceId,
+    amount: number,
+  ) => boolean
+  /**
    * Purchase the NEXT level of the global tech node `nodeId`, paid from the GLOBAL
    * resource pool (summed across all villages); returns true on success (cost spent,
    * `state.tech[nodeId]` incremented, derived multipliers recomputed, committed +

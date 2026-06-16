@@ -79,7 +79,13 @@ import {
 } from '../src/systems/dynasty'
 import { startChallenge, checkChallengeCompletion } from '../src/systems/challenges'
 import { CHALLENGES, CHALLENGE_IDS, type ChallengeMods } from '../src/content/challenges'
-import { sendShipment, merchantCapacityInUse } from '../src/systems/market'
+import {
+  sendShipment,
+  merchantCapacityInUse,
+  canExchange,
+  exchangeResources,
+  exchangeRate,
+} from '../src/systems/market'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
@@ -4047,7 +4053,13 @@ export function checkCavalryInert(seed: string): InvariantResult {
     }
   }
   const preM10 = JSON.stringify(obj)
-  const migrated = JSON.stringify(migrate(JSON.parse(preM10)))
+  // Re-serialize through the SAME Decimal-tagging serializer as `full` (serialize, not a raw
+  // JSON.stringify): migrate runs on a reviver-free parse, so the M9.2 v21->v22 step backfills
+  // a REAL Decimal (`stats.resourcesExchanged = new Decimal(0)`) that only serialize() tags back
+  // to its `{ $d }` wire shape — a plain JSON.stringify would emit a bare "0" and spuriously
+  // diverge from `full`. Every other (untouched) Decimal is already in `{ $d }` form and passes
+  // through serialize unchanged, so the comparison stays byte-exact.
+  const migrated = serialize(migrate(JSON.parse(preM10)))
   // The stripped (pre-M10) form must not mention the appended keys anywhere, and the migrated form must
   // be byte-identical to the M10 serialization.
   const strippedClean = !CAVALRY_IDS.some((id) => preM10.includes(`"${id}"`)) && !preM10.includes('"stable"')
@@ -4149,5 +4161,214 @@ export function checkCavalrySaveLoad(seed: string): InvariantResult {
       : a !== b
         ? 'state with cavalry (roster + in-flight march) changed across export/import'
         : 'cavalry did not survive export/import in the roster and/or the in-flight march',
+  }
+}
+
+// --- M9.2 market EXCHANGE (RYNEK — wymiana surowców) proof-of-mechanic checks --------------------
+//
+// Deterministic, self-contained checks for the M9.2 resource exchange (convert one resource type into
+// another AT THE SAME village, instantly, paying a spread). They isolate the guarantees the contract
+// pins: the exchange STRICTLY LOSES value (received = floor(input × rate) with rate < 1, so a
+// wood→clay→wood round-trip can never net resources and the empire total never rises), it is GATED on
+// the Rynek (no market → refused, market → allowed), it is DETERMINISTIC (no rng / clock — same inputs
+// yield byte-identical state), and a no-exchange run is BYTE-IDENTICAL to pre-M9.2 (the inert
+// resourcesExchanged=0 counter strips back to the v21 save shape). No bot, no clock, no RNG — pure of
+// the main run, so the existing core + meta targets stay byte-identical (the bot never exchanges).
+
+/**
+ * Exchange STRICTLY LOSES value (M9.2 — the key anti-arbitrage invariant): the received amount is exactly
+ * `floor(input × rate)` with the rate ALWAYS < 1, so received is strictly less than the input, and the
+ * empire-wide resource total never RISES across an exchange. Driven on the REAL engine
+ * ({@link exchangeResources}) from a maxed-Rynek capital (the BEST attainable rate — if even that loses,
+ * every level does) with a maxed warehouse (huge cap so credits land without spilling) and a clean
+ * single-resource bankroll. Proves both a single leg AND a full wood→clay→wood round trip: the wood
+ * recovered after the loop is STRICTLY less than the wood put in, and the total never grows on either leg
+ * — exchange can never mint resources. Pure / deterministic.
+ */
+export function checkExchangeLoses(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  const vid = state.villageOrder[0]
+  // Maxed economy: a maxed Rynek (best rate) + maxed warehouse (huge cap → credits land, no spill), then a
+  // clean single-resource bankroll so the floored credit and the round-trip loss are exactly readable.
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: D(100000), clay: ZERO, iron: ZERO }
+
+  const rate = exchangeRate(v.buildings.market)
+  const issues: string[] = []
+  if (!(rate < 1)) issues.push(`exchangeRate(${v.buildings.market})=${rate} is not < 1 (exchange could mint resources)`)
+
+  // Leg 1: wood → clay. received must equal floor(input × rate), be strictly < input, and never raise
+  // the empire-wide total.
+  const input1 = 100000
+  const totalBefore = totalResources(state)
+  const clayBefore = v.resources.clay
+  if (!exchangeResources(state, vid, 'wood', 'clay', input1)) {
+    return { name: 'exchange-loses', ok: false, detail: 'exchangeResources refused a valid exchange (cannot test the loss)' }
+  }
+  const received1 = v.resources.clay.sub(clayBefore)
+  const expected1 = D(input1).mul(rate).floor()
+  const total1 = totalResources(state)
+  if (!received1.eq(expected1)) issues.push(`received ${received1.toString()} != floor(${input1}×${rate})=${expected1.toString()}`)
+  if (!received1.lt(input1)) issues.push(`received ${received1.toString()} not < input ${input1} (no spread)`)
+  if (total1.gt(totalBefore)) issues.push(`empire total ROSE ${totalBefore.toString()} -> ${total1.toString()} on a single exchange`)
+
+  // Leg 2: clay → wood. The wood recovered must be STRICTLY less than the wood originally put in (a
+  // wood→clay→wood round trip can never break even), and the total must not rise on the return leg.
+  const input2 = received1.toNumber()
+  const woodBefore = v.resources.wood // 0 after spending the whole bankroll on leg 1
+  if (!exchangeResources(state, vid, 'clay', 'wood', input2)) {
+    return { name: 'exchange-loses', ok: false, detail: 'exchangeResources refused the return leg (cannot test the round trip)' }
+  }
+  const received2 = v.resources.wood.sub(woodBefore)
+  const total2 = totalResources(state)
+  if (!received2.lt(input1)) issues.push(`round trip recovered ${received2.toString()} >= original ${input1} wood (arbitrage)`)
+  if (total2.gt(total1)) issues.push(`empire total ROSE ${total1.toString()} -> ${total2.toString()} on the return leg`)
+
+  return {
+    name: 'exchange-loses',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `wood→clay→wood at rate ${rate} lost value on every leg (${input1} wood -> ${received2.toString()} wood; empire total never rose)`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Exchange is GATED on the Rynek (M9.2): from one fixed, well-stocked capital that differs ONLY by the
+ * market level, an exchange must be REFUSED with no market (level 0 — a fresh capital) and ALLOWED once a
+ * Rynek stands (level 1). Resources are set far above the amount so the ONLY gate that can bite is the
+ * market level — exactly the gate the MAIN run never opens (the bot never exchanges). Also asserts the
+ * other ordered {@link canExchange} gates (same-resource, zero / negative amount) are refused even WITH a
+ * market. Pure / deterministic.
+ */
+export function checkExchangeGated(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  const vid = state.villageOrder[0]
+  v.resources = { wood: D(1e6), clay: D(1e6), iron: D(1e6) }
+
+  const issues: string[] = []
+  // No Rynek (a fresh capital has market:0) — exchange must be refused (validation AND commit).
+  if (v.buildings.market !== 0) issues.push(`fresh capital has market=${v.buildings.market} (expected 0)`)
+  if (canExchange(state, vid, 'wood', 'clay', 1000).ok) issues.push('canExchange ok with NO market (gate open)')
+  if (exchangeResources(state, vid, 'wood', 'clay', 1000)) issues.push('exchangeResources succeeded with NO market')
+
+  // Build a Rynek — the gate opens and a valid exchange is accepted.
+  v.buildings.market = 1
+  const withMarket = canExchange(state, vid, 'wood', 'clay', 1000)
+  if (!withMarket.ok) issues.push(`canExchange refused WITH a market: ${withMarket.reason ?? 'unknown'}`)
+  // The other ordered gates still bite even with a market: same resource, zero, negative amount.
+  if (canExchange(state, vid, 'wood', 'wood', 1000).ok) issues.push('canExchange ok for a same-resource exchange')
+  if (canExchange(state, vid, 'wood', 'clay', 0).ok) issues.push('canExchange ok for a zero amount')
+  if (canExchange(state, vid, 'wood', 'clay', -5).ok) issues.push('canExchange ok for a negative amount')
+  if (!exchangeResources(state, vid, 'wood', 'clay', 1000)) issues.push('exchangeResources refused WITH a market')
+
+  return {
+    name: 'exchange-gated',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? 'exchange refused at market level 0 and allowed at level 1 (the Rynek gate the main run never opens)'
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Exchange is DETERMINISTIC (M9.2): it draws no rng and reads no clock, so two identical exchanges from
+ * the SAME seed must yield byte-identical state. Mirrors {@link checkExchangeLoses}'s setup on two fresh
+ * copies, performs the SAME exchange on each, and compares {@link serialize}. A divergence would mean a
+ * hidden clock read / unseeded RNG slipped into the exchange path. Self-contained, Node-safe.
+ */
+export function checkExchangeDeterminism(seed: string): InvariantResult {
+  const setup = (s: GameState): void => {
+    const v = firstVillage(s)
+    v.buildings.market = BUILDINGS.market.maxLevel
+    v.resources = { wood: D(123456), clay: D(7000), iron: D(50) }
+  }
+  const a = createInitialState(seed, 0)
+  const b = createInitialState(seed, 0)
+  setup(a)
+  setup(b)
+  const okA = exchangeResources(a, a.villageOrder[0], 'wood', 'iron', 54321)
+  const okB = exchangeResources(b, b.villageOrder[0], 'wood', 'iron', 54321)
+  const serA = serialize(a)
+  const serB = serialize(b)
+  const ok = okA && okB && serA === serB
+  return {
+    name: 'exchange-determinism',
+    ok,
+    detail: ok
+      ? 'identical exchanges from the same seed produced byte-identical state (no rng / clock)'
+      : !okA || !okB
+        ? 'exchangeResources refused a valid exchange (cannot test determinism)'
+        : 'two identical exchanges from the same seed diverged (hidden nondeterminism)',
+  }
+}
+
+/**
+ * A no-exchange run is BYTE-IDENTICAL to pre-M9.2 (CLAUDE.md hard rule #3 / the contract's identity pin):
+ * a state that never exchanges carries the single appended `stats.resourcesExchanged` Decimal at its inert
+ * zero default, so stripping it yields exactly the PRE-M9.2 (v21) save shape. Proven two ways on a
+ * realistic live state ({@link seedRecruitment}: a training queue + an in-flight march + active raids,
+ * advanced a little):
+ *  - INERTNESS: resourcesExchanged stayed at 0 (the bot/tick never exchange), AND
+ *  - ROUND-TRIP EQUALITY: serialize → strip resourcesExchanged → stamp version 21 (the pre-M9.2 save
+ *    shape) → {@link migrate} (the real v21→v22 backfill re-adds it at Decimal 0) → re-serialize must be
+ *    byte-identical to the original M9.2 serialization, proving the addition is EXACTLY the inert
+ *    zero-backfill of one stat and nothing more.
+ * Mirrors {@link checkCavalryInert}. Pure / deterministic.
+ */
+export function checkExchangeInert(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  seedRecruitment(state) // a live army + in-flight march + queue, NEVER exchanging
+  simulate(state, 120) // advance the clocks while the (far) tier-6 march is still outbound
+
+  const issues: string[] = []
+  // INERTNESS: a run that never exchanges leaves the counter at its zero default.
+  if (!state.stats.resourcesExchanged.eq(0)) {
+    issues.push(`stats.resourcesExchanged=${state.stats.resourcesExchanged.toString()} (expected 0)`)
+  }
+
+  // Build the genuine pre-M9.2 (v21) save shape: strip the one new counter and stamp v21.
+  const full = serialize(state)
+  const preObj = JSON.parse(full) as { version: number; stats: Record<string, unknown> }
+  preObj.version = 21
+  delete preObj.stats.resourcesExchanged
+  const preM92 = JSON.stringify(preObj)
+  const strippedClean = !preM92.includes('"resourcesExchanged"')
+
+  // Migrate it forward (the real v21→v22 zero-backfill). The migration must (a) re-ADD resourcesExchanged
+  // at Decimal 0 and (b) change NOTHING else. The v21→v22 step APPENDS the counter to `stats` (whereas a
+  // fresh state has it 4th), so a raw byte-string compare of the migrated vs original serialization would
+  // diverge on key ORDER alone — not a real difference. So prove (b) ORDER-INDEPENDENTLY: strip the counter
+  // from BOTH the migrated and the original M9.2 serialization (restoring the same key set/order on each)
+  // and require byte-identity, and prove (a) by reading the backfilled counter back as Decimal 0. Re-
+  // serialize through the SAME Decimal-tagging serializer as `full` (migrate runs on a reviver-free parse,
+  // so the backfilled `new Decimal(0)` is only tagged to its `{ $d }` wire shape by serialize()).
+  const migrated = migrate(JSON.parse(preM92))
+  const backfillZero =
+    isFiniteDecimal(migrated.stats?.resourcesExchanged) && migrated.stats.resourcesExchanged.eq(0)
+  const migratedObj = JSON.parse(serialize(migrated)) as { stats: Record<string, unknown> }
+  const fullObj = JSON.parse(full) as { stats: Record<string, unknown> }
+  delete migratedObj.stats.resourcesExchanged
+  delete fullObj.stats.resourcesExchanged
+  const restIdentical = JSON.stringify(fullObj) === JSON.stringify(migratedObj)
+
+  const ok = issues.length === 0 && strippedClean && backfillZero && restIdentical
+  return {
+    name: 'exchange-inert',
+    ok,
+    detail: ok
+      ? 'a no-exchange run carries resourcesExchanged at inert 0; the pre-M9.2-stripped save migrates forward identical bar the zero counter'
+      : issues.length > 0
+        ? `counter not inert: ${issues.join('; ')}`
+        : !strippedClean
+          ? 'stripped pre-M9.2 save still references resourcesExchanged'
+          : !backfillZero
+            ? 'the v21→v22 migration did NOT backfill resourcesExchanged at Decimal 0'
+            : 'pre-M9.2-stripped save migrated with changes beyond the zero-counter backfill',
   }
 }
