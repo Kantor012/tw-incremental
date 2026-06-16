@@ -283,6 +283,10 @@ function reportBase(r: BattleReport): string {
       )
     case 'raid':
       return 'r' + (r.won ? '1' : '0') + r.looted + r.losses
+    case 'horde':
+      // M7.2: a horde shares the raid's combat fields; an 'h' prefix keeps its
+      // fingerprint distinct so the signature flips when a horde report lands.
+      return 'h' + (r.won ? '1' : '0') + r.looted + r.losses
     case 'conquer':
       return 'c' + r.targetName + r.newVillageId
     default: {

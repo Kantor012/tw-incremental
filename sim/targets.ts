@@ -105,6 +105,22 @@ export interface BalanceTargets {
    */
   minFortressesRazed: number
 
+  // --- M7.2 horde (telegraphed, escalating capital invasion) goal (warning) ---
+  /**
+   * The MAIN run must REPEL at least this many hordes — proof a NORMALLY-PROGRESSING bot's
+   * capital defence (garrison + wall + tech, which scales with progress exactly as it does
+   * against raids) holds the telegraphed, escalating invasion at least once over the budget.
+   * Mirrors {@link minRaidsResolved} but for the high-stakes capital horde: read off the
+   * lifetime stats.hordesRepelled the deterministic tick path bumps. Unlike the additive
+   * opt-in fortresses, hordes are an ALWAYS-ON pressure that touches every run, so a healthy
+   * run faces several over the 120k budget (the first at HORDE_INTERVAL ~14.4k) and repels the
+   * early, low-level ones comfortably. Sized at the minimum proof-of-mechanic; a warning only
+   * (like the raid/fortress targets) — if it cannot be hit, hordePower is outscaling a normal
+   * capital's defence and HORDE_INTERVAL / the hordePower curve (state.ts / content/hordes.ts)
+   * need tuning so hordes stay a manageable tax, not a wipe. See CHANGELOG "Balance".
+   */
+  minHordesRepelled: number
+
   // --- M3.1 tech (global passive tree) goal (warning) ---
   /**
    * The bot must BUY at least this many tech-node levels from the global pool over a run
@@ -284,6 +300,15 @@ export const TARGETS: BalanceTargets = {
   // (the bot self-limits to the finite FORTRESS_COUNT). If it cannot be hit without starving the
   // M1/M2 targets, the fortress defence / loot curves (content/fortresses.ts) need tuning.
   minFortressesRazed: 1,
+
+  // M7.2: hordes online. The telegraphed, escalating capital invasion is an ALWAYS-ON pressure
+  // (it touches every run, unlike the opt-in fortresses), so a normally-progressing capital must
+  // REPEL the early, low-level hordes it faces over the budget — its garrison + wall + tech scale
+  // with progress just as they do against raids. Sized at the minimum proof-of-mechanic (>= 1
+  // repelled over the 120k budget, which sees several hordes from ~tick 14.4k). A warning only; if
+  // it cannot be hit, the hordePower curve / HORDE_INTERVAL need tuning so hordes stay a manageable
+  // tax rather than a wipe (content/hordes.ts / state.ts) — see CHANGELOG "Balance".
+  minHordesRepelled: 1,
 
   // M4.1: prestige online. A matured run should be able to ascend (reset for prestige
   // points) and spend them on the permanent, account-wide prestige tree, with the resulting

@@ -178,6 +178,28 @@ export type BattleReport =
     }
   | {
       /**
+       * A HORDE resolution against the capital (M7.2) — the telegraphed, escalating,
+       * high-stakes invasion. Shares the raid combat fields exactly (`won` from the
+       * PLAYER's POV, `looted` the pre-summed string stolen on a breach — `'0'` on a
+       * repel — `losses` the garrison units lost, and the OPTIONAL `luck` roll applied
+       * to the HORDE's incoming power), so the log/save path treats it like a raid; only
+       * the discriminant differs. The horde's escalation level lives on {@link HordeState},
+       * not the report, so the report stays the same shape as a raid.
+       */
+      kind: 'horde'
+      villageId: VillageId
+      won: boolean
+      looted: string
+      losses: number
+      /**
+       * The luck roll that decided this horde (M7.2): a finite multiplier in
+       * [1-COMBAT_LUCK, 1+COMBAT_LUCK] (mean 1.0) applied to the HORDE's incoming power
+       * before resolution. OPTIONAL — a luck-free resolution (tests) omits it.
+       */
+      luck?: number
+    }
+  | {
+      /**
        * A barbarian village was CONQUERED (M2.4): a won attack carrying a surviving
        * noble drove the target's loyalty to <= 0, so it became a player village.
        */
@@ -201,6 +223,33 @@ export type BattleReport =
  * leaves the standing army no room to accumulate — see CHANGELOG "Balance".
  */
 export const RAID_BASE_INTERVAL = 900
+
+/**
+ * Base seconds between incoming HORDES (M7.2) — the telegraphed, escalating capital
+ * invasion. Owned here (not in hordes.ts), exactly like {@link RAID_BASE_INTERVAL}, so
+ * createInitialState, the save migration and the content/UI can seed/re-arm the horde
+ * clock without importing a system module (which would form a cycle); systems/hordes.ts
+ * imports this constant the other way for re-arming. Deliberately MUCH longer than the
+ * raid interval (16×): a horde is a rare, big, high-stakes event rather than the silent
+ * raid drip, and starting the clock a full interval out (createInitialState seeds
+ * `timer: HORDE_INTERVAL`) keeps the early game — and every short-span test — untouched
+ * by hordes. Balance knob: tuned together with hordePower so a normally-progressing
+ * capital REPELS the escalating hordes it faces over a run (see content/hordes.ts).
+ */
+export const HORDE_INTERVAL = 14400
+
+/**
+ * The single GLOBAL horde schedule (M7.2) — one telegraphed, escalating invasion of the
+ * CAPITAL ({@link GameState.villageOrder}[0]), the active-defence counterpart to the
+ * silent per-village raid drip. Unlike raids (a per-village timer), there is ONE horde
+ * clock for the whole run, on {@link GameState.horde}.
+ */
+export interface HordeState {
+  /** Seconds until the next horde lands. Counts down on the tick; re-armed to {@link HORDE_INTERVAL} after each. */
+  timer: number
+  /** Escalation counter: rises by 1 after EVERY horde (repelled or breached); hordePower grows with it. Starts 0. */
+  level: number
+}
 
 /**
  * One village: a self-contained economy. Holds exactly the nine fields every
@@ -491,6 +540,10 @@ export interface Stats {
   raidsRepelled: number
   /** Incoming barbarian raids that broke through (defence lost). */
   raidsLost: number
+  /** Hordes REPELLED (the capital's defence held the escalating invasion). M7.2. */
+  hordesRepelled: number
+  /** Hordes that BREACHED the capital (defence lost — resources + garrison taken). M7.2. */
+  hordesBreached: number
   /** Barbarian camp levels knocked down by catapults (>= 1 level removed counts one). */
   campsRazed: number
   /** Fortresses RAZED across the run's life (M7; bumped once per won fortress assault). */
@@ -535,6 +588,13 @@ export interface GameState {
    * {@link BattleReport.villageId}.
    */
   battleLog: BattleReport[]
+  /**
+   * The single GLOBAL horde schedule (M7.2) — the telegraphed, escalating invasion of
+   * the CAPITAL ({@link villageOrder}[0]). One clock + escalation counter for the whole
+   * run (unlike the per-village raid timer), advanced by `advanceHorde` on the
+   * deterministic tick. See {@link HordeState}.
+   */
+  horde: HordeState
   /**
    * GLOBAL passive tree (M3.1): purchased level per node id (absent key = level 0).
    * The single account-wide tech state — its economic effects are TRANSIENT
@@ -800,6 +860,8 @@ export function createInitialStats(): Stats {
     lootHauled: D(0),
     raidsRepelled: 0,
     raidsLost: 0,
+    hordesRepelled: 0,
+    hordesBreached: 0,
     campsRazed: 0,
     fortressesRazed: 0,
     scoutsReturned: 0,
@@ -823,6 +885,7 @@ export function createInitialState(seed: string, now: number): GameState {
     villageOrder: ['v0'],
     world: generateWorld(seed),
     battleLog: [],
+    horde: { timer: HORDE_INTERVAL, level: 0 },
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
     era: { points: 0, totalEarned: 0, eras: 0, nodes: {} },

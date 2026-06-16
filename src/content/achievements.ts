@@ -384,6 +384,33 @@ export const ACHIEVEMENTS: Record<string, AchievementDef> = {
     category: 'fortece',
     condition: (state) => allFortressesRazed(state),
   },
+
+  // =====================================================================
+  // HORDY — repelling the telegraphed, escalating capital invasions (M7.2). Two read the
+  // lifetime `hordesRepelled` counter; the last reads the live escalation `horde.level`
+  // (which rises by 1 after EVERY horde, so it tallies how many have come — repelled or not).
+  // =====================================================================
+  first_horde: {
+    id: 'first_horde',
+    name: 'Pierwsza horda',
+    desc: 'Odeprzyj swoją pierwszą hordę nacierającą na stolicę.',
+    category: 'hordy',
+    condition: (_state, stats) => stats.hordesRepelled >= 1,
+  },
+  horde_bulwark: {
+    id: 'horde_bulwark',
+    name: 'Bastion',
+    desc: 'Odeprzyj łącznie 5 coraz silniejszych hord.',
+    category: 'hordy',
+    condition: (_state, stats) => stats.hordesRepelled >= 5,
+  },
+  horde_veteran: {
+    id: 'horde_veteran',
+    name: 'Weteran hord',
+    desc: 'Przetrwaj do 10. poziomu eskalacji hord.',
+    category: 'hordy',
+    condition: (state) => state.horde.level >= 10,
+  },
 }
 
 /**

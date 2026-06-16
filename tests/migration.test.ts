@@ -3,6 +3,7 @@ import { D, Decimal } from '../src/engine/decimal'
 import {
   createInitialState,
   createInitialStats,
+  HORDE_INTERVAL,
   INITIAL_BUILDINGS,
   INITIAL_UNITS,
   recomputeDerived,
@@ -63,7 +64,7 @@ describe('migration v1 -> current', () => {
   it('migrate() chains v1->...->v8: seeds buildings, popCap, units, queue, combat, coords + world, nobles + loyalty, the tech map and wraps into villages.v0', () => {
     const migrated = migrate(rawV1())
 
-    expect(migrated.version).toBe(17)
+    expect(migrated.version).toBe(18)
     expect(migrated.version).toBe(SAVE_VERSION)
     // v4->v5: the lone economy is wrapped under villages.v0 with a bijective order.
     expect(migrated.villageOrder).toEqual(['v0'])
@@ -99,6 +100,8 @@ describe('migration v1 -> current', () => {
     expect(migrated.era).toEqual({ points: 0, totalEarned: 0, eras: 0, nodes: {} })
     // v15->v16: the zero permanent dynasty (third meta-layer) record is backfilled too.
     expect(migrated.dynasty).toEqual({ points: 0, totalEarned: 0, dynasties: 0, nodes: {} })
+    // v17->v18: the horde schedule is backfilled (first horde a full interval out, level 0).
+    expect(migrated.horde).toEqual({ timer: HORDE_INTERVAL, level: 0 })
     // Pre-existing fields are carried through untouched.
     expect(migrated.seed).toBe('legacy')
     expect(v0.resources.wood.toString()).toBe('100')
@@ -273,7 +276,7 @@ describe('migration v4 -> current', () => {
   it('wraps the lone village under villages.v0 (Stolica) and globalises the battle log', () => {
     const m = migrate(rawV4())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
     // Bijective single-village order: exactly one ordered id, exactly one village.
     expect(m.villageOrder).toEqual(['v0'])
@@ -436,7 +439,7 @@ describe('migration v5 -> v6', () => {
   it('pins the capital to WORLD_CENTER, generates the barbarian world, and upgrades the legacy march', () => {
     const m = migrate(rawV5())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -587,7 +590,7 @@ describe('migration v6 -> v7', () => {
   it('backfills the academy building, the noble unit (roster + marches) and full barbarian loyalty', () => {
     const m = migrate(rawV6())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
     // The multi-village shape is carried through untouched (still a single village).
     expect(m.villageOrder).toEqual(['v0'])
@@ -745,7 +748,7 @@ describe('migration v7 -> v8', () => {
   it('backfills the empty account-wide tech map and carries everything else through', () => {
     const m = migrate(rawV7())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: an empty passive-tree map (absent key = level 0).
     expect(m.tech).toEqual({})
@@ -888,7 +891,7 @@ describe('migration v8 -> v9', () => {
   it('backfills the zero permanent prestige record and carries everything else through', () => {
     const m = migrate(rawV8())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the zero permanent prestige (ascension) record.
     expect(m.prestige).toEqual({ points: 0, totalEarned: 0, ascensions: 0, nodes: {} })
@@ -1021,7 +1024,7 @@ describe('migration v9 -> v10', () => {
   it('backfills the all-off automation record and carries everything else through', () => {
     const m = migrate(rawV9())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
     // The single new top-level field: the all-off automation toggles + empty policy.
     expect(m.automation).toEqual({
@@ -1187,7 +1190,7 @@ describe('migration v10 -> v11', () => {
   it('backfills wall (buildings), scout (units + marches), march kind and barbarian scouted', () => {
     const m = migrate(rawV10())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
 
     const v0 = m.villages.v0
@@ -1435,7 +1438,7 @@ describe('migration v11 -> v12', () => {
   it('backfills the ram + catapult unit slots (roster + marches), preserving everything else', () => {
     const m = migrate(rawV11())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
 
     const v0 = m.villages.v0
@@ -1583,7 +1586,7 @@ describe('migration v13 -> v14', () => {
   it('is a trivial version bump: every field (incl. luck-less reports) carries through', () => {
     const m = migrate(rawV13())
 
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
     expect(m.version).toBe(SAVE_VERSION)
 
     // rngState (the luck stream) is untouched — it already existed pre-M5.5.

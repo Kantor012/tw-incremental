@@ -64,6 +64,11 @@ import {
   checkFortressDeterminism,
   checkFortressSaveLoad,
   checkFortressRazeOnce,
+  checkHordeEscalation,
+  checkHordeBreachNoSoftlock,
+  checkHordeSaveLoad,
+  checkHordeDeterminism,
+  checkMetaResetClearsHorde,
   checkTechTree,
   checkTechState,
   checkPrestigeTree,
@@ -1528,6 +1533,25 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkFortressDeterminism(seed))
   invariants.push(checkFortressSaveLoad(seed))
   invariants.push(checkFortressRazeOnce(seed))
+
+  // M7.2 hordes (telegraphed, escalating capital invasion) — deterministic proof-of-mechanic
+  // checks (no bot, only the seeded combat luck). Hordes are an ALWAYS-ON pressure that runs in
+  // the deterministic tick sub-step. These isolate the horde primitive's own guarantees: the
+  // escalation level only ever rises by +1 per resolved horde (horde-escalation); a FORCED breach
+  // steals resources + garrison but razes no building and leaves the capital playable — never a
+  // softlock (horde-breach-no-softlock); the single GLOBAL horde schedule survives the real
+  // save/load path byte-identically (horde-save-load); a horde resolving inside the tick replays
+  // byte-identically online vs chunked-offline (horde-determinism — the INTEGRATION-level proof
+  // that ACTUALLY fires a horde in the window, which the 1h offline checks above never reach since
+  // their horizon is below HORDE_INTERVAL); and every meta reset re-arms the horde to its
+  // fresh-start schedule so a wiped capital never inherits the previous run's escalation
+  // (meta-reset-clears-horde — the central balance invariant). The bot-driven hordes are exercised
+  // on the MAIN run above (they resolve every sub-step against the capital).
+  invariants.push(checkHordeEscalation(seed))
+  invariants.push(checkHordeBreachNoSoftlock(seed))
+  invariants.push(checkHordeSaveLoad(seed))
+  invariants.push(checkHordeDeterminism(seed, OFFLINE_CHECK_SECONDS))
+  invariants.push(checkMetaResetClearsHorde(seed))
 
   // M5.4 lifetime stats + achievements. The MAIN run's deterministic tick path bumps the
   // counters (combat / founding / conquest) and runs checkAchievements every sub-step, so the

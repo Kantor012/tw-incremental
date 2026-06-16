@@ -5,6 +5,7 @@ import {
   INITIAL_BUILDINGS,
   INITIAL_UNITS,
   RAID_BASE_INTERVAL,
+  HORDE_INTERVAL,
   createInitialStats,
 } from './state'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
@@ -51,7 +52,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 17
+export const SAVE_VERSION = 18
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -552,6 +553,34 @@ export function migrate(raw: any): any {
         : s.stats
       return { ...s, villages, world, stats, version: 17 }
     },
+    // v17 -> v18: hordes (M7.2). A v17 save predates the single GLOBAL horde schedule and the
+    // two lifetime horde counters, so backfill three additive bits WITHOUT disturbing the
+    // player's progress:
+    //  - `horde` — the { timer, level } schedule — seeded { timer: HORDE_INTERVAL, level: 0 },
+    //    i.e. the first horde a full interval out and escalation reset (an old save genuinely
+    //    has no horde history to recover: starting fresh is the honest, and least punishing,
+    //    default — the early game of the migrated run is unaffected). A forward-compat save that
+    //    already carries an object `horde` keeps it verbatim;
+    //  - `stats.hordesRepelled` / `stats.hordesBreached` — the lifetime trophy counters — each
+    //    seeded to 0 (event tallies with no recoverable trace on an old save), mirroring the
+    //    v16->v17 fortressesRazed backfill.
+    // Nothing else is touched (the horde reward is a trophy/achievement + recoverable loot/army
+    // swing, no new economic multiplier or currency), and the new horde clock only fires a full
+    // HORDE_INTERVAL after load, so a migrated run is byte-identical to pre-M7.2 until the first
+    // horde lands. Nothing is recomputed here; importSave's recomputeDerived pass runs afterwards
+    // exactly as for every other migration.
+    17: (s) => ({
+      ...s,
+      horde: isObject(s.horde) ? s.horde : { timer: HORDE_INTERVAL, level: 0 },
+      stats: isObject(s.stats)
+        ? {
+            ...s.stats,
+            hordesRepelled: typeof s.stats.hordesRepelled === 'number' ? s.stats.hordesRepelled : 0,
+            hordesBreached: typeof s.stats.hordesBreached === 'number' ? s.stats.hordesBreached : 0,
+          }
+        : s.stats,
+      version: 18,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -874,7 +903,7 @@ export function validateState(s: unknown): GameState {
   if (!Array.isArray(battleLog)) throw new Error('save: invalid battleLog')
   for (const r of battleLog) {
     if (!isObject(r)) throw new Error('save: invalid battle report')
-    if (r.kind !== 'attack' && r.kind !== 'raid' && r.kind !== 'conquer') {
+    if (r.kind !== 'attack' && r.kind !== 'raid' && r.kind !== 'horde' && r.kind !== 'conquer') {
       throw new Error('save: invalid battle report kind')
     }
     // villageId is shared by all three variants (the village the report belongs to).
@@ -890,7 +919,7 @@ export function validateState(s: unknown): GameState {
       }
       continue
     }
-    // attack | raid share the combat fields (player POV win + own losses).
+    // attack | raid | horde share the combat fields (player POV win + own losses).
     if (typeof r.won !== 'boolean') throw new Error('save: invalid battle report won')
     if (typeof r.losses !== 'number' || !Number.isInteger(r.losses) || r.losses < 0) {
       throw new Error('save: invalid battle report losses')
@@ -925,8 +954,25 @@ export function validateState(s: unknown): GameState {
         }
       }
     } else if (typeof r.looted !== 'string') {
-      throw new Error('save: invalid raid report looted')
+      // raid (M1.3) and horde (M7.2) both carry the pre-summed `looted` string.
+      throw new Error('save: invalid raid/horde report looted')
     }
+  }
+
+  // GLOBAL horde schedule (M7.2) — the single { timer, level } clock for the capital
+  // invasion. `timer` is a finite, non-negative number of seconds until the next horde
+  // (a NaN/Infinity/negative would mis-drive the countdown), and `level` is a
+  // non-negative INTEGER escalation counter (it only ever rises by 1 per horde, never
+  // fractional/negative); a corrupt value would mis-scale hordePower and then get
+  // autosaved (CLAUDE.md hard rule #3). The v17->v18 migration backfills the default, so
+  // a migrated save always passes.
+  const { horde } = s
+  if (!isObject(horde)) throw new Error('save: missing horde')
+  if (typeof horde.timer !== 'number' || !Number.isFinite(horde.timer) || horde.timer < 0) {
+    throw new Error('save: invalid horde timer')
+  }
+  if (typeof horde.level !== 'number' || !Number.isInteger(horde.level) || horde.level < 0) {
+    throw new Error('save: invalid horde level')
   }
 
   // GLOBAL passive tree (M3.1) — a sparse `{ nodeId: level }` map (absent key = level
@@ -1118,6 +1164,8 @@ export function validateState(s: unknown): GameState {
     'attacksLost',
     'raidsRepelled',
     'raidsLost',
+    'hordesRepelled',
+    'hordesBreached',
     'campsRazed',
     'fortressesRazed',
     'scoutsReturned',

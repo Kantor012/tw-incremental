@@ -12,8 +12,12 @@ import {
   unitUnlocked,
 } from '../../systems/recruitment'
 import { aggregateTechMods } from '../../systems/tech'
+import { effectiveMods } from '../../systems/prestige'
+import { hordePower, hordeForecast } from '../../systems/hordes'
+import { HORDE_BREACH_RESOURCE_FRAC, HORDE_BREACH_ARMY_FRAC } from '../../content/hordes'
 import type { UiCtx, Panel } from '../types'
 import { h, unitIcon, RESOURCE_NAMES } from '../dom'
+import { applyForecastClass } from '../combatForecast'
 
 /**
  * Army panel — recruitment screen (the old app.ts "Rekrutacja" section, lifted
@@ -22,6 +26,14 @@ import { h, unitIcon, RESOURCE_NAMES } from '../dom'
  * Scope: training only. The expedition/march composer and the in-flight march
  * list moved to the campaign panel (panels/campaign.ts); this panel owns the
  * population budget, the per-unit recruit cards and the training queue.
+ *
+ * M7.2 — defensive context: a read-only „Nadciągająca horda" section telegraphs the
+ * single GLOBAL, escalating invasion of the CAPITAL (state.horde) — its countdown,
+ * level, projected strength, a 3-state defence FORECAST and the breach stakes — so the
+ * player can PREPARE through the existing build/recruit actions (hordes resolve
+ * automatically in the tick, like raids; there is no new action here). The readout
+ * always reports the CAPITAL's defence (villageOrder[0]) — the horde's only target —
+ * regardless of which village this tab currently shows.
  *
  * Discipline (panel contract): the DOM is built ONCE here and cached; {@link Panel.update}
  * only pokes textContent / style / attributes onto existing nodes — it never
@@ -106,6 +118,74 @@ export function createArmyPanel(ctx: UiCtx): Panel {
   popBar.setAttribute('aria-label', 'Wykorzystanie populacji')
   popBar.appendChild(h('i'))
   el.appendChild(popBar)
+
+  // ---- Nadciągająca horda (kontekst obronny) -------------------------------
+  // M7.2 read-only readout: the army screen is where the player PREPARES for the
+  // telegraphed horde. Everything here is GLOBAL (state.horde) and reports the CAPITAL's
+  // defence (villageOrder[0]) — the horde's only target — so the copy names „stolica"
+  // explicitly and the section is identical on every village tab. There is no new action:
+  // the player reacts through the existing build/recruit controls; the horde resolves in
+  // the tick like a raid. DOM built once; update() pokes the cached refs.
+  const hordeTitleId = 'army-horde-title'
+  const hordeSection = h('section', 'horde-section')
+  hordeSection.setAttribute('aria-labelledby', hordeTitleId)
+
+  const hordeHead = h('h3', 'recruit-subtitle horde-title', '⚔︎ Nadciągająca horda')
+  hordeHead.id = hordeTitleId
+  hordeSection.appendChild(hordeHead)
+
+  // Countdown to the next horde. Uses the shared formatTime — the project's countdown
+  // formatter (same as the recruit-queue ETA): for the long horde cadence it reads
+  // „4h 0m 0s", far clearer than a raw 240:00 MM:SS would be at this scale.
+  const hordeTimerLine = h('p', 'horde-line muted')
+  hordeTimerLine.appendChild(document.createTextNode('Następna horda za '))
+  const hordeTimerVal = h('span', 'num')
+  hordeTimerLine.appendChild(hordeTimerVal)
+  hordeSection.appendChild(hordeTimerLine)
+
+  // Escalation level — rises by 1 after EVERY horde (repelled or breached), so each is
+  // harder than the last.
+  const hordeLevelLine = h('p', 'horde-line muted')
+  hordeLevelLine.appendChild(document.createTextNode('Poziom hordy: '))
+  const hordeLevelVal = h('span', 'num')
+  hordeLevelLine.appendChild(hordeLevelVal)
+  hordeSection.appendChild(hordeLevelLine)
+
+  // Projected incoming strength (hordePower — level-escalated + the capital's progress).
+  const hordePowerLine = h('p', 'horde-line muted')
+  hordePowerLine.appendChild(document.createTextNode('Szacowana siła: '))
+  const hordePowerVal = h('span', 'num')
+  hordePowerLine.appendChild(hordePowerVal)
+  hordeSection.appendChild(hordePowerLine)
+
+  // 3-state defence FORECAST for the capital. The verdict is carried in WORDS + a glyph
+  // (hordeForecast.text), never colour alone (WCAG 1.4.1); the forecast-win/-lose tint is
+  // only supplementary, applied to the verdict span via the shared applyForecastClass.
+  const hordeForecastLine = h('p', 'horde-forecast')
+  hordeForecastLine.setAttribute('role', 'status')
+  hordeForecastLine.setAttribute('aria-live', 'polite')
+  hordeForecastLine.appendChild(document.createTextNode('Obrona stolicy: '))
+  const hordeForecastVal = h('span', 'horde-forecast-verdict')
+  hordeForecastLine.appendChild(hordeForecastVal)
+  hordeSection.appendChild(hordeForecastLine)
+
+  // Breach stakes — read straight from the content knobs so the copy can never drift from
+  // the penalty the engine actually applies (a far heavier blow than a raid; no buildings).
+  const hordeResPct = Math.round(HORDE_BREACH_RESOURCE_FRAC * 100)
+  const hordeArmyPct = Math.round(HORDE_BREACH_ARMY_FRAC * 100)
+  hordeSection.appendChild(
+    h(
+      'p',
+      'horde-stakes muted',
+      'Przy przełamaniu stolica traci ' +
+        hordeResPct +
+        '% każdego surowca oraz ' +
+        hordeArmyPct +
+        '% garnizonu (budynki bez zmian).',
+    ),
+  )
+
+  el.appendChild(hordeSection)
 
   // Feedback for the last recruit attempt (success or the canRecruit reason).
   const recMsg = h('p', 'recruit-msg muted')
@@ -272,6 +352,19 @@ export function createArmyPanel(ctx: UiCtx): Panel {
       : 'Zbuduj Koszary (poziom 1), aby rozpocząć rekrutację.'
 
     setBar(popBar, v.popCap.gt(0) ? pctOf(usedPop.div(v.popCap).mul(100).toNumber()) : 0)
+
+    // Horde readout (GLOBAL, capital-only). The projected strength and the forecast are
+    // computed with the SAME effective mods (tech × prestige) the tick resolves the horde
+    // with (effectiveMods), so the worded verdict can never disagree with the outcome the
+    // engine rolls. Pure read — no mutation, no RNG.
+    const gs = ctx.store.state
+    const mods = effectiveMods(gs)
+    hordeTimerVal.textContent = formatTime(gs.horde.timer)
+    hordeLevelVal.textContent = formatInt(gs.horde.level)
+    hordePowerVal.textContent = formatInt(hordePower(gs))
+    const fc = hordeForecast(gs, mods)
+    hordeForecastVal.textContent = fc.text
+    applyForecastClass(hordeForecastVal, fc.cls)
 
     // Fold account-wide tech (training-speed) into the displayed per-unit time so it
     // matches the snapshot recruit() takes (onRecruit threads the same mods).

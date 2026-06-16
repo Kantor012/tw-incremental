@@ -3,6 +3,7 @@ import {
   createVillage,
   recomputeDerived,
   RESOURCE_IDS,
+  HORDE_INTERVAL,
   type GameState,
   type ResourceId,
   type TechModifiers,
@@ -387,6 +388,10 @@ export function newDynasty(state: GameState): number {
   state.rngState = RNG.fromString(dynSeed).getState()
   state.tech = {}
   state.battleLog = []
+  // Re-arm the GLOBAL horde schedule too (M7.2), exactly as createInitialState seeds it: a
+  // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation
+  // level back to 0). Otherwise the accumulated escalation would wipe the level-1 capital.
+  state.horde = { timer: HORDE_INTERVAL, level: 0 }
 
   // Reconcile derived stats with the surviving dynasty multipliers (era + prestige empty).
   recomputeDerived(state)

@@ -3,6 +3,7 @@ import {
   createVillage,
   recomputeDerived,
   RESOURCE_IDS,
+  HORDE_INTERVAL,
   type GameState,
   type ResourceId,
   type TechModifiers,
@@ -398,6 +399,12 @@ export function ascend(state: GameState): number {
   state.rngState = RNG.fromString(ascSeed).getState()
   state.tech = {}
   state.battleLog = []
+  // Re-arm the GLOBAL horde schedule too (M7.2): a fresh, defenceless capital must meet a
+  // fresh horde clock — re-arm the timer AND reset the escalation level to 0, exactly as
+  // createInitialState seeds it. Without this the previous run's escalation (level) would
+  // bear down on a level-1 capital with no garrison, a guaranteed-breach wipe (the threat
+  // scales with the level, the defence with the now-wiped progress).
+  state.horde = { timer: HORDE_INTERVAL, level: 0 }
 
   // Reconcile derived stats with the surviving prestige multipliers.
   recomputeDerived(state)

@@ -8,6 +8,7 @@ import {
   RESOURCE_IDS,
   INITIAL_BUILDINGS,
   NO_TECH_MODS,
+  HORDE_INTERVAL,
   type GameState,
   type Stats,
   type Village,
@@ -48,6 +49,7 @@ import {
 } from '../src/systems/combat'
 import { autoAttackOnce } from '../src/systems/automation'
 import { advanceRaids } from '../src/systems/raids'
+import { advanceHorde } from '../src/systems/hordes'
 import { RNG } from '../src/engine/rng'
 import { villageDefenseMult } from '../src/systems/buildings'
 import { WORLD_SIZE, generateWorld } from '../src/systems/world'
@@ -60,6 +62,7 @@ import {
   prerequisitesMet,
 } from '../src/systems/tech'
 import {
+  ascend,
   effectiveMods,
   prestigeHasCycle,
   orphanPrestigeNodes,
@@ -2974,6 +2977,336 @@ export function checkFortressRazeOnce(seed: string): InvariantResult {
     detail:
       issues.length === 0
         ? `razed ${fortress.name} (wall ${target.defensePower}) once; a razed fortress refuses re-assault and never re-fires`
+        : issues.join('; '),
+  }
+}
+
+// --- M7.2 hordes (telegraphed, escalating capital invasion) coverage -----------------------
+// Self-contained proof-of-mechanic checks for the horde engine (systems/hordes.ts), mirroring
+// the fortress checks above: no bot, the only randomness the seeded combat luck. A horde is an
+// ALWAYS-ON new pressure, so unlike the additive opt-in fortresses these DO touch the main run —
+// but these checks isolate the guarantees the brief pins for the horde primitive itself:
+// escalation only ever rises, a forced BREACH leaves the capital playable (never a softlock), the
+// single GLOBAL horde schedule survives the real save/load path, AND the meta resets re-arm it.
+// The dt-chunk determinism (one big simulate == chunked offline, rngState and all) WITH a horde
+// actually FIRING is proven at integration level by {@link checkHordeDeterminism}, which arms the
+// clock to resolve a horde inside the window — the existing offline checks
+// ({@link checkOfflineDeterminism} et al.) run hordes through the same tick sub-step but on a 1h
+// horizon that never reaches HORDE_INTERVAL, so no horde resolves there.
+
+/** Hordes resolved by the escalation check — enough to span early repels AND, as the level climbs, breaches. */
+const HORDE_ESCALATION_RESOLVES = 12
+
+/**
+ * Horde escalation MONOTONICITY (M7.2): `state.horde.level` rises by EXACTLY 1 after every
+ * resolved horde — repelled OR breached — and never falls. Drives the REAL engine
+ * ({@link advanceHorde}) on a fresh seeded capital with a modest defensive garrison (so the early,
+ * low-level hordes are repelled and the later, geometrically-escalated ones breach — both paths
+ * exercised), resolving one horde at a time (dt == the remaining timer fires exactly one, then
+ * advanceHorde re-arms it) and asserting the level steps +1 each time. Also cross-checks that the
+ * resolution count equals repelled + breached, i.e. every horde resolved exactly once.
+ * Deterministic (one seeded luck draw per resolved horde); pure of the bot.
+ */
+export function checkHordeEscalation(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.units.spearman = 50 // a modest garrison: early hordes repel, the escalated ones breach
+  recomputeDerived(state)
+  const rng = RNG.fromString(seed + ':horde-escalation')
+
+  const issues: string[] = []
+  let prev = state.horde.level
+  if (prev !== 0) issues.push(`fresh horde level ${prev} (expected 0)`)
+  for (let i = 0; i < HORDE_ESCALATION_RESOLVES; i++) {
+    // dt == the remaining timer resolves EXACTLY one horde, then advanceHorde re-arms it.
+    advanceHorde(state, state.battleLog, state.horde.timer, NO_TECH_MODS, state.stats, rng)
+    const now = state.horde.level
+    if (now !== prev + 1) issues.push(`level ${prev} -> ${now} (expected +1 per resolved horde)`)
+    prev = now
+  }
+  const resolved = state.stats.hordesRepelled + state.stats.hordesBreached
+  if (resolved !== HORDE_ESCALATION_RESOLVES) {
+    issues.push(
+      `resolved ${resolved} != ${HORDE_ESCALATION_RESOLVES} ` +
+        `(repelled ${state.stats.hordesRepelled} + breached ${state.stats.hordesBreached})`,
+    )
+  }
+
+  return {
+    name: 'horde-escalation',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `level rose 0 -> ${state.horde.level} across ${HORDE_ESCALATION_RESOLVES} hordes ` +
+          `(${state.stats.hordesRepelled} repelled / ${state.stats.hordesBreached} breached), +1 each`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Horde escalation level used by the forced-breach check — high enough that hordePower (geometric
+ * in the level) dwarfs any seeded capital defence at ANY luck roll, so the single resolved horde is
+ * a GUARANTEED breach whatever the seed draws. The assertion below confirms the breach actually
+ * fired, so this stays robust even if the hordePower curve is retuned.
+ */
+const HORDE_FORCED_BREACH_LEVEL = 100
+
+/**
+ * A horde BREACH never SOFTLOCKS (M7.2): a breached horde steals a large slice of EACH capital
+ * resource and a chunk of the garrison, but NEVER destroys a building and never drives a pool /
+ * roster negative, so the capital stays playable and the loss is always recoverable. Drives the
+ * REAL engine ({@link advanceHorde}) on a fresh seeded capital — resources pinned at the cap, a
+ * standing garrison, and the escalation level forced sky-high so a breach is guaranteed on any roll
+ * — then asserts:
+ *  - the breach actually FIRED (stats.hordesBreached === 1), AND
+ *  - each resource fell but stayed FINITE, non-negative and within cap (a recoverable ~40% loss), AND
+ *  - the garrison fell but every count stayed a non-negative integer (a recoverable ~30% loss), AND
+ *  - NO building level changed (a breach never razes structures — the anti-softlock guarantee), AND
+ *  - the capital is still PLAYABLE: a progress action is available now, OR it still has resources +
+ *    production to accrue one (mirrors {@link checkNoSoftlock}'s philosophy), AND
+ *  - the army books still balance ({@link checkArmyConsistency}).
+ * Pure / deterministic — no bot.
+ */
+export function checkHordeBreachNoSoftlock(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  recomputeDerived(state)
+  // Resources pinned at the cap (a within-cap, affordable pool) and a real garrison to lose a slice of.
+  for (const r of RESOURCE_IDS) v.resources[r] = v.storageCap
+  v.units.spearman = 100
+  state.horde.level = HORDE_FORCED_BREACH_LEVEL // guarantee a breach on any luck roll
+
+  const resBefore: Record<string, Decimal> = {}
+  for (const r of RESOURCE_IDS) resBefore[r] = v.resources[r]
+  const garrisonBefore = UNIT_IDS.reduce((s, id) => s + v.units[id], 0)
+  const buildingsBefore = BUILDING_IDS.map((id) => v.buildings[id])
+
+  const rng = RNG.fromString(seed + ':horde-breach')
+  advanceHorde(state, state.battleLog, state.horde.timer, NO_TECH_MODS, state.stats, rng)
+
+  const issues: string[] = []
+  if (state.stats.hordesBreached !== 1) {
+    issues.push(
+      `expected exactly 1 breach, got hordesBreached=${state.stats.hordesBreached} ` +
+        `(repelled ${state.stats.hordesRepelled})`,
+    )
+  }
+
+  // Resources: dropped, but finite / non-negative / within cap (recoverable, not corrupt).
+  for (const r of RESOURCE_IDS) {
+    const res = v.resources[r]
+    if (!isFiniteDecimal(res) || res.lt(0) || res.gt(v.storageCap)) {
+      issues.push(`capital.${r}=${res.toString()} (cap ${v.storageCap.toString()})`)
+    } else if (!res.lt(resBefore[r])) {
+      issues.push(`capital.${r} did not fall on a breach (${resBefore[r].toString()} -> ${res.toString()})`)
+    }
+  }
+
+  // Garrison: dropped, but every count stayed a non-negative integer (recoverable).
+  for (const id of UNIT_IDS) {
+    if (!Number.isInteger(v.units[id]) || v.units[id] < 0) issues.push(`units.${id}=${v.units[id]}`)
+  }
+  const garrisonAfter = UNIT_IDS.reduce((s, id) => s + v.units[id], 0)
+  if (!(garrisonAfter < garrisonBefore)) {
+    issues.push(`garrison did not fall on a breach (${garrisonBefore} -> ${garrisonAfter})`)
+  }
+
+  // No building destroyed — the anti-softlock guarantee (a breach must never raze structures).
+  BUILDING_IDS.forEach((id, i) => {
+    if (v.buildings[id] !== buildingsBefore[i]) {
+      issues.push(`building ${id} changed ${buildingsBefore[i]} -> ${v.buildings[id]} (a breach must never raze structures)`)
+    }
+  })
+
+  // Still playable: an action now, OR resources + production to accrue one (no softlock).
+  const mods = effectiveMods(state)
+  const hasAction = chooseAction(v, state.world, mods) !== null
+  const hasResources = RESOURCE_IDS.some((r) => v.resources[r].gt(0))
+  const hasProduction = RESOURCE_IDS.some((r) => v.production[r].gt(0))
+  if (!hasAction && !(hasResources && hasProduction)) {
+    issues.push('capital not playable after a breach (no action, and no resources/production to recover)')
+  }
+
+  const ac = checkArmyConsistency(state)
+  if (!ac.ok) issues.push(`army-consistency: ${ac.detail ?? 'failed'}`)
+
+  return {
+    name: 'horde-breach-no-softlock',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `breach took a slice of each resource + a chunk of the garrison (${garrisonBefore} -> ${garrisonAfter}), ` +
+          `razed no building, left the capital playable`
+        : issues.join('; '),
+  }
+}
+
+/**
+ * Horde save/load round-trip (M7.2): the single GLOBAL horde schedule ({@link GameState.horde} —
+ * the countdown `timer` + the escalation `level`) must ride the real export/import (base64) path
+ * byte-for-byte. The whole-state {@link checkRoundTrip} proves serialize/deserialize is loss-free;
+ * this is the targeted proof that the v18 save carries `state.horde` specifically — the bit that
+ * persists the in-flight countdown AND the accumulated escalation across a save (CLAUDE.md hard
+ * rule #3). Mirrors {@link checkFortressSaveLoad} / {@link checkEraRoundTrip}. Pure function of a
+ * fresh seeded state.
+ */
+export function checkHordeSaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  // Distinctive, non-default values so the round-trip must carry BOTH fields, not just the seed default.
+  state.horde.timer = 1234.5
+  state.horde.level = 7
+  const restored = importSave(exportSave(state))
+  const a = state.horde
+  const b = restored.horde
+  const ok = a.timer === b.timer && a.level === b.level
+  return {
+    name: 'horde-save-load',
+    ok,
+    detail: ok
+      ? `horde schedule {timer:${a.timer},level:${a.level}} survived export/import byte-identically`
+      : `horde schedule changed across export/import: {timer:${a.timer},level:${a.level}} -> {timer:${b.timer},level:${b.level}}`,
+  }
+}
+
+/**
+ * Seconds-from-now the horde determinism check arms the capital's horde clock at. Well
+ * INSIDE the determinism window (the runner uses an hour) so a horde RESOLVES through the
+ * real tick within the span — without this the default {@link HORDE_INTERVAL} (4h) would
+ * leave the clock counting down but never firing, making the integration determinism check
+ * vacuous (the gap {@link checkHordeDeterminism} closes). The clock re-arms to the full
+ * HORDE_INTERVAL after firing, so exactly one horde resolves in the window.
+ */
+const HORDE_DETERMINISM_TIMER = 1800
+
+/**
+ * Put a fresh state into the SAME live combat scenario as {@link seedRecruitment} (a
+ * training queue, an in-flight march AND active raids on the capital) and ADDITIONALLY arm
+ * the GLOBAL horde clock to fire mid-window. So a horde resolution — its single seeded luck
+ * draw, the LAST rng consumer in the sub-step — is sandwiched between the raid/march draws,
+ * which means a regression that draws the WRONG number of luck values per resolved horde
+ * (two, or a draw on a non-resolving step) would shift the persisted rngState and desync the
+ * downstream raid/march timeline, breaking the byte-identity the determinism check asserts.
+ */
+function seedHordeDue(state: GameState): void {
+  seedRecruitment(state)
+  // A garrison home so the capital actually has a defence to resolve the horde against (a
+  // repel or a breach — either way EXACTLY one luck draw); irrelevant to the dt-invariance,
+  // present only so the resolution is a meaningful battle, not a 0-vs-0 edge case.
+  firstVillage(state).units.spearman = 80
+  state.horde.timer = HORDE_DETERMINISM_TIMER
+}
+
+/**
+ * Horde DETERMINISM at INTEGRATION level (M7.2): a horde resolving inside the deterministic
+ * tick sub-step draws its luck only from the persisted, seeded `rngState` on the fixed tick
+ * grid, so crediting a span as one big {@link simulate} (online catch-up) must be
+ * byte-identical to the chunked offline path ({@link applyOffline}) — same rngState, same
+ * outcomes — EVEN with a horde firing in the window. Mirrors {@link checkOfflineDeterminism} /
+ * {@link checkLuckDeterminism} but on {@link seedHordeDue}, which arms the horde clock to fire
+ * mid-span: unlike the existing offline checks (whose 1h horizon never reaches the 4h horde
+ * interval, so no horde ever resolves), this one GUARANTEES >= 1 horde resolves through the
+ * real tick. Also asserts NON-VACUITY: the rngState ADVANCED, a horde report landed AND the
+ * lifetime horde counters actually moved (>= 1 resolved), so "identical" can never pass by
+ * drawing nothing. `seconds` stays within
+ * {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller uses an hour).
+ */
+export function checkHordeDeterminism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedHordeDue(big)
+  const rng0 = big.rngState
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedHordeDue(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const equal = serialize(big) === serialize(chunked)
+  const advanced = big.rngState !== rng0
+  const rngMatches = big.rngState === chunked.rngState
+  const resolved = big.stats.hordesRepelled + big.stats.hordesBreached
+  const hordeReports = big.battleLog.filter((r) => r.kind === 'horde').length
+  const fired = resolved >= 1 && hordeReports >= 1
+  const ok = equal && advanced && rngMatches && fired
+  return {
+    name: 'horde-determinism',
+    ok,
+    detail: ok
+      ? `horde stream identical online vs chunked-offline (${resolved} horde(s) resolved, rngState ${rng0} -> ${big.rngState})`
+      : !fired
+        ? `no horde resolved in the window (resolved ${resolved}, reports ${hordeReports}) — vacuous determinism check`
+        : !equal
+          ? 'chunked offline catch-up diverged from a single-step simulate WITH a horde firing (rngState / outcomes split)'
+          : !advanced
+            ? 'rngState never advanced — no luck was drawn (vacuous determinism check)'
+            : `rngState diverged online (${big.rngState}) vs offline (${chunked.rngState})`,
+  }
+}
+
+/**
+ * Meta resets CLEAR the GLOBAL horde schedule (M7.2 balance invariant): a Wniebowstąpienie
+ * ({@link ascend}), a Nowa Era ({@link newEra}) and a Nowa Dynastia ({@link newDynasty}) each
+ * rebuild the run as ONE fresh, defenceless capital — and so they MUST re-arm the horde clock
+ * to its createInitialState seed `{timer: HORDE_INTERVAL, level: 0}`, exactly as they reset the
+ * per-village raid clock, the world and the rngState. If the escalation `level` (or the
+ * mid-countdown `timer`) survived a reset, the previous run's accumulated escalation would bear
+ * down on a level-1 capital with no garrison — a guaranteed-breach wipe that contradicts the
+ * "a normally-progressing player REPELS hordes" balance contract (the threat scales with the
+ * surviving level, the defence with the now-wiped progress). Drives each REAL reset on a seeded,
+ * dirtied horde state and asserts it lands back at the fresh-start schedule. Deterministic;
+ * pure of the bot.
+ */
+export function checkMetaResetClearsHorde(seed: string): InvariantResult {
+  const issues: string[] = []
+  // A distinctive non-default horde state, so the assertion proves the reset CLEARED it (not
+  // that it merely happened to already sit at the default).
+  const dirty = (s: GameState): void => {
+    s.horde = { timer: 4321.5, level: 9 }
+  }
+  const assertReset = (s: GameState, what: string): void => {
+    if (s.horde.timer !== HORDE_INTERVAL || s.horde.level !== 0) {
+      issues.push(
+        `${what} left horde {timer:${s.horde.timer},level:${s.horde.level}} ` +
+          `(expected {timer:${HORDE_INTERVAL},level:0})`,
+      )
+    }
+  }
+
+  // Wniebowstąpienie: a fresh capital already scores enough to bank PP, but boost a building so
+  // the yield is unambiguously > 0 on every seed.
+  {
+    const s = createInitialState(seed, 0)
+    firstVillage(s).buildings.hq = 30
+    recomputeDerived(s)
+    dirty(s)
+    if (ascend(s) <= 0) issues.push('ascend banked no PP (cannot test horde reset)')
+    else assertReset(s, 'ascend')
+  }
+  // Nowa Era: seed enough account-wide prestige progress that newEra banks EP (mirrors checkEraNoSoftlock).
+  {
+    const s = createInitialState(seed, 0)
+    s.prestige.totalEarned = 100
+    s.prestige.ascensions = 4
+    dirty(s)
+    if (newEra(s) <= 0) issues.push('newEra banked no EP (cannot test horde reset)')
+    else assertReset(s, 'newEra')
+  }
+  // Nowa Dynastia: seed enough account-wide era progress that newDynasty banks DP (mirrors checkDynastyNoSoftlock).
+  {
+    const s = createInitialState(seed, 0)
+    s.era.totalEarned = 100
+    s.era.eras = 4
+    dirty(s)
+    if (newDynasty(s) <= 0) issues.push('newDynasty banked no DP (cannot test horde reset)')
+    else assertReset(s, 'newDynasty')
+  }
+
+  return {
+    name: 'meta-reset-clears-horde',
+    ok: issues.length === 0,
+    detail:
+      issues.length === 0
+        ? `ascend / newEra / newDynasty each re-armed the horde to {timer:${HORDE_INTERVAL},level:0}`
         : issues.join('; '),
   }
 }

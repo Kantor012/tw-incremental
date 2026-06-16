@@ -5,6 +5,7 @@ import { RNG } from './rng'
 import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
 import { advanceRaids } from '../systems/raids'
+import { advanceHorde } from '../systems/hordes'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
 import { effectiveMods } from '../systems/prestige'
 import { runAutomation } from '../systems/automation'
@@ -40,6 +41,13 @@ export const TICK_RATE = 1 / 20
  * sub-step — not per village — so balance and replay never depend on how many player
  * villages exist. Both the collection order (villageOrder, then push order) and the
  * single regen call keep the whole thing deterministic.
+ *
+ * Hordes (M7.2) likewise resolve ONCE per sub-step, AFTER the village loop: a single
+ * GLOBAL schedule ({@link GameState.horde}) against the capital. {@link advanceHorde}
+ * draws EXACTLY ONE combat-luck value per RESOLVED horde from the SAME per-subStep `rng`,
+ * in this fixed position (after every per-village march/raid draw), so the luck stream's
+ * draw count and order are invariant to how `dt` is sliced — keeping online / offline /
+ * sim byte-identical with hordes active.
  *
  * EVERYTHING advances here for each village, not just the step-sensitive subsystems,
  * because combat (marches deliver loot, raids steal resources) READS AND WRITES the
@@ -112,6 +120,16 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   // Loyalty regenerates exactly ONCE per sub-step (not per village), after captures so a
   // just-taken camp (already off world.barbarians) never regenerates.
   advanceWorldLoyalty(state.world, dt)
+  // Hordes (M7.2) resolve exactly ONCE per sub-step (a single GLOBAL schedule against the
+  // capital, not per village), in this FIXED position AFTER the per-village loop — so its
+  // luck draw comes in a fixed order relative to the per-village march/raid draws above and
+  // the rng stream stays invariant to how `dt` is sliced. Like the combat advancers it is
+  // threaded the same `rng` (the per-subStep instance) and `state.stats`, and draws EXACTLY
+  // ONCE per RESOLVED horde (none for a sub-step where the horde clock has not elapsed), so
+  // the draw count tracks resolved hordes and online / offline / sim stay byte-identical.
+  // runAutomation below never draws (it plans against WORST_LUCK, a constant), so this is the
+  // last RNG consumer before the writeback.
+  advanceHorde(state, state.battleLog, dt, mods, state.stats, rng)
   // Automation (M5.1) runs LAST, after the world has fully settled this sub-step
   // (captures applied + barbarians removed by applyConquest, loyalty regenerated): so
   // auto-attack never targets a camp that was floored-and-removed this very step, and
@@ -137,7 +155,8 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): void {
   checkAchievements(state)
   // M5.5: persist the advanced luck stream so the next sub-step resumes exactly where this
   // one left off. All draws happened inside the village loop above (one per resolved attack
-  // / fired raid); nothing after it draws, so `rng.getState()` captures the whole sub-step's
+  // / fired raid) plus the single fixed-position advanceHorde draw (one per resolved horde,
+  // M7.2); nothing after that draws, so `rng.getState()` captures the whole sub-step's
   // consumption. Stored as a uint32 (getState masks), serialized as part of the save —
   // identical online / offline / sim because the sub-step grid makes the draw sequence
   // invariant to the `dt` split.

@@ -90,7 +90,7 @@ describe('fortress save — v16 -> v17 migration backfill (M7)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(17)
+    expect(m.version).toBe(18)
 
     // Fortresses are regenerated DETERMINISTICALLY from the seed (own rng stream).
     expect(Array.isArray(m.world.fortresses)).toBe(true)

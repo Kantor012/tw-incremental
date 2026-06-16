@@ -236,6 +236,26 @@ export interface RunMetrics {
    */
   fortressDriveRazed: number
 
+  // --- M7.2 hordes (telegraphed, escalating capital invasion) ---
+  /**
+   * Hordes REPELLED over the MAIN run — the capital's defence held the escalating
+   * invasion. Read straight off the lifetime {@link import('../src/engine/state').Stats}
+   * (state.stats.hordesRepelled, bumped only on the deterministic tick path, so identical
+   * online/offline/sim). Mirrors {@link raidsSurvived} but for the telegraphed capital
+   * horde rather than the silent per-village raid drip; the hordes-repelled balance target
+   * reads THIS — a normally-progressing run should repel at least one.
+   */
+  hordesRepelled: number
+  /** Hordes that BREACHED the capital over the MAIN run (state.stats.hordesBreached). Mirrors {@link raidsLost}. */
+  hordesBreached: number
+  /**
+   * The horde escalation level at run end (state.horde.level). It rises by 1 after EVERY
+   * horde — repelled or breached — so this is both the TOTAL hordes the run faced
+   * (= hordesRepelled + hordesBreached) and the peak difficulty reached. Cross-checks the
+   * two counters above.
+   */
+  hordeMaxLevel: number
+
   // --- M5.4 lifetime stats + achievements ---
   /**
    * The permanent lifetime {@link import('../src/engine/state').Stats} counters at the END of the
@@ -460,6 +480,12 @@ export function applyReport(c: CombatStats, r: BattleReport): void {
       c.raidStolen = c.raidStolen.add(D(r.looted))
     }
     c.unitsLost += r.losses
+  } else if (r.kind === 'horde') {
+    // horde (M7.2): the telegraphed capital invasion is counted from the AUTHORITATIVE
+    // lifetime stats (state.stats.hordesRepelled / hordesBreached, read by collect off the
+    // final state) rather than this trimmed rolling log, so we intentionally do not tally it
+    // here. Handling the kind explicitly also stops the old catch-all `else` from miscounting
+    // a horde report as a conquest.
   } else {
     // conquer (M2.4): a won attack carrying a surviving noble flipped a barbarian
     // village to the player. No won/losses/loot fields — it is a capture event.
@@ -618,6 +644,12 @@ export function collect(
 
     // M7: fortresses razed by the dedicated boss-target run (bot reachability).
     fortressDriveRazed,
+
+    // M7.2: the telegraphed capital horde tally — read straight off the final MAIN-run state
+    // (lifetime counters bumped only on the deterministic tick path + the live escalation level).
+    hordesRepelled: state.stats.hordesRepelled,
+    hordesBreached: state.stats.hordesBreached,
+    hordeMaxLevel: state.horde.level,
 
     // M5.4: snapshot the final lifetime counters + the achievement unlock tally straight off
     // the state (both bumped only on the deterministic tick path). lootHauled → exact string.

@@ -189,6 +189,17 @@ function evalTargets(r: RunResult): TargetCheck[] {
       detail: `razed ${m.fortressDriveRazed} fortress(es) in the dedicated siege run (target >= ${TARGETS.minFortressesRazed})`,
     },
     {
+      // M7.2: a NORMALLY-PROGRESSING bot must REPEL at least minHordesRepelled hordes over the MAIN
+      // run — the telegraphed, escalating capital invasion is an ALWAYS-ON pressure (it touches
+      // every run), so its defence must scale with progress like a raid's. Mirrors raids-resolved
+      // but for the high-stakes capital horde. This is added ALONGSIDE the 17 core +
+      // prestige/era/dynasty/fortress targets above (all of which STILL evaluate here): hordes are
+      // a new pressure but must not break the existing goals — see the per-seed report below.
+      name: 'hordes-repelled',
+      ok: m.hordesRepelled >= TARGETS.minHordesRepelled,
+      detail: `repelled ${m.hordesRepelled} / breached ${m.hordesBreached} hordes (max level ${m.hordeMaxLevel}; target repelled >= ${TARGETS.minHordesRepelled})`,
+    },
+    {
       name: 'tech-nodes-purchased',
       ok: m.techPurchases >= TARGETS.minTechPurchases,
       detail: `bought ${m.techPurchases} tech levels (${m.techNodesOwned} nodes, ${m.techLevelsOwned} levels; target >= ${TARGETS.minTechPurchases})`,
@@ -350,6 +361,38 @@ async function main(): Promise<void> {
       `${m.seed.padEnd(8)} | ${m.attacksSent} (${m.battlesWon}/${m.battlesLost}) | ${m.totalLoot} | ` +
         `${m.raidsSurvived}/${m.raidsLost} | ${m.raidStolen} | ${m.unitsLost} | ${m.finalArmyTotal}`,
     )
+  }
+  console.log('')
+
+  // --- Hordes per seed (M7.2 telegraphed, escalating capital invasion) ---
+  console.log('--- Hordes (end) ---')
+  console.log('seed     | repelled | breached | max level (= total faced)')
+  for (const r of results) {
+    const m = r.metrics
+    console.log(
+      `${m.seed.padEnd(8)} | ${String(m.hordesRepelled).padStart(8)} | ${String(m.hordesBreached).padStart(8)} | ` +
+        `${String(m.hordeMaxLevel).padStart(9)}`,
+    )
+  }
+  console.log('')
+
+  // --- M7.2 horde coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  console.log('--- M7.2 hordes (coverage) ---')
+  const m72Names = ['horde-escalation', 'horde-breach-no-softlock', 'horde-save-load']
+  for (const r of results) {
+    const line = m72Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing escalation / breach / save-load check is visible, not just the count.
+    for (const name of m72Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
   }
   console.log('')
 
