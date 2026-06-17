@@ -66,8 +66,10 @@ function pctOf(part: number): number {
 }
 
 interface HudResRefs {
+  chip: HTMLElement
   value: HTMLElement
   rate: HTMLElement
+  capBar: HTMLElement
 }
 
 interface HudStatRefs {
@@ -290,15 +292,27 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     chip.title = RESOURCE_NAMES[id]
     const iconWrap = h('span', 'hud-res-icon res-icon-wrap')
     iconWrap.appendChild(resourceIcon(id))
+    const body = h('div', 'hud-res-body')
     const txt = h('span', 'hud-res-text')
     const value = h('span', 'num hud-res-value')
     const rate = h('span', 'num muted hud-res-rate')
     txt.appendChild(value)
     txt.appendChild(rate)
+    // Cienki pasek zapełnienia magazynu dla tego surowca (fill = surowiec / cap).
+    // Barwa wypełnienia z is-wood/clay/iron (base.css); near-cap niesie też klasa
+    // is-near-cap na chipie + role/aria — kolor nie jest jedynym sygnałem.
+    const capBar = h('div', 'bar hud-res-bar is-' + id)
+    capBar.setAttribute('role', 'progressbar')
+    capBar.setAttribute('aria-valuemin', '0')
+    capBar.setAttribute('aria-valuemax', '100')
+    capBar.setAttribute('aria-label', 'Zapełnienie magazynu: ' + RESOURCE_NAMES[id])
+    capBar.appendChild(h('i'))
+    body.appendChild(txt)
+    body.appendChild(capBar)
     chip.appendChild(iconWrap)
-    chip.appendChild(txt)
+    chip.appendChild(body)
     resCluster.appendChild(chip)
-    hudRes[id] = { value, rate }
+    hudRes[id] = { chip, value, rate, capBar }
   }
   hudInner.appendChild(resCluster)
 
@@ -322,6 +336,7 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   const updateHud = (): void => {
     const s = ctx.store.state
     const v = s.villages[ctx.activeVillageId.value] ?? s.villages[s.villageOrder[0]]
+    const cap = v.storageCap
     // Resource amounts + rates; track the fullest resource for the storage bar
     // (storage cap is per-resource, so the closest-to-capping resource is the
     // binding "how full is the magazyn" signal — when it caps, production wastes).
@@ -331,9 +346,20 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
       r.value.textContent = formatNumber(v.resources[id])
       r.rate.textContent = formatRate(v.production[id])
       if (v.resources[id].gt(fullest)) fullest = v.resources[id]
+      // Per-resource zapełnienie + ostrzeżenie near-cap (>= 90%) — gracz widzi
+      // nadchodzące marnowanie produkcji zanim surowiec dobije do wspólnego capu.
+      const pct = cap.gt(0) ? pctOf(v.resources[id].div(cap).mul(100).toNumber()) : 0
+      setBar(r.capBar, pct)
+      const nearCap = pct >= 90
+      r.chip.classList.toggle('is-near-cap', nearCap)
+      // aria-valuetext przy near-cap: czytnik ekranu ogłasza DYSKRETNY stan
+      // „blisko limitu", a nie samą liczbę (uzupełnia wytłoczony znacznik progu,
+      // który niesie ten próg wzrokowo). Poza progiem czyścimy, by nie został
+      // nieaktualny — wtedy AT czyta z powrotem aria-valuenow.
+      if (nearCap) r.capBar.setAttribute('aria-valuetext', Math.round(pct) + '% — blisko limitu')
+      else r.capBar.removeAttribute('aria-valuetext')
     }
 
-    const cap = v.storageCap
     storageStat.val.textContent = formatNumber(fullest) + ' / ' + formatNumber(cap)
     setBar(storageStat.bar, cap.gt(0) ? pctOf(fullest.div(cap).mul(100).toNumber()) : 0)
 

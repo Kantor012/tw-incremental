@@ -206,6 +206,61 @@ html {
   font-size: var(--text-xs);
 }
 
+/* Mikro-pasek pojemności na żetonie (M11.7): pokazuje zapełnienie surowca
+ * względem wspólnego limitu magazynu (resource / storageCap). Dzięki temu
+ * gracz widzi nadciągające marnowanie produkcji ZANIM surowiec dobije do capu.
+ * Body układa tekst nad paskiem, ikona zostaje osobnym dzieckiem-wierszem.
+ * Wypełnienie .bar (kolory is-wood/is-clay/is-iron) bierzemy z base.css — tu
+ * tylko ścieniamy pasek. Stan .is-near-cap (>=90%) to sygnał WZMACNIAJĄCY:
+ * długość paska i liczby wartości/tempa niosą zapełnienie niezależnie od barwy,
+ * więc kolor nie jest jedynym nośnikiem informacji (WCAG 1.4.1). */
+.hud-res-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 4.5rem;
+}
+
+.hud-res-bar {
+  width: 100%;
+  height: 4px;
+  border: none;
+}
+
+/* Trwały, wytłoczony znacznik PROGU near-cap (90%) na torze paska. Punkt
+ * niebezpieczeństwa jest czytelny POŁOŻENIEM, nie tylko czerwoną zmianą barwy —
+ * niesie sygnał także dla osób słabowidzących / z daltonizmem (sama nieoznaczona
+ * długość byłaby zbyt trudna do oszacowania) (WCAG 1.4.1). Tor .bar jest
+ * position:relative + overflow:hidden (base.css), więc ::after jest bezpieczny. */
+.hud-res-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 90%;
+  width: 2px;
+  background-color: var(--border-strong);
+  pointer-events: none;
+}
+
+.hud-res.is-near-cap {
+  border-color: color-mix(in srgb, var(--bad) 55%, var(--border));
+  /* Poświata ostrzegawcza z tokena systemowego (--glow-bad), nie ręcznie liczona —
+   * spójna z resztą sygnałów „strata/limit" w UI. */
+  box-shadow: var(--shadow-1), var(--edge-highlight), var(--glow-bad);
+}
+.hud-res.is-near-cap .hud-res-bar > i {
+  background-color: var(--bad);
+}
+/* W stanie near-cap znacznik progu rozjaśnia się do barwy ostrzeżenia — wzmacnia
+ * (nie zastępuje) odczyt po położeniu, gdy wypełnienie minęło próg. */
+.hud-res.is-near-cap .hud-res-bar::after {
+  background-color: var(--bad-text);
+}
+.hud-res.is-near-cap .hud-res-value {
+  color: var(--bad-text);
+}
+
 /* ---- Statystyki (magazyn / populacja: etykieta + wartość + pasek) ------ */
 .hud-stats {
   display: flex;
