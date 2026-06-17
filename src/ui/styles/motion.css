@@ -153,6 +153,72 @@
   animation: tabpanel-enter var(--dur-base) var(--ease-out) both;
 }
 
+/* Kaskada kart przy wejściu panelu (M12.6): karty siatki „rozświetlają się" kolejno,
+ * zamiast pojawiać się jednym blokiem — drobny rytm dający stronie głębię. Działa
+ * WYŁĄCZNIE w oknie wejścia (klasa `.tabpanel-enter` znika na `animationend`, ~220ms),
+ * więc przebudowy kart w trakcie gry (np. założenie wioski, nowy raport) NIGDY nie
+ * animują. Tylko opacity + drobny dojazd w pionie; karty dziedziczą i tak dojazd
+ * panelu, więc to subtelne dopełnienie kaskady, nie osobny, walczący ruch. */
+@keyframes card-rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tabpanel-enter .card-grid > *,
+.tabpanel-enter .building-grid > *,
+.tabpanel-enter .unit-grid > *,
+.tabpanel-enter .target-list > *,
+.tabpanel-enter .report-list > *,
+.tabpanel-enter .save-grid > * {
+  animation: card-rise-in var(--dur-base) var(--ease-out) both;
+}
+
+/* Schodkowe opóźnienie pierwszych kart (skok ~26ms). Pułap na 8. karcie — dalsze
+ * karty ruszają razem z 8., więc kaskada nie ciągnie się w nieskończoność na dużych
+ * siatkach (a i tak urywa ją zdjęcie klasy ~220ms — karty po prostu są już widoczne). */
+.tabpanel-enter .card-grid > *:nth-child(1),
+.tabpanel-enter .building-grid > *:nth-child(1),
+.tabpanel-enter .unit-grid > *:nth-child(1),
+.tabpanel-enter .target-list > *:nth-child(1),
+.tabpanel-enter .report-list > *:nth-child(1),
+.tabpanel-enter .save-grid > *:nth-child(1) { animation-delay: 0ms; }
+.tabpanel-enter .card-grid > *:nth-child(2),
+.tabpanel-enter .building-grid > *:nth-child(2),
+.tabpanel-enter .unit-grid > *:nth-child(2),
+.tabpanel-enter .target-list > *:nth-child(2),
+.tabpanel-enter .report-list > *:nth-child(2),
+.tabpanel-enter .save-grid > *:nth-child(2) { animation-delay: 26ms; }
+.tabpanel-enter .card-grid > *:nth-child(3),
+.tabpanel-enter .building-grid > *:nth-child(3),
+.tabpanel-enter .unit-grid > *:nth-child(3),
+.tabpanel-enter .target-list > *:nth-child(3),
+.tabpanel-enter .report-list > *:nth-child(3),
+.tabpanel-enter .save-grid > *:nth-child(3) { animation-delay: 52ms; }
+.tabpanel-enter .card-grid > *:nth-child(4),
+.tabpanel-enter .building-grid > *:nth-child(4),
+.tabpanel-enter .unit-grid > *:nth-child(4),
+.tabpanel-enter .target-list > *:nth-child(4),
+.tabpanel-enter .report-list > *:nth-child(4),
+.tabpanel-enter .save-grid > *:nth-child(4) { animation-delay: 78ms; }
+.tabpanel-enter .card-grid > *:nth-child(5),
+.tabpanel-enter .building-grid > *:nth-child(5),
+.tabpanel-enter .unit-grid > *:nth-child(5),
+.tabpanel-enter .target-list > *:nth-child(5),
+.tabpanel-enter .report-list > *:nth-child(5),
+.tabpanel-enter .save-grid > *:nth-child(5) { animation-delay: 104ms; }
+.tabpanel-enter .card-grid > *:nth-child(n + 6),
+.tabpanel-enter .building-grid > *:nth-child(n + 6),
+.tabpanel-enter .unit-grid > *:nth-child(n + 6),
+.tabpanel-enter .target-list > *:nth-child(n + 6),
+.tabpanel-enter .report-list > *:nth-child(n + 6),
+.tabpanel-enter .save-grid > *:nth-child(n + 6) { animation-delay: 130ms; }
+
 /* Puls zakładki — klasę dokłada pętla efektu na WYKRYCIE nowego raportu (tani
  * porównawczy test referencji), zdejmuje `animationend` (once). JEDEN spokojny
  * przebieg (~220ms) — krótki błysk „spójrz tu", a nie nachalne miganie; serie
@@ -274,7 +340,13 @@
   .report-enter,
   .fx-bump,
   .hud-spend,
-  .tab.is-active::after {
+  .tab.is-active::after,
+  .tabpanel-enter .card-grid > *,
+  .tabpanel-enter .building-grid > *,
+  .tabpanel-enter .unit-grid > *,
+  .tabpanel-enter .target-list > *,
+  .tabpanel-enter .report-list > *,
+  .tabpanel-enter .save-grid > * {
     animation: none;
   }
 
