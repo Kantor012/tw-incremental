@@ -16,7 +16,7 @@ import { effectiveMods } from '../../systems/prestige'
 import { hordePower, hordeForecast } from '../../systems/hordes'
 import { HORDE_BREACH_RESOURCE_FRAC, HORDE_BREACH_ARMY_FRAC } from '../../content/hordes'
 import type { UiCtx, Panel } from '../types'
-import { h, unitIcon, RESOURCE_NAMES } from '../dom'
+import { h, unitIcon, RESOURCE_NAMES, collapsible } from '../dom'
 import { applyForecastClass } from '../combatForecast'
 
 /**
@@ -130,37 +130,30 @@ export function createArmyPanel(ctx: UiCtx): Panel {
   const hordeSection = h('section', 'horde-section')
   hordeSection.setAttribute('aria-labelledby', hordeTitleId)
 
-  const hordeHead = h('h3', 'recruit-subtitle horde-title', '⚔︎ Nadciągająca horda')
+  // panel-sticky-head pins the heading while the player scrolls the unit grid below,
+  // keeping the horde context glanceable without extra vertical travel (M12.3).
+  const hordeHead = h('h3', 'recruit-subtitle horde-title panel-sticky-head', '⚔︎ Nadciągająca horda')
   hordeHead.id = hordeTitleId
   hordeSection.appendChild(hordeHead)
 
+  // ---- Compact always-visible summary (countdown + forecast verdict) -------
+  // M12.3: only the two at-a-glance lines stay on screen under the heading; the rest
+  // folds into „Szczegóły hordy" below to cut the section's vertical footprint.
+
   // Countdown to the next horde. Uses the shared formatTime — the project's countdown
   // formatter (same as the recruit-queue ETA): for the long horde cadence it reads
-  // „4h 0m 0s", far clearer than a raw 240:00 MM:SS would be at this scale.
+  // „4h 0m 0s", far clearer than a raw 240:00 MM:SS would be at this scale. NOT a live
+  // region: it ticks every frame and an aria-live here would spam screen readers.
   const hordeTimerLine = h('p', 'horde-line muted')
   hordeTimerLine.appendChild(document.createTextNode('Następna horda za '))
   const hordeTimerVal = h('span', 'num')
   hordeTimerLine.appendChild(hordeTimerVal)
   hordeSection.appendChild(hordeTimerLine)
 
-  // Escalation level — rises by 1 after EVERY horde (repelled or breached), so each is
-  // harder than the last.
-  const hordeLevelLine = h('p', 'horde-line muted')
-  hordeLevelLine.appendChild(document.createTextNode('Poziom hordy: '))
-  const hordeLevelVal = h('span', 'num')
-  hordeLevelLine.appendChild(hordeLevelVal)
-  hordeSection.appendChild(hordeLevelLine)
-
-  // Projected incoming strength (hordePower — level-escalated + the capital's progress).
-  const hordePowerLine = h('p', 'horde-line muted')
-  hordePowerLine.appendChild(document.createTextNode('Szacowana siła: '))
-  const hordePowerVal = h('span', 'num')
-  hordePowerLine.appendChild(hordePowerVal)
-  hordeSection.appendChild(hordePowerLine)
-
   // 3-state defence FORECAST for the capital. The verdict is carried in WORDS + a glyph
   // (hordeForecast.text), never colour alone (WCAG 1.4.1); the forecast-win/-lose tint is
   // only supplementary, applied to the verdict span via the shared applyForecastClass.
+  // role=status + aria-live announce the occasional verdict FLIP (kept, per the brief).
   const hordeForecastLine = h('p', 'horde-forecast')
   hordeForecastLine.setAttribute('role', 'status')
   hordeForecastLine.setAttribute('aria-live', 'polite')
@@ -169,11 +162,32 @@ export function createArmyPanel(ctx: UiCtx): Panel {
   hordeForecastLine.appendChild(hordeForecastVal)
   hordeSection.appendChild(hordeForecastLine)
 
+  // ---- „Szczegóły hordy" — collapsible detail (defaults COLLAPSED) ----------
+  // M12.3: level, projected strength and breach stakes move off-screen by default. They
+  // still UPDATE every frame in update() (the native <details> only hides them visually,
+  // and gives keyboard + ARIA for free).
+  const hordeDetails = collapsible('Szczegóły hordy', { open: false, headingLevel: 4 })
+
+  // Escalation level — rises by 1 after EVERY horde (repelled or breached), so each is
+  // harder than the last.
+  const hordeLevelLine = h('p', 'horde-line muted')
+  hordeLevelLine.appendChild(document.createTextNode('Poziom hordy: '))
+  const hordeLevelVal = h('span', 'num')
+  hordeLevelLine.appendChild(hordeLevelVal)
+  hordeDetails.body.appendChild(hordeLevelLine)
+
+  // Projected incoming strength (hordePower — level-escalated + the capital's progress).
+  const hordePowerLine = h('p', 'horde-line muted')
+  hordePowerLine.appendChild(document.createTextNode('Szacowana siła: '))
+  const hordePowerVal = h('span', 'num')
+  hordePowerLine.appendChild(hordePowerVal)
+  hordeDetails.body.appendChild(hordePowerLine)
+
   // Breach stakes — read straight from the content knobs so the copy can never drift from
   // the penalty the engine actually applies (a far heavier blow than a raid; no buildings).
   const hordeResPct = Math.round(HORDE_BREACH_RESOURCE_FRAC * 100)
   const hordeArmyPct = Math.round(HORDE_BREACH_ARMY_FRAC * 100)
-  hordeSection.appendChild(
+  hordeDetails.body.appendChild(
     h(
       'p',
       'horde-stakes muted',
@@ -184,6 +198,8 @@ export function createArmyPanel(ctx: UiCtx): Panel {
         '% garnizonu (budynki bez zmian).',
     ),
   )
+
+  hordeSection.appendChild(hordeDetails.root)
 
   el.appendChild(hordeSection)
 
@@ -329,7 +345,7 @@ export function createArmyPanel(ctx: UiCtx): Panel {
   el.appendChild(grid)
 
   // ---- Training queue ------------------------------------------------------
-  el.appendChild(h('h3', 'recruit-subtitle', 'Kolejka szkolenia'))
+  el.appendChild(h('h3', 'recruit-subtitle panel-sticky-head', 'Kolejka szkolenia'))
   const queueList = h('ul', 'recruit-queue')
   el.appendChild(queueList)
   let lastQueueSig = ''

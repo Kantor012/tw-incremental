@@ -1,6 +1,9 @@
 import './ui/styles/tokens.css'
 import './ui/styles/base.css'
 import './ui/styles/layout.css'
+// Gęstość pionowa (M12.3): wygląd współdzielonych prymitywów collapsible/helpTip/
+// segmented + lepki pod-nagłówek panelu. Wczytany PO layout.css; czysto prezentacyjny.
+import './ui/styles/density.css'
 // Ruch + mikro-interakcje (M11.3): wczytany PO layout.css, by mógł nadpisywać
 // pojedyncze reguły (skrócone przejście paska, docisk karty). Czysto prezentacyjny.
 import './ui/styles/motion.css'
@@ -340,7 +343,7 @@ const ctx: UiCtx = {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.38.0',
+  version: '0.39.0',
   offlineSeconds,
 }
 

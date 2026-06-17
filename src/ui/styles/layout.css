@@ -2280,65 +2280,6 @@ html {
   gap: var(--space-2);
 }
 
-/* ---- Sekcja rozwijana (<details>) ------------------------------------- */
-.codex-section {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  /* Karta-rozwijka: ta sama warstwowa głębia co karty dashboardu (gradient
-   * powierzchni + cień kontaktu + połysk górnej krawędzi). */
-  background-color: var(--panel-2);
-  background-image: var(--grad-panel);
-  box-shadow: var(--shadow-1), var(--edge-highlight);
-  padding: var(--space-2) var(--space-3);
-  /* Kotwica ze spisu treści ma lądować poniżej sticky HUD-a. */
-  scroll-margin-top: var(--hud-h);
-}
-
-/* Nagłówek-przełącznik. Flex (nie list-item) gubi natywny trójkąt <summary>,
- * więc go ukrywamy i rysujemy własny chevron (patrz ::after niżej). */
-.codex-section-summary {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  min-height: 44px;
-  cursor: pointer;
-  list-style: none;
-}
-
-.codex-section-summary::-webkit-details-marker {
-  display: none;
-}
-
-.codex-section-summary h3 {
-  margin: 0;
-  font-size: var(--text-lg);
-}
-
-/* Własny chevron przy prawej krawędzi (margin-left:auto parkuje go na końcu).
- * Strzałka w dół przy zwiniętej sekcji; obrót przy [open] — sygnał KSZTAŁTU,
- * niezależny od koloru. */
-.codex-section-summary::after {
-  content: '';
-  margin-left: auto;
-  width: 0.55em;
-  height: 0.55em;
-  border-right: 2px solid var(--muted);
-  border-bottom: 2px solid var(--muted);
-  transform: rotate(45deg);
-  transition: transform var(--dur-fast) var(--ease);
-}
-
-.codex-section[open] .codex-section-summary::after {
-  transform: rotate(-135deg);
-}
-
-.codex-section-body {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding-top: var(--space-3);
-}
-
 /* ---- Treść wewnątrz sekcji -------------------------------------------- */
 /* Krótki akapit wprowadzający sekcję (barwę przygaszoną niesie .muted). */
 .codex-intro {
@@ -2418,15 +2359,6 @@ html {
 .codex-para {
   margin: var(--space-1) 0 0;
   font-size: var(--text-sm);
-}
-
-/* ---- Ograniczony ruch ------------------------------------------------- */
-/* Globalny wyłącznik w base.css już neutralizuje przejście chevrona; tu jawnie
- * wg kontraktu (spójnie z sekcjami mapy/drzewa). */
-@media (prefers-reduced-motion: reduce) {
-  .codex-section-summary::after {
-    transition: none;
-  }
 }
 
 /* ---- Nadciągająca horda (panel „Armia", M7.2) ------------------------- */

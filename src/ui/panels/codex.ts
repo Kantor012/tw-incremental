@@ -1,5 +1,5 @@
 import type { UiCtx, Panel } from '../types'
-import { h, resourceIcon, unitIcon, buildingIcon, RESOURCE_NAMES } from '../dom'
+import { h, resourceIcon, unitIcon, buildingIcon, RESOURCE_NAMES, collapsible } from '../dom'
 import { formatNumber, formatRate } from '../../engine/format'
 import { RESOURCE_IDS, type ResourceId, type AutomationKind } from '../../engine/state'
 import { BUILDINGS, BUILDING_IDS, type BuildingEffect } from '../../content/buildings'
@@ -13,8 +13,10 @@ import { CODEX_MECHANICS } from '../../content/codex'
  * "Kodeks" panel (M6.3) — a READ-ONLY, in-game encyclopaedia gathering every system
  * in one place so the player can understand the deep game.
  *
- * Eight collapsible sections, each a native `<details open>` accordion fronted by an
- * `<h3>` summary and reachable from a focusable table-of-contents nav at the top:
+ * Eight collapsible sections built with the shared `collapsible()` primitive (a native
+ * `<details>` fronted by an `<h3>` summary). Only the first (Surowce) is open by default;
+ * the rest start collapsed to cut scrolling. Each is reachable from a focusable
+ * table-of-contents nav at the top (a TOC link opens its section and scrolls to it):
  *  1. Surowce       — RESOURCE_IDS + RESOURCE_NAMES, each with its producing building
  *                     (derived from BUILDINGS, not hardcoded).
  *  2. Budynki       — every BUILDING_IDS entry: name, effect (read off the typed
@@ -201,26 +203,6 @@ const SECTIONS: readonly { id: string; label: string }[] = [
   { id: 'codex-achievements', label: 'Osiągnięcia' },
   { id: 'codex-mechanics', label: 'Mechaniki' },
 ]
-
-/**
- * Create one collapsible `<details open>` section with an `<h3>` summary, append it to
- * `parent`, and return its body container for the caller to fill.
- */
-function sectionAccordion(parent: HTMLElement, id: string, title: string): HTMLElement {
-  const details = h('details', 'codex-section')
-  details.id = id
-  details.open = true
-
-  const summary = h('summary', 'codex-section-summary')
-  summary.appendChild(h('h3', undefined, title))
-  details.appendChild(summary)
-
-  const body = h('div', 'codex-section-body')
-  details.appendChild(body)
-
-  parent.appendChild(details)
-  return body
-}
 
 /** A short muted intro paragraph for a section body. */
 function intro(text: string): HTMLElement {
@@ -471,6 +453,19 @@ function buildMechanics(body: HTMLElement): void {
   }
 }
 
+/** Body builder per section id — keeps {@link SECTIONS} the single source of order/labels
+ * while each section's content stays in its own builder. */
+const SECTION_BUILDERS: Record<string, (body: HTMLElement) => void> = {
+  'codex-resources': buildResources,
+  'codex-buildings': buildBuildings,
+  'codex-units': buildUnits,
+  'codex-tech': buildTech,
+  'codex-prestige': buildPrestige,
+  'codex-automation': buildAutomation,
+  'codex-achievements': buildAchievements,
+  'codex-mechanics': buildMechanics,
+}
+
 /**
  * Build the "Kodeks" panel. The `ctx` is intentionally unused: the codex is a fully
  * STATIC, read-only catalogue, so it neither reads live state nor wires any callback.
@@ -489,25 +484,39 @@ export function createCodexPanel(_ctx: UiCtx): Panel {
   note.setAttribute('role', 'note')
   el.appendChild(note)
 
+  // id -> <details>, by linki spisu treści mogły rozwinąć i przewinąć daną sekcję.
+  const sectionRoots = new Map<string, HTMLDetailsElement>()
+
   // ---- Table-of-contents nav (focusable, 44px targets) ---------------------
   const nav = h('nav', 'codex-nav')
   nav.setAttribute('aria-label', 'Spis treści kodeksu')
   for (const section of SECTIONS) {
     const link = h('a', 'btn btn-ghost', section.label)
     link.setAttribute('href', '#' + section.id)
+    // Klik w spis treści: ROZWIŃ docelową sekcję (gdy zwinięta) i przewiń do niej.
+    link.addEventListener('click', (ev) => {
+      const root = sectionRoots.get(section.id)
+      if (!root) return
+      ev.preventDefault()
+      root.open = true
+      root.scrollIntoView()
+    })
     nav.appendChild(link)
   }
   el.appendChild(nav)
 
   // ---- Sections ------------------------------------------------------------
-  buildResources(sectionAccordion(el, 'codex-resources', 'Surowce'))
-  buildBuildings(sectionAccordion(el, 'codex-buildings', 'Budynki'))
-  buildUnits(sectionAccordion(el, 'codex-units', 'Jednostki'))
-  buildTech(sectionAccordion(el, 'codex-tech', 'Drzewo rozwoju'))
-  buildPrestige(sectionAccordion(el, 'codex-prestige', 'Prestiż'))
-  buildAutomation(sectionAccordion(el, 'codex-automation', 'Automatyzacja'))
-  buildAchievements(sectionAccordion(el, 'codex-achievements', 'Osiągnięcia'))
-  buildMechanics(sectionAccordion(el, 'codex-mechanics', 'Mechaniki'))
+  // Współdzielony collapsible(): nagłówek h3 + szewron, klawiatura/ARIA za darmo.
+  // Domyślnie OTWARTA jest tylko pierwsza sekcja (Surowce); reszta zwinięta, by
+  // skrócić przewijanie. scroll-margin-top trzyma kotwicę poniżej lepkiego HUD-a.
+  SECTIONS.forEach((section, i) => {
+    const { root, body } = collapsible(section.label, { open: i === 0, headingLevel: 3 })
+    root.id = section.id
+    root.style.scrollMarginTop = 'var(--hud-h)'
+    SECTION_BUILDERS[section.id](body)
+    el.appendChild(root)
+    sectionRoots.set(section.id, root)
+  })
 
   // Content is fully static catalogue metadata — nothing to refresh per frame.
   const update = (): void => {}

@@ -9,7 +9,7 @@ import {
   playerVillageCount,
 } from '../../systems/villages'
 import type { UiCtx, Panel } from '../types'
-import { h, RESOURCE_NAMES } from '../dom'
+import { h, RESOURCE_NAMES, helpTip } from '../dom'
 import { villageCrest } from '../crest'
 
 /**
@@ -131,19 +131,19 @@ function fullestStock(resources: ResourceMap): ResourceId {
 export function createVillagesPanel(ctx: UiCtx): Panel {
   const el = h('div', 'villages-panel')
 
-  const intro = h(
-    'p',
-    'muted',
-    'Zarządzaj wszystkimi wioskami i zakładaj nowe na mapie. Każda wioska ma własną produkcję, magazyn i wojsko.',
-  )
-  intro.style.fontSize = 'var(--text-sm)'
-  intro.style.marginBottom = 'var(--space-4)'
-  el.appendChild(intro)
-
   // ---- (1) List of owned villages -----------------------------------------
-  const listHeading = h('h3', 'section-title', 'Twoje wioski')
+  // Nagłówek przyklejony pod HUD (panel-sticky-head); długa proza wyjaśniająca
+  // zdjęta z ekranu do inline'owej podpowiedzi „?" obok tytułu (M12.3 — mniej
+  // przewijania strony).
+  const listHeading = h('h3', 'section-title panel-sticky-head', 'Twoje wioski')
   listHeading.style.fontSize = 'var(--text-lg)'
   listHeading.style.marginBottom = 'var(--space-3)'
+  listHeading.appendChild(
+    helpTip(
+      'Zarządzaj wszystkimi wioskami i zakładaj nowe na mapie. Każda wioska ma własną produkcję, magazyn i wojsko.',
+      { label: 'O wioskach' },
+    ),
+  )
   el.appendChild(listHeading)
 
   const grid = h('div', 'card-grid')
@@ -265,19 +265,17 @@ export function createVillagesPanel(ctx: UiCtx): Panel {
   const foundSection = h('section', 'founding-section')
   foundSection.style.marginTop = 'var(--space-5)'
 
-  const foundHeading = h('h3', 'section-title', 'Zakładanie nowej wioski')
+  // Nagłówek przyklejony pod HUD; wyjaśnienie mechaniki założenia przeniesione
+  // z prozy do inline'owej podpowiedzi „?" obok tytułu (M12.3).
+  const foundHeading = h('h3', 'section-title panel-sticky-head', 'Zakładanie nowej wioski')
   foundHeading.style.fontSize = 'var(--text-lg)'
   foundHeading.style.marginBottom = 'var(--space-2)'
-  foundSection.appendChild(foundHeading)
-
-  const foundIntro = h(
-    'p',
-    'muted',
-    'Nowa wioska powstaje obok twoich włości. Koszt rośnie z każdą posiadaną wioską.',
+  foundHeading.appendChild(
+    helpTip('Nowa wioska powstaje obok twoich włości. Koszt rośnie z każdą posiadaną wioską.', {
+      label: 'O zakładaniu wioski',
+    }),
   )
-  foundIntro.style.fontSize = 'var(--text-sm)'
-  foundIntro.style.marginBottom = 'var(--space-3)'
-  foundSection.appendChild(foundIntro)
+  foundSection.appendChild(foundHeading)
 
   const countLine = makeStatRow('Liczba wiosek')
   countLine.row.style.maxWidth = '20rem'

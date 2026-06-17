@@ -1,6 +1,6 @@
 import type { UiCtx, Panel } from '../types'
 import type { Stats } from '../../engine/state'
-import { h, lockIcon, checkIcon } from '../dom'
+import { h, lockIcon, checkIcon, helpTip } from '../dom'
 import { formatNumber } from '../../engine/format'
 import { ACHIEVEMENTS, ACHIEVEMENT_IDS } from '../../content/achievements'
 import { achievementUnlocked } from '../../systems/achievements'
@@ -104,18 +104,6 @@ interface AchRef {
 export function createAchievementsPanel(ctx: UiCtx): Panel {
   const el = h('div', 'achievements-panel')
 
-  // ---- Intro note ----------------------------------------------------------
-  const note = h(
-    'p',
-    'tech-note muted',
-    'Osiągnięcia to TRWAŁE wyróżnienia za kamienie milowe Twojej kariery — ' +
-      'odblokowują się automatycznie, gdy spełnisz warunek, i nigdy nie znikają ' +
-      '(przetrwają każdą ascensję). Są czysto honorowe: nie dają żadnych bonusów ' +
-      'do rozgrywki.',
-  )
-  note.setAttribute('role', 'note')
-  el.appendChild(note)
-
   // ---- Lifetime-stats summary ---------------------------------------------
   const summary = h('section', 'achievements-summary')
   summary.setAttribute('aria-labelledby', 'ach-summary-h')
@@ -143,10 +131,28 @@ export function createAchievementsPanel(ctx: UiCtx): Panel {
   tally.style.flexDirection = 'column'
   tally.style.gap = 'var(--space-1)'
   tally.style.marginTop = 'var(--space-2)'
+  // The "achievements are permanent / purely honorary" prose used to live in a full
+  // intro paragraph above the strip; it now rides as an inline helpTip next to the
+  // headline tally, trimming a block of always-on screen-eating prose (M12.3).
+  const tallyRow = h('div', 'achievements-tally-row')
+  tallyRow.style.display = 'flex'
+  tallyRow.style.alignItems = 'center'
+  tallyRow.style.gap = 'var(--space-1)'
   const tallyText = h('p', 'num', '0 / ' + ACHIEVEMENT_IDS.length + ' odblokowanych')
+  tallyText.style.margin = '0'
   tallyText.setAttribute('role', 'status')
   tallyText.setAttribute('aria-live', 'polite')
-  tally.appendChild(tallyText)
+  tallyRow.appendChild(tallyText)
+  tallyRow.appendChild(
+    helpTip(
+      'Osiągnięcia to TRWAŁE wyróżnienia za kamienie milowe Twojej kariery — ' +
+        'odblokowują się automatycznie, gdy spełnisz warunek, i nigdy nie znikają ' +
+        '(przetrwają każdą ascensję). Są czysto honorowe: nie dają żadnych bonusów ' +
+        'do rozgrywki.',
+      { label: 'O osiągnięciach' },
+    ),
+  )
+  tally.appendChild(tallyRow)
   // Reuse the shared, token-styled `.bar > i` fill (var(--accent) on var(--bg-2),
   // pill border) instead of a native <progress> — the native element ignores the
   // gold-on-dark design system and renders with browser/OS chrome. This is the same
@@ -171,7 +177,7 @@ export function createAchievementsPanel(ctx: UiCtx): Panel {
     const section = h('section', 'achievements-category')
     const headingId = 'ach-cat-' + group.category.replace(/\s+/g, '-')
     section.setAttribute('aria-labelledby', headingId)
-    const heading = h('h3', 'achievements-category-h', capitalize(group.category))
+    const heading = h('h3', 'achievements-category-h panel-sticky-head', capitalize(group.category))
     heading.id = headingId
     section.appendChild(heading)
 

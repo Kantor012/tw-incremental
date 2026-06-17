@@ -888,3 +888,173 @@ export function menuIcon(): SVGSVGElement {
     svg('rect', { x: '3', y, width: '18', height: '2.2', rx: '1.1', fill: 'currentColor' })
   return navGlyph([bar('5'), bar('11'), bar('17')])
 }
+
+/* ============================================================================
+ * M12.3 — Prymitywy zagęszczenia pionowego (mniej przewijania strony)
+ * --------------------------------------------------------------------------
+ * Trzy współdzielone, czysto-DOM-owe prymitywy konsumowane DOSŁOWNIE przez panele:
+ *  - collapsible() — natywny <details> (klawiatura + ARIA za darmo) z własnym
+ *    szewronem (chevronIcon) obracanym CSS-em na [open],
+ *  - helpTip() — drobny, fokusowalny przycisk „?" przenoszący długą prozę z ekranu
+ *    do tooltipa (title) + etykiety dla czytników (aria-label),
+ *  - segmented() — pasek pigułek role=radiogroup z roaming-tabindex (Strzałki/Home/End),
+ *    by dwie sekcje mogły dzielić to samo miejsce.
+ * Zero importów ze store'a — wyłącznie {@link h} i {@link chevronIcon} z tego modułu.
+ * ========================================================================== */
+
+/**
+ * Sekcja rozwijana oparta na natywnym `<details>` — klawiatura (Enter/Spacja na
+ * `<summary>`) i ARIA (expanded/collapsed) są wbudowane, więc nie odtwarzamy ich ręcznie.
+ * Zwraca `root` (sam `<details>`) i `body` (pusty `<div class="collapse-body">`), który
+ * wypełnia wywołujący. Tytuł owijamy w nagłówek h2/h3/h4 (gdy podano `headingLevel`,
+ * dla poprawnej hierarchii dokumentu) ALBO w `<span>`. Szewron jest CZYSTĄ dekoracją
+ * (aria-hidden) — obraca się przez CSS na `[open]` (sygnał KSZTAŁTU, nie samego koloru).
+ */
+export function collapsible(
+  title: string,
+  opts?: { open?: boolean; headingLevel?: 2 | 3 | 4 },
+): { root: HTMLDetailsElement; body: HTMLElement } {
+  const root = h('details', 'collapse')
+  if (opts?.open) root.open = true
+
+  const summary = h('summary', 'collapse-summary')
+  const level = opts?.headingLevel
+  const titleEl =
+    level === undefined
+      ? h('span', 'collapse-title', title)
+      : h(`h${level}`, 'collapse-title', title)
+  summary.appendChild(titleEl)
+
+  // Szewron z chevronIcon() — dekoracja; CSS obraca go na [open] (".collapse[open]").
+  const chevron = h('span', 'collapse-chevron')
+  chevron.setAttribute('aria-hidden', 'true')
+  chevron.appendChild(chevronIcon())
+  summary.appendChild(chevron)
+  root.appendChild(summary)
+
+  const body = h('div', 'collapse-body')
+  root.appendChild(body)
+
+  return { root, body }
+}
+
+/** Licznik do unikalnych id powiązań aria-describedby (jedna instancja = jeden opis). */
+let helpTipSeq = 0
+
+/**
+ * Drobna, inline'owa podpowiedź „?" — zdejmuje długą prozę wyjaśniającą z ekranu.
+ *
+ * Dostępność (problem: sam `title` nie wystarcza — nie wychodzi na fokusie klawiatury,
+ * nie reaguje na dotyk, a jego ekspozycja jako OPISU bywa zależna od przeglądarki/AT):
+ *  - pełne wyjaśnienie niesie TRWAŁY, wizualnie-ukryty `<span class="visually-hidden">`
+ *    powiązany przez `aria-describedby` — to NIEZAWODNA ścieżka do treści dla czytników
+ *    ekranu, działająca tak samo przy obsłudze klawiaturą, jak i dotykiem;
+ *  - `aria-label` daje przyciskowi KRÓTKĄ nazwę (`opts.label` lub, w braku, sam `text`),
+ *    więc opis nie dubluje się z nazwą;
+ *  - `title` zostaje WYŁĄCZNIE jako redundantny tooltip dla myszy.
+ * Span żyje WEWNĄTRZ przycisku, więc jest częścią zwracanego poddrzewa (id zadziała po
+ * wstawieniu do dokumentu). Fokusowalny `<button type="button">` trafia w globalny pierścień
+ * fokusa i obsługę klawiatury — siada obok nagłówka.
+ */
+export function helpTip(text: string, opts?: { label?: string }): HTMLElement {
+  const btn = h('button', 'help-tip', '?')
+  btn.type = 'button'
+  btn.title = text
+  btn.setAttribute('aria-label', opts?.label ?? text)
+
+  const descId = `help-tip-desc-${(helpTipSeq += 1)}`
+  const desc = h('span', 'visually-hidden', text)
+  desc.id = descId
+  btn.setAttribute('aria-describedby', descId)
+  btn.appendChild(desc)
+
+  return btn
+}
+
+/**
+ * Segmentowany przełącznik (pasek pigułek) jako `role="radiogroup"` z przyciskami
+ * `role="radio"`. Pozwala DWÓM sekcjom dzielić to samo miejsce (jedna widoczna na raz).
+ *
+ * Dostępność wg wzorca ARIA radiogroup:
+ *  - roaming tabindex: tabbable jest TYLKO zaznaczony radio (reszta -1), więc Tab wchodzi/
+ *    wychodzi z grupy jednym krokiem;
+ *  - Strzałki Lewo/Prawo przesuwają zaznaczenie (z zawijaniem), Home/End skaczą na skraje;
+ *  - klik LUB nawigacja klawiaturą zaznacza i woła `onSelect`.
+ * Zwracany `select(id)` przełącza PROGRAMOWO (aktualizuje aria-checked + tabindex, BEZ
+ * wołania `onSelect` — to wywołujący inicjuje zmianę, więc nie domykamy pętli zwrotnej).
+ */
+export function segmented(
+  items: Array<{ id: string; label: string }>,
+  initialId: string,
+  onSelect: (id: string) => void,
+): { root: HTMLElement; select: (id: string) => void } {
+  const root = h('div', 'segmented')
+  root.setAttribute('role', 'radiogroup')
+
+  const buttons = new Map<string, HTMLButtonElement>()
+  const order: string[] = []
+
+  // Czysto wizualne/ARIA przełączenie zaznaczenia — NIE woła onSelect (patrz docstring).
+  const select = (id: string): void => {
+    if (!buttons.has(id)) return
+    for (const [bid, btn] of buttons) {
+      const checked = bid === id
+      btn.setAttribute('aria-checked', checked ? 'true' : 'false')
+      btn.classList.toggle('is-checked', checked)
+      btn.tabIndex = checked ? 0 : -1
+    }
+  }
+
+  // Interakcja użytkownika: zaznacz + powiadom wywołującego.
+  const choose = (id: string): void => {
+    select(id)
+    onSelect(id)
+  }
+
+  for (const item of items) {
+    const btn = h('button', 'seg-btn', item.label)
+    btn.type = 'button'
+    btn.setAttribute('role', 'radio')
+    btn.setAttribute('aria-checked', 'false')
+    btn.tabIndex = -1
+    btn.addEventListener('click', () => choose(item.id))
+    buttons.set(item.id, btn)
+    order.push(item.id)
+    root.appendChild(btn)
+  }
+
+  // Roaming klawiaturą: ustal bieżący indeks z fokusa (fallback: zaznaczony, potem 0).
+  root.addEventListener('keydown', (ev: KeyboardEvent) => {
+    const n = order.length
+    if (n === 0) return
+    let target = -1
+    if (ev.key === 'ArrowRight') target = 1
+    else if (ev.key === 'ArrowLeft') target = -1
+    else if (ev.key === 'Home') target = -2
+    else if (ev.key === 'End') target = -3
+    else return
+    const active = document.activeElement
+    let cur = order.findIndex((id) => buttons.get(id) === active)
+    if (cur < 0) cur = order.findIndex((id) => buttons.get(id)?.getAttribute('aria-checked') === 'true')
+    if (cur < 0) cur = 0
+    let next: number
+    if (target === -2) next = 0
+    else if (target === -3) next = n - 1
+    else next = (cur + target + n) % n
+    ev.preventDefault()
+    const nextId = order[next]
+    choose(nextId)
+    buttons.get(nextId)?.focus()
+  })
+
+  // Stan początkowy: zaznacz initialId; jeśli nieznany — utrzymaj grupę osiągalną Tabem
+  // (pierwszy przycisk tabbable), nie zaznaczając niczego.
+  if (buttons.has(initialId)) {
+    select(initialId)
+  } else if (order.length > 0) {
+    const first = buttons.get(order[0])
+    if (first) first.tabIndex = 0
+  }
+
+  return { root, select }
+}

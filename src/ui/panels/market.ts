@@ -11,7 +11,7 @@ import {
   exchangeRate,
 } from '../../systems/market'
 import type { UiCtx, Panel } from '../types'
-import { h, resourceIcon, RESOURCE_NAMES, emptyState } from '../dom'
+import { h, resourceIcon, RESOURCE_NAMES, emptyState, segmented } from '../dom'
 
 /**
  * Market panel — the „Rynek" screen (M9). The player-facing front end of the
@@ -81,6 +81,36 @@ export function createMarketPanel(ctx: UiCtx): Panel {
   status.setAttribute('aria-live', 'polite')
   el.appendChild(status)
 
+  // ---- Segmented switch: send | exchange (M12.3 vertical density) -----------
+  // The two market actions („Wyślij kupców" + „Wymień surowce") used to stack and
+  // double the scroll. They now share ONE slot: a segmented control reveals exactly
+  // one section at a time via the `hidden` attribute. Both sections stay in the DOM and
+  // keep their per-frame forecast/capacity updates running inside the store.rev effect —
+  // we only flip visibility, never destroy/rebuild — so switching reveals fresh state.
+  const sendSection = h('div', 'market-section')
+  const exchangeSection = h('div', 'market-section')
+  const seg = segmented(
+    [
+      { id: 'send', label: 'Wyślij kupców' },
+      { id: 'exchange', label: 'Wymień surowce' },
+    ],
+    'send',
+    (id) => {
+      sendSection.hidden = id !== 'send'
+      exchangeSection.hidden = id !== 'exchange'
+    },
+  )
+  // A11y: ARIA requires a radiogroup to carry an accessible NAME, otherwise a screen
+  // reader announces an unnamed group and the two options have no stated purpose. The
+  // segmented() primitive sets no name, so name the group here (the in-panel fix; the
+  // primitive stays untouched).
+  seg.root.setAttribute('aria-label', 'Akcja rynku')
+  el.appendChild(seg.root)
+  el.appendChild(sendSection)
+  el.appendChild(exchangeSection)
+  // Default „send" visible, „exchange" hidden (matches the segmented control's initialId).
+  exchangeSection.hidden = true
+
   // Gate notice (the two explicit PL reasons). Renderowana jako blok PUSTEGO STANU
   // (spokojny glif + REALNY tekst powodu — nigdy sam kolor): ten <div> jest hostem
   // „live region" (role=status), w którym OSADZAMY emptyState (helper nie dokłada
@@ -90,7 +120,7 @@ export function createMarketPanel(ctx: UiCtx): Panel {
   gate.setAttribute('role', 'status')
   gate.setAttribute('aria-live', 'polite')
   gate.hidden = true
-  el.appendChild(gate)
+  sendSection.appendChild(gate)
   // Sentinel: wnętrze bramki przebudowujemy tylko przy zmianie powodu (nie co tick).
   let lastGateReason = ' '
 
@@ -201,12 +231,12 @@ export function createMarketPanel(ctx: UiCtx): Panel {
   msg.setAttribute('aria-live', 'polite')
   form.appendChild(msg)
 
-  el.appendChild(form)
+  sendSection.appendChild(form)
 
   // ---- Kupcy w drodze (in-flight shipments from the active village) ---------
-  el.appendChild(h('h3', 'recruit-subtitle', 'Kupcy w drodze'))
+  sendSection.appendChild(h('h3', 'recruit-subtitle', 'Kupcy w drodze'))
   const shipList = h('ul', 'march-list')
-  el.appendChild(shipList)
+  sendSection.appendChild(shipList)
   // Sentinel so the first update() always builds the list (even the empty notice).
   let lastShipSig = '\x00'
 
@@ -359,7 +389,7 @@ export function createMarketPanel(ctx: UiCtx): Panel {
   exBody.appendChild(exMsg)
 
   exForm.appendChild(exBody)
-  el.appendChild(exForm)
+  exchangeSection.appendChild(exForm)
 
   /** Read the composed cargo from the inputs, each coerced to a non-negative integer. */
   const readCargo = (): Record<ResourceId, number> => {

@@ -19,7 +19,7 @@ import { raidPower } from '../../systems/raids'
 import { barracksUnlocked, unitUnlocked } from '../../systems/recruitment'
 import { effectiveMods } from '../../systems/prestige'
 import type { UiCtx, Panel } from '../types'
-import { h, unitIcon, emptyState } from '../dom'
+import { h, unitIcon, emptyState, helpTip } from '../dom'
 import { conquestHint } from '../conquestCopy'
 import {
   attackForecast,
@@ -168,7 +168,7 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   el.appendChild(status)
 
   // ---- Army composer -------------------------------------------------------
-  el.appendChild(h('h3', 'recruit-subtitle', 'Skład wyprawy'))
+  el.appendChild(h('h3', 'recruit-subtitle panel-sticky-head', 'Skład wyprawy'))
   const composer = h('div', 'army-picker')
   const armyPicks = {} as Record<UnitId, { input: HTMLInputElement; avail: HTMLElement }>
   for (const id of ATTACK_UNIT_IDS) {
@@ -229,15 +229,16 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   // A SHARED scout-count input; each target card carries its own „Zwiad" button that
   // dispatches this many scouts at that camp. Scouts reveal the camp's defence/loot
   // (the '?' on the card turns into numbers), never fight and return home unharmed.
-  el.appendChild(h('h3', 'recruit-subtitle', 'Zwiad'))
-  el.appendChild(
-    h(
-      'p',
-      'muted',
+  // Sticky sub-header; the intro prose moves off-screen into an inline helpTip (M12.3).
+  const scoutHead = h('h3', 'recruit-subtitle panel-sticky-head', 'Zwiad')
+  scoutHead.appendChild(
+    helpTip(
       'Wyślij zwiadowców na obóz przyciskiem „Zwiad" przy celu, aby odkryć jego obronę i łup. ' +
         'Zwiad nie walczy i wraca cały.',
+      { label: 'Jak działa zwiad' },
     ),
   )
+  el.appendChild(scoutHead)
   const scoutPick = h('div', 'army-pick')
   const scoutLabel = h('span', 'army-pick-label')
   const scoutIconWrap = h('span', 'res-icon-wrap')
@@ -303,15 +304,17 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   msg.setAttribute('aria-live', 'polite')
 
   // ---- Targets (concrete barbarian villages, nearest first) ----------------
-  el.appendChild(h('h3', 'recruit-subtitle', 'Cele'))
-  // Keyboard/screen-reader alternative to the Mapa tab: it lists the SAME targets,
-  // sorted by distance, with the same dispatch path.
-  const targetsNote = h(
-    'p',
-    'muted',
-    'Wioski barbarzyńskie ze świata, posortowane wg odległości od aktywnej wioski — dostępna alternatywa dla widoku Mapy.',
+  // Sticky sub-header; the (static) list note + luck primer move off-screen into inline
+  // helpTips (M12.3). The keyboard/screen-reader alternative to the Mapa tab lists the SAME
+  // targets, sorted by distance, with the same dispatch path.
+  const targetsHead = h('h3', 'recruit-subtitle panel-sticky-head', 'Cele')
+  targetsHead.appendChild(
+    helpTip(
+      'Wioski barbarzyńskie ze świata, posortowane wg odległości od aktywnej wioski — dostępna alternatywa dla widoku Mapy.',
+      { label: 'O liście celów' },
+    ),
   )
-  el.appendChild(targetsNote)
+  el.appendChild(targetsHead)
   // Conquest primer (M2.4): how loyalty + the noble turn a camp into a player village.
   // ADAPTIVE — its text is set in update() from the shared conquestHint(), toggling on
   // whether the active village can yet field a Szlachcic (Pałac built), so a player
@@ -322,8 +325,8 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   el.appendChild(conquestNote)
   // Static luck primer (M5.5): explains in TEXT (never colour alone) that each fight rolls
   // ±25% attack power, so the per-card forecast reads „pewna / prawdopodobna / ryzykowna".
-  const luckNote = h('p', 'muted', LUCK_NOTE)
-  el.appendChild(luckNote)
+  // M12.3: off-screen into an inline helpTip on the (sticky) Cele heading.
+  targetsHead.appendChild(helpTip(LUCK_NOTE, { label: 'Jak działa szczęście w walce' }))
   let lastNobleUnlocked: boolean | null = null
   // Grid template + card surface come from the shared .target-list / .target
   // classes (layout.css) — the single source of truth across tabs; no inline.
@@ -344,16 +347,17 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   // loyalty, no zwiad — always revealed) and hauls the cache home (carry-capped like any
   // attack). They respawn fresh on every world reset (ascension / era / dynasty). Reuses
   // the shared army composer, the .target card surface and the same battle forecast.
-  el.appendChild(h('h3', 'recruit-subtitle', 'Fortece'))
-  el.appendChild(
-    h(
-      'p',
-      'muted',
+  // Sticky sub-header; the (static) note moves off-screen into an inline helpTip (M12.3).
+  const fortressHead = h('h3', 'recruit-subtitle panel-sticky-head', 'Fortece')
+  fortressHead.appendChild(
+    helpTip(
       'Skończony zbiór potężnych fortec na dalekich pierścieniach świata. Wymagają prawdziwej armii ' +
         'z taranami; zwycięski szturm burzy fortecę na stałe i przynosi jednorazowy, bogaty skarbiec. ' +
         'Fortec nie da się przejąć ani zbadać — ich obrona jest zawsze widoczna.',
+      { label: 'O fortecach' },
     ),
   )
+  el.appendChild(fortressHead)
   const fortressList = h('div', 'target-list')
   el.appendChild(fortressList)
   const fortressMsg = h('p', 'recruit-msg muted')
@@ -875,13 +879,13 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
   }
 
   // ---- Marches in progress -------------------------------------------------
-  el.appendChild(h('h3', 'recruit-subtitle', 'Marsze w toku'))
+  el.appendChild(h('h3', 'recruit-subtitle panel-sticky-head', 'Marsze w toku'))
   const marchList = h('ul', 'march-list')
   el.appendChild(marchList)
   let lastMarchSig = ''
 
   // ---- Defence indicator (incoming raids) ----------------------------------
-  el.appendChild(h('h3', 'recruit-subtitle', 'Obrona osady'))
+  el.appendChild(h('h3', 'recruit-subtitle panel-sticky-head', 'Obrona osady'))
   const defStats = h('div', 'building-stats')
   const mkStat = (label: string): HTMLElement => {
     const wrap = h('div', 'stat')
