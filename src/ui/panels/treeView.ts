@@ -164,7 +164,10 @@ interface NodeRefs {
 /** Cached handles for one rendered prerequisite link. */
 interface EdgeRefs {
   line: SVGElement
+  /** Prerequisite (source) node id — owned ⇒ edge "is-unlocked". */
   from: string
+  /** Dependent (target) node id — both endpoints owned ⇒ edge "--allocated" (lit path). */
+  to: string
 }
 
 /** PL display name per archetype (carried in the node aria-label + detail card). */
@@ -684,7 +687,9 @@ export function buildTreeView(config: TreeViewConfig): Panel {
     // unlocked emphasis is brightness/width (set in update()).
     line.style.setProperty('--cat', catHue(dst.category))
     edgesGroup.appendChild(line)
-    edgeRefs.push({ line, from: e.from })
+    // Zachowujemy OBA końce: `from` steruje stanem "odblokowany", a `to` pozwala wykryć
+    // ŚCIEŻKĘ w pełni przydzieloną (oba węzły wykupione) → rozświetlona linia.
+    edgeRefs.push({ line, from: e.from, to: e.to })
   }
 
   // ---- Nodes ---------------------------------------------------------------
@@ -715,6 +720,22 @@ export function buildTreeView(config: TreeViewConfig): Panel {
     hit.style.stroke = 'none'
     hit.style.pointerEvents = 'all'
     g.appendChild(hit)
+
+    // ANCHOR halo — TYLKO dla węzłów-centrów (notable/gateway), nie dla drobnych.
+    // Jeden szeroki, słaby pierścień w kolorze gałęzi (--cat) rysowany pod glifem: nawet
+    // niewykupiony delikatnie zaznacza centrum klastra, a po przydzieleniu rozkwita
+    // (CSS steruje stanem przez klasę rodzica .tech-node--owned/--maxed — patrz layout.css).
+    // To jedyny element z dozwolonym kosztownym `filter` i tylko dla tej mniejszości węzłów.
+    if (arch !== 'minor') {
+      const halo = svg('circle', {
+        cx: fmt2(p.x),
+        cy: fmt2(p.y),
+        r: fmt2(r + unit * 0.3),
+        class: 'tech-node-halo',
+      })
+      halo.setAttribute('vector-effect', 'non-scaling-stroke')
+      g.appendChild(halo)
+    }
 
     // Outer CATEGORY ring (drawn under the state glyph) so its hue peeks out as a halo.
     const catRing = svg('circle', {
@@ -1030,9 +1051,17 @@ export function buildTreeView(config: TreeViewConfig): Panel {
 
     applyView()
 
-    // Edge emphasis: an edge whose prerequisite is owned (level >= 1) is "unlocked".
+    // Edge emphasis (cała w ścieżce poke-on-update — tylko przełączniki klas na
+    // zcache'owanych `edgeRefs`, zero alokacji i zero tworzenia DOM na klatkę):
+    //  - "is-unlocked": węzeł-wymaganie (`from`) wykupiony (level >= 1).
+    //  - "--allocated": OBA końce wykupione → w pełni przydzielona, rozświetlona ścieżka.
+    // `&&` zwiera obliczenie, więc drugie `config.level()` pada tylko na odblokowanych
+    // krawędziach; classList.toggle(name, bool) jest idempotentne (brak reflow gdy bez
+    // zmian), więc — jak istniejący "is-unlocked" — nie potrzeba cache'a lastKey.
     for (const ref of edgeRefs) {
-      ref.line.classList.toggle('is-unlocked', config.level(ref.from) >= 1)
+      const fromOwned = config.level(ref.from) >= 1
+      ref.line.classList.toggle('is-unlocked', fromOwned)
+      ref.line.classList.toggle('tech-edge--allocated', fromOwned && config.level(ref.to) >= 1)
     }
 
     // Per-node state classes + aria — written only when a node's state/level changes.
@@ -1065,9 +1094,12 @@ export function buildTreeView(config: TreeViewConfig): Panel {
             '. Naciśnij Enter, aby wybrać.',
         )
       }
-      // Affordability is a frequently-changing SECONDARY cue: a node is affordable when
-      // it is buyable (prereqs met, not maxed) AND the caller says it can be paid for.
-      const affordable = isBuyable(st) && config.affordable(ref.id)
+      // Affordability is a frequently-changing SECONDARY cue. Ograniczone do FRONTIERA
+      // (st==='available'), a NIE do każdego wykupionego-niezmaksowanego węzła: przy nadwyżce
+      // surowca taki sygnał pokrywałby dziesiątki węzłów i migotał przy każdym przekroczeniu
+      // progu kosztu. Frontier to miejsce, gdzie realnie się wydaje. Sam sygnał niesie tani
+      // pierścień --good w CSS (.tech-node.is-affordable .tech-node-cat), bez filtra.
+      const affordable = st === 'available' && config.affordable(ref.id)
       ref.g.classList.toggle('is-affordable', affordable)
     }
 

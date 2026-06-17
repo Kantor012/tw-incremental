@@ -1282,16 +1282,54 @@ html {
   user-select: none;
 }
 
+/* Pole konstelacji jako kosmiczna scena (zero assetów — wyłącznie CSS-owe
+ * radial-gradient na background-image SVG, malowane RAZ pod wszystkimi dziećmi SVG,
+ * więc kontrast węzłów/etykiet, rysowanych NAD nim, pozostaje nietknięty). Warstwy
+ * od wierzchu do spodu: WINIETA (przyciemnia krawędzie, by rozświetlone węzły
+ * wyskakiwały) → ciepła poświata HUBU → dwie odległe MGŁAWICE w barwach gałęzi (bardzo
+ * niskie krycie) → kilka kafelkowanych warstw maleńkich GWIAZD. Wszystkie pozycje to
+ * stałe stringi — żadnego Math.random/Date.now (determinizm). Tło jest przypięte do
+ * ELEMENTU (nie do viewBox), więc kosmos jest stabilnym „oknem w przestrzeń" i nie
+ * przesuwa się przy panoramowaniu/zoomie — zero kosztu śledzenia kamery na klatkę. */
 .tech-svg {
   display: block;
   width: 100%;
   height: 100%;
   background-color: var(--bg-2);
-  background-image: radial-gradient(
-    circle at 50% 50%,
-    color-mix(in srgb, var(--panel) 35%, transparent) 0%,
-    transparent 70%
-  );
+  background-image:
+    /* Winieta — pogłębia rogi ku niemal-czerni (na bazie --bg). */
+    radial-gradient(
+      120% 120% at 50% 50%,
+      transparent 50%,
+      color-mix(in srgb, var(--bg) 65%, #000) 100%
+    ),
+    /* Ciepła poświata środka konstelacji (dawne tło hubu). */
+    radial-gradient(
+      circle at 50% 50%,
+      color-mix(in srgb, var(--panel) 35%, transparent) 0%,
+      transparent 68%
+    ),
+    /* Mgławica chłodna (błękit magazynów) — z dala od gęstego hubu, ledwie widoczna. */
+    radial-gradient(
+      42% 42% at 20% 26%,
+      color-mix(in srgb, var(--cat-storage) 11%, transparent) 0%,
+      transparent 100%
+    ),
+    /* Mgławica ciepła (fiolet łupu) — przeciwległy róg, dla głębi pola. */
+    radial-gradient(
+      40% 40% at 82% 74%,
+      color-mix(in srgb, var(--cat-plunder) 10%, transparent) 0%,
+      transparent 100%
+    ),
+    /* Cztery kafle GWIAZD — maleńkie, niskoalfa kropki w barwie tekstu (deterministyczne). */
+    radial-gradient(1.4px 1.4px at 24px 30px, color-mix(in srgb, var(--text) 40%, transparent), transparent 62%),
+    radial-gradient(1.2px 1.2px at 96px 118px, color-mix(in srgb, var(--text) 32%, transparent), transparent 62%),
+    radial-gradient(1px 1px at 158px 66px, color-mix(in srgb, var(--text) 36%, transparent), transparent 62%),
+    radial-gradient(1.1px 1.1px at 52px 184px, color-mix(in srgb, var(--text) 28%, transparent), transparent 62%);
+  /* Mgławice/poświaty pokrywają całość (auto), gwiazdy są kafelkowane różnymi siatkami
+   * (rozmiary względnie pierwsze → pole wygląda na rozproszone, nie kratkowane). */
+  background-repeat: no-repeat, no-repeat, no-repeat, no-repeat, repeat, repeat, repeat, repeat;
+  background-size: auto, auto, auto, auto, 150px 150px, 210px 230px, 280px 190px, 190px 250px;
   touch-action: none;
   cursor: grab;
 }
@@ -1320,11 +1358,27 @@ html {
     stroke-width var(--dur-fast) var(--ease);
 }
 
-/* Odblokowana krawędź (jej prereq jest wykupiony) — ta sama barwa ramienia, lecz
- * jaśniejsza i grubsza: sygnał ścieżki niesie JASNOŚĆ/GRUBOŚĆ, nie zmiana koloru. */
+/* Odblokowana krawędź (prereq wykupiony, ale drugi koniec jeszcze NIE) — to FRONTIER:
+ * stan POWŚCIĄGLIWY. Czysta barwa ramienia (więcej --cat), przygaszona i cienka, by NIE
+ * konkurowała z przebytym szkieletem. Lekkie rozjaśnienie ponad bazę (0.32→0.55) mówi „tędy
+ * można dalej", ale wizualnym bohaterem zostaje ścieżka PRZYDZIELONA niżej. */
 .tech-edge.is-unlocked {
-  stroke-opacity: 0.85;
-  stroke-width: 2.2;
+  stroke: color-mix(in srgb, var(--cat) 85%, var(--accent-2));
+  stroke-opacity: 0.55;
+  stroke-width: 1.8;
+}
+
+/* W pełni PRZYDZIELONA ścieżka (OBA końce wykupione) — BOHATER konstelacji: pełna krycie i
+ * wyraźny SKOK grubości (1.8→3.2 czyta się nawet przy dopasowanym zoomie 180+ węzłów), barwa
+ * podbita ku mosiądzowi. Bez filtra: przy pełnej alokacji przydzielonych krawędzi bywa ~N
+ * (oba końce wykupione), więc nieograniczony zbiór regionów rozmycia psułby płynność; tu
+ * „rozświetlenie" niesie sam jasny, gruby, non-scaling obrys. Ta sama specyficzność co
+ * .tech-edge.is-unlocked (którą węzeł też nosi) — rozstrzyga KOLEJNOŚĆ ŹRÓDŁOWA: ta reguła
+ * jest później w pliku, więc wygrywa. */
+.tech-edge.tech-edge--allocated {
+  stroke: color-mix(in srgb, var(--cat) 70%, var(--accent-2));
+  stroke-opacity: 1;
+  stroke-width: 3.2;
 }
 
 /* ---- Węzły (SVG <g>: figura + przezroczyste pole dotyku + <title>) ---- */
@@ -1361,17 +1415,78 @@ html {
 }
 
 /* Zewnętrzny pierścień KATEGORII — halo w barwie ramienia (--cat), niosące tożsamość
- * gałęzi NIEZALEŻNIE od stanu (stan steruje wypełnieniem figury). Statyczny. */
+ * gałęzi NIEZALEŻNIE od stanu. To zarazem ROBOCZA poświata konstelacji: nierozświetlony
+ * jest przygaszony, a po wykupie pierścień rozjaśnia się i grubieje (niżej). Leży tuż za
+ * glifem (r = r + unit*0.12), więc połowa pogrubionego, non-scaling obrysu „wycieka" na
+ * zewnątrz figury → czyta się jak ciasna aura w barwie ramienia. */
 .tech-node-cat {
   fill: none;
   stroke: var(--cat, var(--border));
   stroke-width: 2;
-  opacity: 0.8;
+  opacity: 0.55;
   pointer-events: none;
+  transition: stroke var(--dur-base) var(--ease),
+    stroke-width var(--dur-base) var(--ease),
+    opacity var(--dur-base) var(--ease);
 }
 
 .tech-node--locked .tech-node-cat {
-  opacity: 0.5;
+  opacity: 0.4;
+}
+
+/* Rozświetlenie WYKUPIONEGO/MAKSYMALNEGO — TANIA poświata bez filtra: pierścień kategorii
+ * (jeden element/węzeł, już rysowany pod figurą, już non-scaling) tylko grubieje i jaśnieje.
+ * Barwę TRZYMAMY blisko --cat (drobna domieszka --accent-2 jedynie ją „rozświetla"), by każde
+ * ramię zapaliło się we WŁASNYM odcieniu — ZŁOTO niesie wyłącznie małe wypełnienie figury
+ * (niżej: --owned/--maxed .tech-node-shape), więc czerwone, niebieskie i fioletowe gałęzie
+ * świecą różnymi barwami, a złoty rdzeń wciąż mówi „przydzielone". Zero nowych elementów i
+ * zero regionów filtra dla tysięcy drobnych węzłów — czysty, rasteryzowany obrys o stałej
+ * szerokości ekranowej przy dowolnym zoomie. */
+.tech-node--owned .tech-node-cat {
+  stroke: color-mix(in srgb, var(--cat) 85%, var(--accent-2));
+  stroke-width: 3;
+  opacity: 0.82;
+}
+
+.tech-node--maxed .tech-node-cat {
+  stroke: color-mix(in srgb, var(--cat) 80%, var(--accent-2));
+  stroke-width: 4;
+  opacity: 0.92;
+}
+
+/* Halo KOTWICZĄCE — szerszy, słabszy pierścień TYLKO dla węzłów-centrów (notable/brama;
+ * dodawany w treeView.ts wyłącznie dla nich, r = r + unit*0.3). Środki klastrów przyciągają
+ * wzrok nawet nierozświetlone, a po przydzieleniu „rozkwitają". Ponieważ to MNIEJSZOŚĆ
+ * węzłów (notable/brama, NIE drobne kropki), miękką poświatę filtrem (drop-shadow) włączamy
+ * DOPIERO dla rozświetlonego podzbioru (owned/maxed). To jedyne pozostałe na drzewie regiony
+ * rozmycia obok zaznaczonego węzła i pierścienia zaznaczenia — krawędzie świecą już bez
+ * filtra — więc liczba elementów z filtrem pozostaje ograniczona (reguła „kilku elementów"). */
+.tech-node-halo {
+  fill: none;
+  stroke: var(--cat, var(--border));
+  stroke-width: 1.5;
+  opacity: 0.26;
+  pointer-events: none;
+  transition: stroke var(--dur-base) var(--ease),
+    stroke-width var(--dur-base) var(--ease),
+    opacity var(--dur-base) var(--ease);
+}
+
+.tech-node--locked .tech-node-halo {
+  opacity: 0.15;
+}
+
+.tech-node--owned .tech-node-halo,
+.tech-node--maxed .tech-node-halo {
+  stroke: color-mix(in srgb, var(--cat) 80%, var(--accent-2));
+  stroke-width: 2;
+  opacity: 0.6;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--cat) 80%, transparent));
+}
+
+.tech-node--maxed .tech-node-halo {
+  opacity: 0.74;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--cat) 85%, transparent));
 }
 
 /* Etykieta ramienia rysowana na płótnie — nazwa gałęzi w jej odcieniu (--cat). */
@@ -1427,10 +1542,16 @@ html {
   stroke-width: 2.5;
 }
 
-/* Stać na zakup — statyczna zielona poświata (drugorzędna wskazówka; stan strukturalny
- * niesie kształt/obrys, a powód niedostępności jest też tekstem na przycisku „Wykup"). */
-.tech-node.is-affordable .tech-node-shape {
-  filter: drop-shadow(0 0 2.5px var(--good));
+/* Stać na zakup — TANI sygnał bez filtra: pierścień kategorii barwimy na zielono (--good),
+ * zamiast nakładać drop-shadow na każdy opłacalny węzeł. Przy nadwyżce surowca opłacalnych
+ * węzłów są dziesiątki i migoczą przy każdym ticku — rój filtrów (offscreen + re-raster na
+ * każdą klatkę) i wizualna „choinka", w której zieleń bije się ze złotem i barwami ramion.
+ * Sygnał nosi tylko FRONTIER (st==='available'; ustawiane w treeView.update) — tam realnie
+ * się wydaje; stan strukturalny i tak niesie kształt/obrys, a powód blokady jest tekstem na
+ * przycisku „Wykup". Wyższa specyficzność (0,3,0) wygrywa z bazowym .tech-node-cat. */
+.tech-node.is-affordable .tech-node-cat {
+  stroke: var(--good);
+  opacity: 0.9;
 }
 
 /* Zaznaczenie wygrywa źródłowo nad poświatą „stać na zakup" (ta sama specyficzność). */
@@ -1444,11 +1565,13 @@ html {
   pointer-events: none;
 }
 
-/* Pierścień zaznaczenia — wspólny marker przesuwany przez JS (przerywany, jak na mapie). */
+/* Pierścień zaznaczenia — wspólny marker przesuwany przez JS (przerywany, jak na mapie),
+ * z wyraźną złotą poświatą. To JEDEN element nakładki, więc filtr jest tu w pełni tani. */
 .tech-sel-ring {
   stroke: var(--accent);
   stroke-width: 2;
   stroke-dasharray: 3 3;
+  filter: drop-shadow(0 0 4px var(--accent));
 }
 
 /* ---- Kontrolki nawigacji (zoom +/- , wycentruj) ---------------------- */
@@ -1627,7 +1750,9 @@ html {
  * stanu/poświaty, które przy preferencji ograniczonego ruchu znikają. */
 @media (prefers-reduced-motion: reduce) {
   .tech-edge,
-  .tech-node-shape {
+  .tech-node-shape,
+  .tech-node-cat,
+  .tech-node-halo {
     transition: none;
   }
 }
