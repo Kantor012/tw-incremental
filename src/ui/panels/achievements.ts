@@ -1,6 +1,6 @@
 import type { UiCtx, Panel } from '../types'
 import type { Stats } from '../../engine/state'
-import { h } from '../dom'
+import { h, lockIcon, checkIcon } from '../dom'
 import { formatNumber } from '../../engine/format'
 import { ACHIEVEMENTS, ACHIEVEMENT_IDS } from '../../content/achievements'
 import { achievementUnlocked } from '../../systems/achievements'
@@ -17,9 +17,10 @@ import { achievementUnlocked } from '../../systems/achievements'
  *     as a true career record.
  *  2. The ACHIEVEMENT roster (below): every entry in {@link ACHIEVEMENTS}, grouped
  *     by its `category` and shown as a card with name, description and an explicit
- *     UNLOCKED / LOCKED state. The unlock state is carried by TEXT ("✓ Odblokowane"
- *     / "🔒 Zablokowane") and a per-card aria-label, never by colour alone (WCAG
- *     1.4.1); colour and a left accent stripe are a secondary cue.
+ *     UNLOCKED / LOCKED state. The unlock state is carried by TEXT ("Odblokowane" /
+ *     "Zablokowane") + an aria-hidden proceduralna ikona (check/kłódka) and a per-card
+ *     aria-label, never by colour alone (WCAG 1.4.1); colour and a left accent stripe
+ *     are a secondary cue.
  *
  * Data-driven & passive: this module owns NO unlock logic and NO thresholds. The
  * catalogue (content/achievements.ts) supplies the names/descriptions/categories and
@@ -90,6 +91,8 @@ interface AchRef {
   name: string
   card: HTMLElement
   status: HTMLElement
+  statusIcon: HTMLElement
+  statusText: HTMLElement
   /** Last rendered unlock state; `null` = never rendered (forces first paint). */
   last: boolean | null
 }
@@ -194,13 +197,22 @@ export function createAchievementsPanel(ctx: UiCtx): Panel {
       desc.style.fontSize = 'var(--text-sm)'
       card.appendChild(desc)
 
-      const status = h('span', 'achievement-status num', '🔒 Zablokowane')
+      const status = h('span', 'achievement-status num')
       status.style.fontSize = 'var(--text-sm)'
       status.style.color = 'var(--muted)'
+      status.style.display = 'inline-flex'
+      status.style.alignItems = 'center'
+      status.style.gap = 'var(--space-1)'
+      const statusIcon = h('span', 'achievement-status-icon')
+      statusIcon.setAttribute('aria-hidden', 'true')
+      statusIcon.style.display = 'inline-flex'
+      const statusText = h('span')
+      status.appendChild(statusIcon)
+      status.appendChild(statusText)
       card.appendChild(status)
 
       list.appendChild(card)
-      refs.push({ id, name: def.name, card, status, last: null })
+      refs.push({ id, name: def.name, card, status, statusIcon, statusText, last: null })
     }
 
     section.appendChild(list)
@@ -236,7 +248,13 @@ export function createAchievementsPanel(ctx: UiCtx): Panel {
       if (isUnlocked) unlocked++
       if (isUnlocked === ref.last) continue
       ref.last = isUnlocked
-      ref.status.textContent = isUnlocked ? '✓ Odblokowane' : '🔒 Zablokowane'
+      ref.statusText.textContent = isUnlocked ? 'Odblokowane' : 'Zablokowane'
+      ref.statusIcon.textContent = ''
+      const statusGlyph = isUnlocked ? checkIcon() : lockIcon()
+      statusGlyph.setAttribute('aria-hidden', 'true')
+      statusGlyph.style.width = '1em'
+      statusGlyph.style.height = '1em'
+      ref.statusIcon.appendChild(statusGlyph)
       // Colour is a SECONDARY cue — the status TEXT + the per-card aria-label carry
       // the state on their own (WCAG 1.4.1).
       ref.status.style.color = isUnlocked ? 'var(--good)' : 'var(--muted)'

@@ -1,4 +1,4 @@
-import type { ResourceId } from '../engine/state'
+import type { ResourceId, AutomationKind } from '../engine/state'
 import { UNITS, type UnitId } from '../content/units'
 import { BUILDINGS, type BuildingId } from '../content/buildings'
 
@@ -561,6 +561,101 @@ export function buildingIcon(id: BuildingId): SVGSVGElement {
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla budynku: ' + String(_exhaustive))
+    }
+  }
+}
+
+/**
+ * Procedural kłódka (padlock) — status "zablokowane" w panelu osiągnięć.
+ *
+ * Zastępuje kolorowe emoji 🔒 spójną ikoną SVG malowaną w `currentColor` (tak jak
+ * {@link shieldIcon}/{@link buildingIcon}) — kafelek nadaje barwę przez CSS `color`,
+ * więc kłódka idzie za motywem (twarda zasada #2: grafika tylko kodem). To CZYSTA
+ * dekoracja: znaczenie niesie tekst obok (dostępność — WCAG 1.4.1), a aria-label
+ * 'Zablokowane' służy tylko czytnikom ekranu.
+ */
+export function lockIcon(): SVGSVGElement {
+  // Pałąk (shackle) nad korpusem — otwarty łuk obrysowany tokenem.
+  const shackle = svg('path', {
+    d: 'M8 10 V8 a4 4 0 0 1 8 0 V10',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '1.8',
+    'stroke-linecap': 'round',
+  })
+  // Korpus kłódki — wypełniony tokenem.
+  const body = svg('rect', { x: '5', y: '10', width: '14', height: '10', rx: '2', fill: 'currentColor' })
+  // Otwór na klucz — przygaszony w stronę tła, by odcinał się na korpusie.
+  const keyhole = svg('circle', { cx: '12', cy: '15', r: '1.5', 'fill-opacity': '0.5' })
+  keyhole.style.fill = 'var(--bg)'
+  return svgIcon('0 0 24 24', 'Zablokowane', 'lock-icon', [shackle, body, keyhole])
+}
+
+/**
+ * Procedural ptaszek (checkmark) — status "odblokowane" w panelu osiągnięć.
+ *
+ * Zastępuje kolorowe emoji ✅ obrysowanym haczykiem w `currentColor` (jak pozostałe
+ * ikony tego modułu). CZYSTA dekoracja: znaczenie niesie tekst obok (WCAG 1.4.1),
+ * aria-label 'Odblokowane' jest tylko dla czytników ekranu.
+ */
+export function checkIcon(): SVGSVGElement {
+  const check = svg('path', {
+    d: 'M5 12.5 L10 17.5 L19 7',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '2.2',
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+  })
+  return svgIcon('0 0 24 24', 'Odblokowane', 'check-icon', [check])
+}
+
+/**
+ * Procedural ikona automatyzacji (młot / tarcza / celownik) dla kart panelu
+ * automatyzacji — zastępuje kolorowe emoji 🔨🛡️🎯 spójnym SVG w `currentColor`.
+ *
+ * EXHAUSTIVE po {@link AutomationKind} — dokładnie jak {@link buildingIcon}/
+ * {@link unitIcon}: dodanie nowego rodzaju automatyzacji bez gałęzi ikony tutaj to
+ * BŁĄD KOMPILACJI (przypisanie do `never` w `default`), nie ciche pominięcie. Każda
+ * ikona to CZYSTA dekoracja: znaczenie niesie tekst karty obok (WCAG 1.4.1), a
+ * aria-label służy tylko czytnikom ekranu.
+ */
+export function automationIcon(kind: AutomationKind): SVGSVGElement {
+  switch (kind) {
+    case 'build': {
+      // Młot ciesielski — krępa głowica (9×5, środek ~15.5,6.5) + ukośny trzonek
+      // startujący WEWNĄTRZ obrysu głowicy, by łączenie czytało się jako jeden młot;
+      // niżej osadzony niż celownik/tarcza, by równać centroidy w rzędzie. "auto-budowa".
+      const head = svg('rect', { x: '11', y: '4', width: '9', height: '5', rx: '1', fill: 'currentColor', transform: 'rotate(45 15.5 6.5)' })
+      const handle = svg('path', {
+        d: 'M14.5 6.5 L6.5 18',
+        fill: 'none',
+        stroke: 'currentColor',
+        'stroke-width': '2.4',
+        'stroke-linecap': 'round',
+      })
+      return svgIcon('0 0 24 24', 'Auto-budowa', 'automation-icon', [handle, head])
+    }
+    case 'recruit': {
+      // Sylwetka tarczy (echo {@link shieldIcon}) — "auto-rekrutacja".
+      const face = svg('path', { d: 'M12 2 4 5v7c0 6 4 9 8 11 4-2 8-5 8-11V5z', fill: 'currentColor' })
+      const band = svg('path', { d: 'M4 11h16v2.5H4z', 'fill-opacity': '0.3' })
+      band.style.fill = 'var(--bg)'
+      return svgIcon('0 0 24 24', 'Auto-rekrutacja', 'automation-icon', [face, band])
+    }
+    case 'attack': {
+      // Celownik — dwa współśrodkowe okręgi + kreski celownika przecinające pierścienie
+      // + wypełniona kropka; pogrubiony, by zrównoważyć masę tarczy w rzędzie i czytał
+      // się jako krzyż celowniczy (nie tarcza strzelnicza/symbol nagrywania). "auto-atak".
+      const outer = svg('circle', { cx: '12', cy: '12', r: '9', fill: 'none', stroke: 'currentColor', 'stroke-width': '2.2' })
+      const inner = svg('circle', { cx: '12', cy: '12', r: '4.5', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' })
+      const ticks = svg('path', { d: 'M12 1 V4 M12 20 V23 M1 12 H4 M20 12 H23', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.8', 'stroke-linecap': 'round' })
+      const dot = svg('circle', { cx: '12', cy: '12', r: '1.6', fill: 'currentColor' })
+      return svgIcon('0 0 24 24', 'Auto-atak', 'automation-icon', [outer, inner, ticks, dot])
+    }
+    default: {
+      const _exhaustive: never = kind
+      throw new Error('Brak ikony dla automatyzacji: ' + String(_exhaustive))
     }
   }
 }

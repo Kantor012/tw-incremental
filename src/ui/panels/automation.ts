@@ -1,5 +1,5 @@
 import type { UiCtx, Panel } from '../types'
-import { h } from '../dom'
+import { h, automationIcon, lockIcon } from '../dom'
 import { effectiveMods } from '../../systems/prestige'
 import { UNIT_IDS, UNITS, type UnitId } from '../../content/units'
 import type { AutomationKind, AutomationSettings } from '../../engine/state'
@@ -19,8 +19,8 @@ import type { AutomationKind, AutomationSettings } from '../../engine/state'
  * (`state.automation[kind]`). This panel reads the unlock flag straight from the
  * shared engine so the locked/disabled cue can never disagree with what the tick
  * actually does. Until a routine is unlocked its toggle is DISABLED and a visible
- * "🔒 Odblokuj w drzewie rozwoju" note (text, never colour alone — WCAG 1.4.1)
- * points the player at the "Rozwój" tree.
+ * note (proceduralna ikona kłódki + tekst "Odblokuj w drzewie rozwoju" — znaczenie
+ * niesie TEKST, nie sam kolor/obrazek — WCAG 1.4.1) points the player at the "Rozwój" tree.
  *
  * Mutations go through {@link UiCtx.onSetAutomation} (a partial patch merged into
  * `state.automation`, then committed + persisted by main.ts). Settings are GLOBAL
@@ -35,8 +35,6 @@ import type { AutomationKind, AutomationSettings } from '../../engine/state'
 /** One automation routine's card metadata (display only — behaviour lives in the engine). */
 interface AutoSpec {
   kind: AutomationKind
-  /** Decorative glyph + PL title for the card heading. */
-  glyph: string
   title: string
   /** Plain-language description of the FIXED policy the tick runs. */
   desc: string
@@ -46,7 +44,6 @@ interface AutoSpec {
 const SPECS: readonly AutoSpec[] = [
   {
     kind: 'build',
-    glyph: '🏗️',
     title: 'Auto-budowa',
     desc:
       'Buduje najtańszy budynek, na który stać wioskę (z jej lokalnych surowców). ' +
@@ -54,7 +51,6 @@ const SPECS: readonly AutoSpec[] = [
   },
   {
     kind: 'recruit',
-    glyph: '🛡️',
     title: 'Auto-rekrutacja',
     desc:
       'Utrzymuje wybraną jednostkę na zadanym poziomie liczebności — dokolejkowuje ' +
@@ -62,7 +58,6 @@ const SPECS: readonly AutoSpec[] = [
   },
   {
     kind: 'attack',
-    glyph: '🎯',
     title: 'Auto-atak',
     desc:
       'Wysyła bezczynną armię bojową na najbliższego pokonywalnego barbarzyńcę ' +
@@ -115,8 +110,20 @@ export function createAutomationPanel(ctx: UiCtx): Panel {
     const headingId = 'auto-' + spec.kind + '-h'
     section.setAttribute('aria-labelledby', headingId)
 
-    const heading = h('h3', 'save-card-title', spec.glyph + ' ' + spec.title)
+    const heading = h('h3', 'save-card-title')
     heading.id = headingId
+    const headIcon = automationIcon(spec.kind)
+    // Pure decoration: the <h3> text node (spec.title) carries the meaning, so drop
+    // the svgIcon's role=img/aria-label from the a11y tree (mirrors lockGlyph below) —
+    // otherwise the title is announced twice ('Auto-budowa Auto-budowa').
+    headIcon.setAttribute('aria-hidden', 'true')
+    headIcon.style.width = '1.15em'
+    headIcon.style.height = '1.15em'
+    headIcon.style.verticalAlign = '-0.18em'
+    headIcon.style.marginRight = 'var(--space-1)'
+    headIcon.style.color = 'var(--accent)'
+    heading.appendChild(headIcon)
+    heading.appendChild(document.createTextNode(spec.title))
     section.appendChild(heading)
 
     const body = h('div', 'save-card-body')
@@ -223,7 +230,15 @@ export function createAutomationPanel(ctx: UiCtx): Panel {
     // Locked notice: visible text (role=note), shown only while the routine is not yet
     // unlocked in the tree. The toggle is hard-disabled then; this note carries the
     // reason in the DOM so it never depends on a hover title or colour.
-    const lock = h('p', 'muted', '🔒 Odblokuj w drzewie rozwoju')
+    const lock = h('p', 'muted')
+    const lockGlyph = lockIcon()
+    lockGlyph.setAttribute('aria-hidden', 'true')
+    lockGlyph.style.width = '1em'
+    lockGlyph.style.height = '1em'
+    lockGlyph.style.verticalAlign = '-0.12em'
+    lockGlyph.style.marginRight = 'var(--space-1)'
+    lock.appendChild(lockGlyph)
+    lock.appendChild(document.createTextNode('Odblokuj w drzewie rozwoju'))
     lock.setAttribute('role', 'note')
     lock.hidden = true
     body.appendChild(lock)
