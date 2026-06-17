@@ -2,7 +2,7 @@ import { formatInt } from '../../engine/format'
 import type { BattleReport } from '../../engine/state'
 import { barbarianTarget } from '../../content/barbarians'
 import type { UiCtx, Panel } from '../types'
-import { h, svg, svgIcon } from '../dom'
+import { h, svg, svgIcon, emptyState } from '../dom'
 
 /**
  * Reports panel — the rolling battle log (last ~20 events), NEWEST FIRST, laid out
@@ -336,9 +336,10 @@ export function createReportsPanel(ctx: UiCtx): Panel {
     list.textContent = ''
 
     if (log.length === 0) {
-      // Empty state is a single full-width row (not a grid cell), so the message
-      // reads naturally rather than floating in one narrow column.
-      const empty = h('li', 'queue-empty muted', 'Brak raportów — wyślij wyprawę lub odeprzyj najazd.')
+      // Pusty stan to pojedynczy, pełnej szerokości wiersz (nie komórka siatki) — glif
+      // + nagłówek i podpowiedź czytają się jak CELOWY, spokojny komunikat, a nie urwana
+      // jednolinijkowa notka w rogu. gridColumn rozciąga go na całą szerokość siatki.
+      const empty = emptyState('Brak raportów', 'Wyślij wyprawę lub odeprzyj najazd.', 'li')
       empty.style.gridColumn = '1 / -1'
       list.appendChild(empty)
       return

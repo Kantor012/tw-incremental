@@ -332,7 +332,7 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.31.0',
+  version: '0.32.0',
   offlineSeconds,
 })
 

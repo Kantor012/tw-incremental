@@ -66,6 +66,75 @@ export function svgIcon(
 }
 
 /**
+ * Dekoracyjny glif pustego stanu — spokojny, obrysowany proporczyk heraldyczny na
+ * drzewcu. Rysowany SUROWYM {@link svg} (nie {@link svgIcon}), bo svgIcon wymusza
+ * role=img + aria-label, a ten glif jest CZYSTĄ dekoracją: nadajemy mu aria-hidden,
+ * a komunikat niosą realne teksty obok (zasada dostępności — treści nie trzyma sam
+ * obrazek). Malowany w `currentColor`, więc token `.empty-state-glyph` go barwi i
+ * przygasza zgodnie z motywem — zero zewnętrznych assetów (twarda zasada #2).
+ */
+function emptyStateGlyph(): SVGSVGElement {
+  const root = document.createElementNS(SVG_NS, 'svg') as SVGSVGElement
+  root.setAttribute('viewBox', '0 0 24 24')
+  root.setAttribute('class', 'empty-state-glyph')
+  root.setAttribute('aria-hidden', 'true')
+  root.setAttribute('focusable', 'false')
+  // Drzewce: pionowa linia w currentColor (obrys, nie wypełnienie).
+  const pole = svg('path', {
+    d: 'M7 3 V21',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '1.6',
+    'stroke-linecap': 'round',
+  })
+  // Proporczyk z rozwidlonym ogonem (jaskółczy) — wyłącznie obrys, by czytał się
+  // lekko i „spokojnie", a nie jak pełna, ciężka chorągiew.
+  const pennant = svg('path', {
+    d: 'M7 4 L19 6.5 L14 8.5 L19 10.5 L7 13 Z',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '1.6',
+    'stroke-linejoin': 'round',
+    'stroke-linecap': 'round',
+  })
+  // Gałka na szczycie drzewca — drobny detal heraldyczny.
+  const finial = svg('circle', { cx: '7', cy: '3', r: '1.1', fill: 'currentColor' })
+  root.appendChild(pole)
+  root.appendChild(pennant)
+  root.appendChild(finial)
+  return root
+}
+
+/**
+ * Wielokrotnego użytku komponent PUSTEGO STANU — drobny proceduralny glif + nagłówek
+ * i opcjonalna podpowiedź, wyśrodkowane z komfortowym oddechem w pustym obszarze.
+ * Dzięki temu pusta sekcja/lista wygląda CELOWO i spokojnie, a nie jak niedokończony,
+ * urwany jednolinijkowiec w lewym górnym rogu.
+ *
+ * - `heading` to REALNY tekst komunikatu (czyta go technologia asystująca); glif jest
+ *   tylko dekoracją (aria-hidden), więc treść nigdy nie spoczywa na samym obrazku.
+ * - `hint` (opcjonalny) to drugorzędna podpowiedź pod nagłówkiem.
+ * - `tag` pozwala wyrenderować host jako `<li>` (jedyny wiersz `<ul>/<ol>` — zasada #7),
+ *   `<div>` albo `<p>` dla wywołań blokowych, by DOM pozostał poprawny.
+ *
+ * Helper NIE dodaje role/aria-live — wywołania potrzebujące „live region" (bramki
+ * Rynku) opakowują ten blok we własny host role=status i zostawiają go sobie.
+ */
+export function emptyState(
+  heading: string,
+  hint?: string,
+  tag: 'li' | 'div' | 'p' = 'div',
+): HTMLElement {
+  const host = h(tag, 'empty-state')
+  host.appendChild(emptyStateGlyph())
+  // Nagłówek to <span> (blok przez CSS), nie <p>/<div> — dzięki temu host może być
+  // <li>, <div> ALBO <p> i pozostać poprawnym HTML (zasada #7).
+  host.appendChild(h('span', 'empty-state-heading', heading))
+  if (hint !== undefined) host.appendChild(h('span', 'empty-state-hint', hint))
+  return host
+}
+
+/**
  * Procedural heraldic shield for the dashboard brand and the player villages on the
  * map. Painted entirely from `currentColor` (+ token-derived shades), never hardcoded
  * hex: the caller sets `color` via a token (`.hud-brand-mark .shield` and

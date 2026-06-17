@@ -358,6 +358,8 @@ html {
  * b) PASEK ZAKŁADEK (tablist)
  * ========================================================================== */
 .tabs-bar {
+  /* Kontekst pozycjonowania dla zaników krawędzi (::before/::after niżej). */
+  position: relative;
   background-color: var(--bg);
   border-bottom: 1px solid var(--border);
 }
@@ -435,6 +437,93 @@ html {
   border-bottom-color: var(--accent);
   box-shadow: 0 2px 10px -2px rgba(var(--accent-rgb), 0.45), var(--edge-highlight);
   font-weight: var(--weight-bold);
+}
+
+/* ---- Podpowiedź przewijania zakładek (zanik krawędzi) ------------------- */
+/* Zakładek jest więcej niż mieści jakikolwiek viewport, więc tablista przewija
+ * się poziomo (overflow-x:auto wyżej) — sama krawędź nie zdradza jednak, że
+ * dalej są kolejne sekcje. Dokładamy DELIKATNY zanik przy lewej i prawej krawędzi
+ * paska: treść „rozpływa się" w tło (--bg), sygnalizując możliwość przewinięcia
+ * w bok. To czysta DEKORACJA narysowana gradientem (zero assetów) i z
+ * pointer-events:none — nigdy nie przechwytuje kliknięć ani fokusu zakładek, nie
+ * zmienia DOM-u/logiki i nie niesie sama żadnej treści (zakładki pozostają w
+ * pełni czytelne; zanik jest tylko wskazówką). Pseudo-elementy są dziećmi
+ * NIEPRZEWIJANEGO paska, więc tkwią przy jego krawędziach, gdy taby suną pod nimi. */
+.tabs-bar::before,
+.tabs-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--space-5);
+  pointer-events: none;
+}
+
+/* Lewa krawędź: tło → przezroczystość (gaśnie ku środkowi). */
+.tabs-bar::before {
+  left: 0;
+  background-image: linear-gradient(to right, var(--bg), transparent);
+}
+
+/* Prawa krawędź: lustrzanie. */
+.tabs-bar::after {
+  right: 0;
+  background-image: linear-gradient(to left, var(--bg), transparent);
+}
+
+/* Postępowe ulepszenie (tam, gdzie przeglądarka wspiera animacje sterowane
+ * przewijaniem): statyczny zanik na obu krawędziach przechodzi w PRECYZYJNY —
+ * widoczny tylko po stronie realnie odjechanej treści i znikający na właściwym
+ * końcu — bez JS i bez sztywnego breakpointu. Gdy tablista zmieściłaby się w
+ * całości, jej oś czasu przewijania jest NIEAKTYWNA: animacja nie działa, a
+ * pseudo-element wraca do statycznego zaniku (nieszkodliwy, bo taby i tak zawsze
+ * się przewijają). Bez wsparcia (np. starsze Safari) zostaje wariant statyczny. */
+@supports (animation-timeline: scroll()) and (timeline-scope: none) {
+  /* Nazwana oś czasu żyje na przewijanym dziecku (tablista). */
+  .tabs.container {
+    scroll-timeline-name: --tabs-scroll;
+    scroll-timeline-axis: x;
+  }
+
+  /* timeline-scope „podnosi" oś do paska, by mogły z niej skorzystać jego
+   * pseudo-elementy (oś z dziecka nie jest domyślnie widoczna dla przodka). */
+  .tabs-bar {
+    timeline-scope: --tabs-scroll;
+  }
+
+  .tabs-bar::before,
+  .tabs-bar::after {
+    animation-timeline: --tabs-scroll;
+    animation-fill-mode: both;
+    animation-timing-function: linear;
+  }
+
+  .tabs-bar::before {
+    animation-name: tabs-edge-left;
+  }
+  .tabs-bar::after {
+    animation-name: tabs-edge-right;
+  }
+
+  /* Lewy zanik: ukryty przy samym początku, widoczny po odjechaniu w prawo. */
+  @keyframes tabs-edge-left {
+    0% {
+      opacity: 0;
+    }
+    6% {
+      opacity: 1;
+    }
+  }
+
+  /* Prawy zanik: widoczny aż do dojechania do końca, tam gaśnie. */
+  @keyframes tabs-edge-right {
+    94% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0;
+    }
+  }
 }
 
 /* ============================================================================
@@ -617,6 +706,14 @@ html {
 @media (prefers-reduced-motion: reduce) {
   .tabs.container {
     scroll-behavior: auto;
+  }
+
+  /* Zanik krawędzi nie ma już śledzić przewijania (to też ruch) — wyłączamy
+   * animację sterowaną przewijaniem; podpowiedź degraduje do statycznego zaniku
+   * obu krawędzi (reguły bazowe wyżej), spójnie z przeglądarkami bez wsparcia. */
+  .tabs-bar::before,
+  .tabs-bar::after {
+    animation-name: none;
   }
 }
 

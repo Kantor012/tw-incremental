@@ -19,7 +19,7 @@ import { raidPower } from '../../systems/raids'
 import { barracksUnlocked, unitUnlocked } from '../../systems/recruitment'
 import { effectiveMods } from '../../systems/prestige'
 import type { UiCtx, Panel } from '../types'
-import { h, unitIcon } from '../dom'
+import { h, unitIcon, emptyState } from '../dom'
 import { conquestHint } from '../conquestCopy'
 import {
   attackForecast,
@@ -379,7 +379,11 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     targetList.textContent = ''
     targetCards = []
     if (targets.length === 0) {
-      targetList.appendChild(h('p', 'queue-empty muted', 'Brak celów na mapie.'))
+      // Pusty stan jako blok wyśrodkowany — w siatce target-list rozpinamy go na
+      // całą szerokość (1 / -1), by nie usiadł w jednej kolumnie auto-fill.
+      const empty = emptyState('Brak celów na mapie.', undefined, 'div')
+      empty.style.gridColumn = '1 / -1'
+      targetList.appendChild(empty)
       return
     }
     for (const barb of targets) {
@@ -688,7 +692,10 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     fortressList.textContent = ''
     fortressCards = []
     if (world.fortresses.length === 0) {
-      fortressList.appendChild(h('p', 'queue-empty muted', 'Brak fortec na mapie.'))
+      // Jak przy celach — pusty stan rozpięty na całą szerokość siatki fortec.
+      const empty = emptyState('Brak fortec na mapie.', undefined, 'div')
+      empty.style.gridColumn = '1 / -1'
+      fortressList.appendChild(empty)
       return
     }
     // Nearest-first, like the camp list (targetsByDistance) — only FORTRESS_COUNT of them,
@@ -1067,7 +1074,8 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
       lastMarchSig = marchSig
       marchList.textContent = ''
       if (v.marches.length === 0) {
-        marchList.appendChild(h('li', 'queue-empty muted', 'Brak marszów w toku.'))
+        // Jedyny wiersz listy marszów (kolumna flex) — host jako <li>, bez gridColumn.
+        marchList.appendChild(emptyState('Brak marszów w toku.', undefined, 'li'))
       } else {
         for (const m of v.marches) {
           const li = h(
