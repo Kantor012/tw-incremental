@@ -659,3 +659,232 @@ export function automationIcon(kind: AutomationKind): SVGSVGElement {
     }
   }
 }
+
+/**
+ * Dekoracyjny kontener glifu nawigacji (sidebar M12.1). Mirror {@link emptyStateGlyph}:
+ * surowy `<svg>` z aria-hidden + focusable=false, NIE {@link svgIcon} — svgIcon wymusza
+ * role=img + aria-label, a ikona w railu jest CZYSTĄ dekoracją (nazwę dostępną niesie
+ * `span.tab-label` obok). viewBox 0 0 24 24 i klasa `nav-icon`, więc CSS barwi glif
+ * przez `color` (muted w spoczynku, --accent przy .is-active) — wszystkie kształty malowane
+ * WYŁĄCZNIE w `currentColor`, zero literalnego heksa (twarda zasada #2).
+ */
+function navGlyph(children: SVGElement[]): SVGSVGElement {
+  const root = document.createElementNS(SVG_NS, 'svg') as SVGSVGElement
+  root.setAttribute('viewBox', '0 0 24 24')
+  root.setAttribute('class', 'nav-icon')
+  root.setAttribute('aria-hidden', 'true')
+  root.setAttribute('focusable', 'false')
+  for (const child of children) root.appendChild(child)
+  return root
+}
+
+/**
+ * Ciemniejsza wnęka glifu nawigacji — token tła (`var(--bg)`) nałożony półprzezroczyście
+ * na sylwetkę z currentColor (dokładnie jak otwór kłódki w {@link lockIcon}). Pozwala
+ * „wyrzeźbić" detal w pełnej bryle bez literalnego koloru: barwa wnęki idzie z motywu.
+ * `var(--bg)` ustawiamy przez `.style` (atrybuty SVG nie przyjmują gramatyki var()).
+ */
+function navShade(tag: string, attrs: Record<string, string>, opacity = '0.5'): SVGElement {
+  const node = svg(tag, { ...attrs, 'fill-opacity': opacity })
+  node.style.fill = 'var(--bg)'
+  return node
+}
+
+/**
+ * Proceduralna ikona zakładki bocznego nawigatora (M12.1). Jedna odróżnialna sylwetka
+ * na `TabSpec.id`, czytelna przy ~20px obok etykiety w railu.
+ *
+ * NIE jest exhaustive po typie (jak {@link buildingIcon}) — `TabSpec.id` to swobodny
+ * `string`, więc zamiast przypisania do `never` mamy `default` zwracający neutralny glif
+ * (zakładka/wstążka). Dzięki temu nieznana lub PRZYSZŁA zakładka renderuje się bez błędu,
+ * a dorzucenie nowej sekcji pozostaje edycją danych — nie wymusza dotknięcia tego pliku.
+ *
+ * Każdy glif jest dekoracją (przez {@link navGlyph}), malowaną wyłącznie w `currentColor`
+ * (+ wnęki {@link navShade} przez `var(--bg)`), więc podąża za barwą zakładki i motywem.
+ */
+export function navIcon(id: string): SVGSVGElement {
+  switch (id) {
+    case 'buildings': {
+      // Kamienny donżon: wysoki korpus + 3 blanki na szczycie + przyciemniona brama.
+      const body = svg('rect', { x: '6', y: '8', width: '12', height: '13', fill: 'currentColor' })
+      const merlon = (x: string): SVGElement =>
+        svg('rect', { x, y: '5', width: '2.6', height: '3.5', fill: 'currentColor' })
+      const door = navShade('rect', { x: '10', y: '14', width: '4', height: '7', rx: '0.6' })
+      return navGlyph([body, merlon('6'), merlon('10.7'), merlon('15.4'), door])
+    }
+    case 'villages': {
+      // Skupisko dwóch chat: dwa daszki nad kwadratami, przesunięte — czyta się jako „osada".
+      const roofA = svg('path', { d: 'M2.5 12 L7 6.5 L11.5 12 Z', fill: 'currentColor' })
+      const bodyA = svg('rect', { x: '4', y: '12', width: '6', height: '8', fill: 'currentColor' })
+      const roofB = svg('path', { d: 'M11 14 L15.5 9 L20 14 Z', fill: 'currentColor' })
+      const bodyB = svg('rect', { x: '12.5', y: '14', width: '6', height: '6', fill: 'currentColor' })
+      const door = navShade('rect', { x: '14.5', y: '16', width: '2', height: '4', rx: '0.4' }, '0.55')
+      return navGlyph([roofA, bodyA, roofB, bodyB, door])
+    }
+    case 'market': {
+      // Moneta: pełny krążek + grawerowany pierścień i pionowy mincerski znaczek (wnęki tła).
+      const disc = svg('circle', { cx: '12', cy: '12', r: '9', fill: 'currentColor' })
+      const ring = svg('circle', { cx: '12', cy: '12', r: '5.6', fill: 'none', 'stroke-width': '1.4', 'stroke-opacity': '0.55' })
+      ring.style.stroke = 'var(--bg)'
+      const mint = navShade('rect', { x: '11.1', y: '8.4', width: '1.8', height: '7.2', rx: '0.6' }, '0.6')
+      return navGlyph([disc, ring, mint])
+    }
+    case 'automation': {
+      // Zębatka: 8 promienistych zębów + pełna piasta + przyciemniony otwór (wnęka tła).
+      const parts: SVGElement[] = []
+      for (let d = 0; d < 360; d += 45) {
+        parts.push(svg('rect', {
+          x: '10.6',
+          y: '1',
+          width: '2.8',
+          height: '5.5',
+          rx: '0.6',
+          fill: 'currentColor',
+          transform: 'rotate(' + d + ' 12 12)',
+        }))
+      }
+      parts.push(svg('circle', { cx: '12', cy: '12', r: '7', fill: 'currentColor' }))
+      parts.push(navShade('circle', { cx: '12', cy: '12', r: '2.7' }, '0.65'))
+      return navGlyph(parts)
+    }
+    case 'army': {
+      // Skrzyżowane miecze: dwa ukośne ostrza w „X" + krótkie jelce przy rękojeściach.
+      const blade = (x1: string, y1: string, x2: string, y2: string): SVGElement =>
+        svg('line', { x1, y1, x2, y2, stroke: 'currentColor', 'stroke-width': '2.2', 'stroke-linecap': 'round' })
+      const guard = (x1: string, y1: string, x2: string, y2: string): SVGElement =>
+        svg('line', { x1, y1, x2, y2, stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round' })
+      return navGlyph([
+        blade('5', '5', '17', '17'),
+        blade('19', '5', '7', '17'),
+        guard('15', '19', '19', '15'),
+        guard('9', '19', '5', '15'),
+      ])
+    }
+    case 'map': {
+      // Pinezka lokalizacji: kropla z wydrążonym okręgiem (wnęka tła) — znacznik na mapie.
+      const pin = svg('path', {
+        d: 'M12 2 C7.6 2 4 5.6 4 10 C4 16 12 22 12 22 C12 22 20 16 20 10 C20 5.6 16.4 2 12 2 Z',
+        fill: 'currentColor',
+      })
+      const hole = navShade('circle', { cx: '12', cy: '10', r: '3' }, '0.85')
+      return navGlyph([pin, hole])
+    }
+    case 'raids': {
+      // Proporzec wyprawy: pionowe drzewce + trójkątna chorągiew + gałka na szczycie.
+      const pole = svg('line', { x1: '6', y1: '3', x2: '6', y2: '21', stroke: 'currentColor', 'stroke-width': '2', 'stroke-linecap': 'round' })
+      const flag = svg('path', { d: 'M6 4 L19 7 L6 10 Z', fill: 'currentColor' })
+      const finial = svg('circle', { cx: '6', cy: '3', r: '1.3', fill: 'currentColor' })
+      return navGlyph([pole, flag, finial])
+    }
+    case 'reports': {
+      // Dokument/zwój: arkusz z zagiętym rogiem + 3 linie tekstu (wnęki tła).
+      const sheet = svg('rect', { x: '5', y: '3', width: '14', height: '18', rx: '2', fill: 'currentColor' })
+      const fold = navShade('path', { d: 'M15 3 L19 7 L15 7 Z' }, '0.5')
+      const line = (y: string, w: string): SVGElement =>
+        navShade('rect', { x: '8', y, width: w, height: '1.6', rx: '0.8' }, '0.6')
+      return navGlyph([sheet, fold, line('7.5', '8'), line('11', '8'), line('14.5', '5')])
+    }
+    case 'tech': {
+      // Konstelacja: 4 węzły połączone cienkimi liniami — echo drzewa talentów.
+      const link = (d: string): SVGElement =>
+        svg('path', { d, fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-opacity': '0.7' })
+      const node = (cx: string, cy: string, r = '2'): SVGElement =>
+        svg('circle', { cx, cy, r, fill: 'currentColor' })
+      return navGlyph([
+        link('M6 18 L10 9 L18 6'),
+        link('M10 9 L16 14'),
+        node('6', '18'),
+        node('10', '9', '2.4'),
+        node('18', '6'),
+        node('16', '14'),
+      ])
+    }
+    case 'prestige': {
+      // Pełna pięcioramienna gwiazda.
+      const star = svg('path', {
+        d: 'M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z',
+        fill: 'currentColor',
+      })
+      return navGlyph([star])
+    }
+    case 'era': {
+      // Klepsydra: dwa trójkąty stykające się w talii + listwa górna i dolna.
+      const topBar = svg('rect', { x: '5', y: '3', width: '14', height: '2', rx: '0.8', fill: 'currentColor' })
+      const botBar = svg('rect', { x: '5', y: '19', width: '14', height: '2', rx: '0.8', fill: 'currentColor' })
+      const glass = svg('path', { d: 'M6.5 5 L17.5 5 L12 12 Z M12 12 L17.5 19 L6.5 19 Z', fill: 'currentColor' })
+      return navGlyph([topBar, botBar, glass])
+    }
+    case 'dynasty': {
+      // Korona: zygzakowaty obrys + opaska podstawy + jeden przyciemniony klejnot.
+      const crown = svg('path', { d: 'M3 8 L7 13 L12 6 L17 13 L21 8 L19 18 L5 18 Z', fill: 'currentColor' })
+      const band = svg('rect', { x: '5', y: '17.5', width: '14', height: '2.6', rx: '0.5', fill: 'currentColor' })
+      const gem = navShade('circle', { cx: '12', cy: '13.5', r: '1.4' }, '0.6')
+      return navGlyph([crown, band, gem])
+    }
+    case 'challenges': {
+      // Tarcza strzelnicza: dwa współśrodkowe pierścienie (obrys) + pełna kropka środka.
+      const outer = svg('circle', { cx: '12', cy: '12', r: '9', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' })
+      const inner = svg('circle', { cx: '12', cy: '12', r: '5', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' })
+      const dot = svg('circle', { cx: '12', cy: '12', r: '2', fill: 'currentColor' })
+      return navGlyph([outer, inner, dot])
+    }
+    case 'achievements': {
+      // Puchar: czasza + dwa boczne ucha + nóżka + podstawa.
+      const handleL = svg('path', { d: 'M7 5 C3 5 3 11 8 11', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' })
+      const handleR = svg('path', { d: 'M17 5 C21 5 21 11 16 11', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6' })
+      const bowl = svg('path', { d: 'M6.5 4 L17.5 4 L16.8 9 C16.4 12.2 13.6 13.5 12 13.5 C10.4 13.5 7.6 12.2 7.2 9 Z', fill: 'currentColor' })
+      const stem = svg('rect', { x: '11', y: '13', width: '2', height: '4', fill: 'currentColor' })
+      const foot = svg('rect', { x: '9.5', y: '17', width: '5', height: '1.6', fill: 'currentColor' })
+      const base = svg('rect', { x: '8', y: '18.4', width: '8', height: '2.2', rx: '0.6', fill: 'currentColor' })
+      return navGlyph([handleL, handleR, bowl, stem, foot, base])
+    }
+    case 'codex': {
+      // Otwarta księga: dwie strony rozdzielone grzbietem (wnęka) + po dwie linie tekstu.
+      const pageL = svg('path', { d: 'M12 5 C9.5 3.5 6 3.5 3.5 4.5 L3.5 18 C6 17 9.5 17 12 18.5 Z', fill: 'currentColor' })
+      const pageR = svg('path', { d: 'M12 5 C14.5 3.5 18 3.5 20.5 4.5 L20.5 18 C18 17 14.5 17 12 18.5 Z', fill: 'currentColor' })
+      const spine = navShade('rect', { x: '11.4', y: '5', width: '1.2', height: '13.5' }, '0.5')
+      const line = (x: string, y: string): SVGElement =>
+        navShade('rect', { x, y, width: '5', height: '1', rx: '0.5' }, '0.55')
+      return navGlyph([pageL, pageR, spine, line('5', '8'), line('5', '11'), line('14', '8'), line('14', '11')])
+    }
+    case 'save': {
+      // Skrzynia skarbów: zaokrąglone wieko + korpus + opaska szwu + zatrzask (wnęki tła).
+      const lid = svg('path', { d: 'M4 9 C4 5.5 7 4 12 4 C17 4 20 5.5 20 9 L20 10 L4 10 Z', fill: 'currentColor' })
+      const body = svg('rect', { x: '4', y: '10', width: '16', height: '9', rx: '1', fill: 'currentColor' })
+      const band = navShade('rect', { x: '4', y: '9.2', width: '16', height: '1.6' }, '0.5')
+      const latch = navShade('rect', { x: '10.5', y: '11', width: '3', height: '4', rx: '0.5' }, '0.7')
+      return navGlyph([lid, body, band, latch])
+    }
+    default: {
+      // Nieznana/przyszła zakładka — neutralna zakładka-wstążka, NIGDY nie rzuca wyjątkiem.
+      const mark = svg('path', { d: 'M7 3 L17 3 L17 21 L12 16.5 L7 21 Z', fill: 'currentColor' })
+      return navGlyph([mark])
+    }
+  }
+}
+
+/**
+ * Drobny szewron w lewo dla przycisku zwijania railu (M12.1). Dekoracja (aria-hidden);
+ * CSS obraca go o 180° w stanie `.is-collapsed`. Malowany w `currentColor`.
+ */
+export function chevronIcon(): SVGSVGElement {
+  const path = svg('path', {
+    d: 'M15 5 L8 12 L15 19',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': '2',
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+  })
+  return navGlyph([path])
+}
+
+/**
+ * Hamburger (3 poziome belki) dla mobilnego przełącznika menu (M12.1). Dekoracja
+ * (aria-hidden) — nazwę przycisku niesie tekst „Menu" obok. Malowany w `currentColor`.
+ */
+export function menuIcon(): SVGSVGElement {
+  const bar = (y: string): SVGElement =>
+    svg('rect', { x: '3', y, width: '18', height: '2.2', rx: '1.1', fill: 'currentColor' })
+  return navGlyph([bar('5'), bar('11'), bar('17')])
+}

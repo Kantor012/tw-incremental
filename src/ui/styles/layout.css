@@ -48,14 +48,15 @@
 }
 
 /* Dashboard jest szerszy niż domyślny pojedynczy słupek (.container = 720px w
- * base.css). Wspólne poszerzenie HUD-a, tablisty, treści i stopki do ~1040px,
- * by zmieściły się 2+ kolumny kart. Padding poziomy dziedziczony z base.css. */
+ * base.css). HUD i stopka dzielą wspólny, szeroki cap (--shell-max), więc ich
+ * krawędzie równają się z klastrem treści; rail (osobny od treści) nie odbiera
+ * już szerokości panelom. Padding poziomy dziedziczony z base.css. */
 .app-shell .container {
-  max-width: 1040px;
+  max-width: var(--shell-max);
 }
 
-/* Treść rozpycha się tak, by stopka trzymała się dołu ekranu. */
-.app-shell > .tabpanels {
+/* Klaster treści (rail + panele) rozpycha się tak, by stopka trzymała się dołu. */
+.app-shell > .app-body {
   flex: 1 1 auto;
 }
 
@@ -384,6 +385,15 @@ html {
   content: '\2713\FE0E\00A0';
 }
 
+/* WCAG 2.4.7: stanowy box-shadow .village-btn.is-active (0,2,0) wymazywałby pierścień
+ * fokusa (box-shadow nie kumuluje się między regułami), a w radiogroup z selekcją-za-
+ * fokusem zaznaczona wioska JEST wioską z fokusem. .village-btn.is-active:focus-visible
+ * (0,3,0) przywraca pierścień nad regułą aktywną niezależnie od kolejności źródła. */
+.village-btn:focus-visible,
+.village-btn.is-active:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
 /* HERB WIOSKI (proceduralny, deterministyczny z id wioski — patrz crest.ts).
  * Sam SVG nie ma własnych wymiarów (viewBox 0 0 48 48); rozmiar nadajemy tu,
  * zależnie od kontekstu. Herb jest dekoracją obok ZAWSZE obecnej nazwy wioski,
@@ -410,40 +420,134 @@ html {
 }
 
 /* ============================================================================
- * b) PASEK ZAKŁADEK (tablist)
+ * b) BOCZNY NAWIGATOR (side-nav) — pionowy, grupowany tablist (M12.1)
+ * --------------------------------------------------------------------------
+ * Poziomy pasek 16 zakładek (przewijany w bok) zastąpiony LEWYM RAILEM: pionowa
+ * lista pogrupowanych zakładek, zwijalna na desktopie do samego rzędu ikon, a na
+ * telefonie schowana za przyciskiem „Menu" (disclosure). Treść poszerzona — main
+ * nie dzieli już capa z nawigacją. Wszystkie selektory railu są scopowane pod
+ * `.side-nav`, więc ich swoistość (≥0,2,x) wygrywa z `.tab.is-active::after`
+ * (0,2,1) z motion.css mimo wczytania layout.css PRZED motion.css.
+ * Zero hardkodowanych kolorów; stan aktywny niesiony NIE samym kolorem.
  * ========================================================================== */
-.tabs-bar {
-  /* Kontekst pozycjonowania dla zaników krawędzi (::before/::after niżej). */
-  position: relative;
-  background-color: var(--bg);
-  border-bottom: 1px solid var(--border);
+
+/* Rząd ciała aplikacji: rail (stała szerokość) + treść (rośnie). Wyśrodkowany
+ * na wspólnym capie --shell-max, więc równa się z HUD-em i stopką. */
+.app-body {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--space-4);
+  width: 100%;
+  max-width: var(--shell-max);
+  margin-inline: auto;
+  padding-inline: var(--space-4);
 }
 
-/* Tablist: rząd przycisków. Na wąskich ekranach przewija się POZIOMO zamiast
- * zawijać (taby pozostają w jednej linii, palcem przesuwasz w bok). Padding
- * poziomy z .container, pionowy zerujemy — wysokość daje cel dotykowy .tab. */
-.tabs.container {
+@media (min-width: 640px) {
+  .app-body {
+    padding-inline: var(--space-5);
+  }
+}
+
+.app-body > .tabpanels {
+  flex: 1 1 auto;
+  /* KRYTYCZNE: pozwala siatkom auto-fill oraz SVG mapy kurczyć się/rosnąć w
+   * obrębie wiersza, zamiast wylewać się poza niego (min-width:auto na flexie
+   * blokowałby zwężanie). */
+  min-width: 0;
+  padding-block: var(--space-5) var(--space-5);
+}
+
+/* ---- Rail nawigacji (sticky kolumna pod HUD-em) ----------------------- */
+.side-nav {
+  flex: 0 0 auto;
+  width: var(--rail-w);
+  align-self: flex-start;
+  position: sticky;
+  top: var(--hud-h);
+  max-height: calc(100dvh - var(--hud-h));
+  overflow-y: auto;
+  z-index: var(--z-base);
   display: flex;
-  align-items: stretch;
-  flex-wrap: nowrap;
+  flex-direction: column;
   gap: var(--space-1);
-  padding-top: 0;
-  padding-bottom: 0;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
+  background-color: var(--panel);
+  background-image: var(--grad-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1), var(--edge-highlight);
+  padding: var(--space-2);
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
-  /* Aktywny tab podkreślamy 2px akcentem; -1px nasuwa go na 1px obrys paska,
-   * by linie zlały się w jedną (bez podwójnej kreski). */
-  margin-bottom: -1px;
 }
 
-.tabs.container::-webkit-scrollbar {
-  height: 6px;
+.side-nav-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
-.tabs.container::-webkit-scrollbar-thumb {
-  background-color: var(--border);
-  border-radius: var(--radius-pill);
+
+/* Przycisk zwijania railu (desktop). Cel dotykowy 36px; etykieta „Zwiń" + szewron
+ * (etykieta znika w stanie zwiniętym, zostaje sama ikona). */
+.side-collapse {
+  margin-inline-start: auto;
+  min-width: 36px;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  padding-inline: var(--space-2);
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+
+.side-collapse:hover {
+  color: var(--text);
+  background-color: var(--panel-2);
+}
+
+/* Widoczna etykieta przycisku — tylko gdy rail rozwinięty (czyni z pustego rzędu
+ * rozpoznawalną kontrolkę; w stanie zwiniętym zostaje sam szewron). */
+.side-nav.is-collapsed .side-collapse-text {
+  display: none;
+}
+
+.side-collapse .nav-icon {
+  width: 1.1rem;
+  height: 1.1rem;
+  transition: transform var(--dur-fast) var(--ease);
+}
+
+/* Sama lista zakładek (role=tablist). Wewnętrzny padding daje miejsce, by
+ * pierścień fokusa (box-shadow) nie był przycinany przez overflow railu. */
+.side-tabs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-1);
+}
+
+/* Dekoracyjny nagłówek grupy (aria-hidden) — drobny, wytłoczony separator sekcji. */
+.side-group-label {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.side-group-label:first-child {
+  padding-top: 0;
 }
 
 /* Pojedyncza zakładka. Nie używa .btn — to płaski przycisk z podkreśleniem.
@@ -494,90 +598,248 @@ html {
   font-weight: var(--weight-bold);
 }
 
-/* ---- Podpowiedź przewijania zakładek (zanik krawędzi) ------------------- */
-/* Zakładek jest więcej niż mieści jakikolwiek viewport, więc tablista przewija
- * się poziomo (overflow-x:auto wyżej) — sama krawędź nie zdradza jednak, że
- * dalej są kolejne sekcje. Dokładamy DELIKATNY zanik przy lewej i prawej krawędzi
- * paska: treść „rozpływa się" w tło (--bg), sygnalizując możliwość przewinięcia
- * w bok. To czysta DEKORACJA narysowana gradientem (zero assetów) i z
- * pointer-events:none — nigdy nie przechwytuje kliknięć ani fokusu zakładek, nie
- * zmienia DOM-u/logiki i nie niesie sama żadnej treści (zakładki pozostają w
- * pełni czytelne; zanik jest tylko wskazówką). Pseudo-elementy są dziećmi
- * NIEPRZEWIJANEGO paska, więc tkwią przy jego krawędziach, gdy taby suną pod nimi. */
-.tabs-bar::before,
-.tabs-bar::after {
-  content: '';
+/* WCAG 2.4.7: box-shadow NIE kumuluje się między regułami, więc stanowy box-shadow
+ * .tab.is-active (0,2,0) wymazywał pierścień fokusa z globalnego :focus-visible
+ * (0,1,0, base.css). Przy AUTOMATYCZNEJ aktywacji tablisty zakładka z fokusem jest
+ * ZAWSZE aktywna — bez tej reguły strzałki/Tab nie dawałyby widocznego fokusa.
+ * .tab.is-active:focus-visible (0,3,0) bije regułę aktywną niezależnie od kolejności. */
+.tab:focus-visible,
+.tab.is-active:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* ---- Pionowa zakładka (override poziomej bazy .tab powyżej) ------------- */
+/* Scope `.side-nav` (≥0,2,x) wygrywa nad bazowymi .tab/.tab:hover/.tab.is-active. */
+.side-nav .tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-bottom: 0;
+  border-radius: var(--radius-md);
+  text-align: left;
+  white-space: nowrap;
+  scroll-margin-top: var(--hud-h);
+}
+
+.side-nav .tab .nav-icon {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  color: currentColor;
+}
+
+.side-nav .tab .tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.side-nav .tab:hover {
+  color: var(--text);
+  background-color: var(--panel-2);
+}
+
+/* Aktywna zakładka NIE samym kolorem (WCAG 1.4.1): złota ikona (currentColor) +
+ * lewa listwa (pozycja/kształt) + uniesione tło --panel-2 + pogrubienie + aria-selected. */
+.side-nav .tab.is-active {
+  color: var(--accent);
+  background-color: var(--panel-2);
+  border-bottom-color: transparent;
+  box-shadow: var(--edge-highlight);
+  font-weight: var(--weight-bold);
+}
+
+/* WCAG 2.4.7: .side-nav .tab.is-active (0,3,0) ustawia box-shadow:var(--edge-highlight),
+ * który (box-shadow nie kumuluje reguł) wymazywał pierścień fokusa. Tablista używa
+ * AUTOMATYCZNEJ aktywacji, więc zakładka z fokusem jest ZAWSZE aktywna — to tu fokus
+ * był niewidoczny w normalnym trybie. .side-nav .tab.is-active:focus-visible (0,4,0)
+ * bije regułę aktywną; .side-nav .tab:focus-visible (0,3,0, źródłowo po :hover) pokrywa
+ * resztę. Pierścień to PEŁNY box-shadow (nie sam outline:transparent z base). */
+.side-nav .tab:focus-visible,
+.side-nav .tab.is-active:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+/* Znosi odziedziczone dolne podkreślenie z motion.css (.tab.is-active::after);
+ * wyższa swoistość (0,3,1 > 0,2,1) wygrywa mimo wczytania layout.css przed motion. */
+.side-nav .tab.is-active::after {
+  content: none;
+}
+
+/* Lewa listwa wskaźnika aktywnej zakładki — sygnał POŁOŻENIEM/kształtem (::before =
+ * listwa, ::after = dymek; brak kolizji). */
+.side-nav .tab.is-active::before {
+  content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
-  width: var(--space-5);
-  pointer-events: none;
-}
-
-/* Lewa krawędź: tło → przezroczystość (gaśnie ku środkowi). */
-.tabs-bar::before {
   left: 0;
-  background-image: linear-gradient(to right, var(--bg), transparent);
+  top: var(--space-1);
+  bottom: var(--space-1);
+  width: 3px;
+  border-radius: var(--radius-pill);
+  background-image: var(--grad-progress);
+  box-shadow: var(--glow-accent-soft);
+  transform-origin: top;
+  animation: tab-indicator-in var(--dur-base) var(--ease-out) both;
 }
 
-/* Prawa krawędź: lustrzanie. */
-.tabs-bar::after {
-  right: 0;
-  background-image: linear-gradient(to left, var(--bg), transparent);
+/* Wjazd listwy wskaźnika — „rozkwita" z góry (scaleY 0 → 1 + fade). Spoczynek =
+ * scaleY(1)/opacity:1, więc bez ruchu (reduced motion) listwa po prostu jest. */
+@keyframes tab-indicator-in {
+  from {
+    opacity: 0;
+    transform: scaleY(0);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
 }
 
-/* Postępowe ulepszenie (tam, gdzie przeglądarka wspiera animacje sterowane
- * przewijaniem): statyczny zanik na obu krawędziach przechodzi w PRECYZYJNY —
- * widoczny tylko po stronie realnie odjechanej treści i znikający na właściwym
- * końcu — bez JS i bez sztywnego breakpointu. Gdy tablista zmieściłaby się w
- * całości, jej oś czasu przewijania jest NIEAKTYWNA: animacja nie działa, a
- * pseudo-element wraca do statycznego zaniku (nieszkodliwy, bo taby i tak zawsze
- * się przewijają). Bez wsparcia (np. starsze Safari) zostaje wariant statyczny. */
-@supports (animation-timeline: scroll()) and (timeline-scope: none) {
-  /* Nazwana oś czasu żyje na przewijanym dziecku (tablista). */
-  .tabs.container {
-    scroll-timeline-name: --tabs-scroll;
-    scroll-timeline-axis: x;
+/* ---- Zwinięty rail (sam rząd ikon) — wyłącznie desktop ----------------- */
+@media (min-width: 900px) {
+  /* Zwinięty rail MUSI nadal przewijać się wewnętrznie: jest sticky (top:--hud-h),
+   * a kolumna 16 ikon bywa wyższa niż viewport (np. 768/800px laptopy) — bez tego
+   * dolne zakładki lądują pod krawędzią i są nieosiągalne. Etykiety NIE są już
+   * dymkiem CSS (::after wymagałby overflow:visible i kolidował z overflow-y:auto),
+   * lecz natywnym title (layout.ts) — renderuje się poza clipem, więc przewijanie
+   * i pełne nazwy współistnieją. */
+  .side-nav.is-collapsed {
+    width: var(--rail-w-collapsed);
+    max-height: calc(100dvh - var(--hud-h));
+    overflow-y: auto;
   }
 
-  /* timeline-scope „podnosi" oś do paska, by mogły z niej skorzystać jego
-   * pseudo-elementy (oś z dziecka nie jest domyślnie widoczna dla przodka). */
-  .tabs-bar {
-    timeline-scope: --tabs-scroll;
+  .side-nav.is-collapsed .side-tabs .tab {
+    justify-content: center;
+    padding-inline: 0;
   }
 
-  .tabs-bar::before,
-  .tabs-bar::after {
-    animation-timeline: --tabs-scroll;
-    animation-fill-mode: both;
-    animation-timing-function: linear;
+  /* Etykieta ukryta wizualnie (recepta clip) — NIGDY display:none, by zachować
+   * dostępną nazwę zakładki. */
+  .side-nav.is-collapsed .tab .tab-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
-  .tabs-bar::before {
-    animation-name: tabs-edge-left;
-  }
-  .tabs-bar::after {
-    animation-name: tabs-edge-right;
+  /* Tekst grupy znika (i tak aria-hidden)… */
+  .side-nav.is-collapsed .side-group-text {
+    display: none;
   }
 
-  /* Lewy zanik: ukryty przy samym początku, widoczny po odjechaniu w prawo. */
-  @keyframes tabs-edge-left {
-    0% {
-      opacity: 0;
-    }
-    6% {
-      opacity: 1;
-    }
+  /* …a sam nagłówek grupy staje się cienkim separatorem. */
+  .side-nav.is-collapsed .side-group-label {
+    height: 0;
+    padding: 0;
+    margin-block: var(--space-1);
+    border-top: 1px solid var(--border);
   }
 
-  /* Prawy zanik: widoczny aż do dojechania do końca, tam gaśnie. */
-  @keyframes tabs-edge-right {
-    94% {
-      opacity: 1;
-    }
-    100% {
-      opacity: 0;
-    }
+  /* Szewron przycisku zwijania obraca się o 180°. */
+  .side-nav.is-collapsed .side-collapse .nav-icon {
+    transform: rotate(180deg);
+  }
+
+  /* Pełne nazwy zwiniętych zakładek niesie natywny atrybut title (ustawiany w
+   * layout.ts gdy rail jest zwinięty) — renderuje się POZA clipem przewijanego
+   * railu, więc nie wymaga overflow:visible i nie koliduje z overflow-y:auto. */
+}
+
+/* ---- Widoczność przełączników: desktop (zwijanie) vs mobile (disclosure) - */
+@media (min-width: 900px) {
+  .side-menu-toggle {
+    display: none;
+  }
+  .side-collapse {
+    display: inline-flex;
+  }
+}
+
+@media (max-width: 899.98px) {
+  .side-collapse {
+    display: none;
+  }
+
+  .side-menu-toggle {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    min-height: 44px;
+    padding: var(--space-2) var(--space-3);
+    color: var(--text);
+    background-color: var(--panel-2);
+    background-image: var(--grad-panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-family: var(--font-body);
+    font-weight: var(--weight-medium);
+    cursor: pointer;
+  }
+
+  .side-menu-toggle .nav-icon {
+    flex: none;
+    width: 1.25rem;
+    height: 1.25rem;
+  }
+
+  .side-menu-current {
+    margin-inline-start: auto;
+    color: var(--muted);
+    font-size: var(--text-sm);
+  }
+
+  /* Rail układa się NAD treścią (kolumna). */
+  .app-body {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .side-nav {
+    width: 100%;
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+
+  /* Domyślnie disclosure zwinięty… */
+  .side-tabs {
+    display: none;
+  }
+
+  /* …rozwinięty po otwarciu menu. Lista jest w przepływie (position:static), więc
+   * 4 nagłówki grup + 16 zakładek (~20 wierszy) zepchnęłyby treść daleko w dół na
+   * telefonie. Cap wysokości + własne przewijanie: menu przewija się zamiast
+   * spychać panel poza ekran; overscroll-behavior:contain trzyma scroll w menu. */
+  .side-nav.is-open .side-tabs {
+    display: flex;
+    max-height: 70vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* Desktopowe zwinięcie ignorowane na mobile. */
+  .side-nav.is-collapsed {
+    width: 100%;
+  }
+
+  /* Etykiety ZAWSZE widoczne na dotyku (brak hovera). */
+  .side-nav.is-collapsed .tab .tab-label {
+    position: static;
+    width: auto;
+    height: auto;
+    clip: auto;
+    margin: 0;
   }
 }
 
@@ -756,19 +1018,15 @@ html {
 
 /* ============================================================================
  * Ograniczony ruch — globalny wyłącznik animacji/przejść jest w base.css.
- * Tu jawnie wyłączamy płynne przewijanie tablisty (np. focus-into-view).
+ * Tu jawnie wyłączamy ruch wprowadzony przez rail (wjazd listwy wskaźnika oraz
+ * obrót szewrona) wg kontraktu WCAG 2.3.3 — szewron wciąż się odwraca, tylko
+ * natychmiast. (.tabpanel-enter / .tab-pulse są wyłączane w motion.css.)
  * ========================================================================== */
 @media (prefers-reduced-motion: reduce) {
-  .tabs.container {
-    scroll-behavior: auto;
-  }
-
-  /* Zanik krawędzi nie ma już śledzić przewijania (to też ruch) — wyłączamy
-   * animację sterowaną przewijaniem; podpowiedź degraduje do statycznego zaniku
-   * obu krawędzi (reguły bazowe wyżej), spójnie z przeglądarkami bez wsparcia. */
-  .tabs-bar::before,
-  .tabs-bar::after {
-    animation-name: none;
+  .side-nav .tab.is-active::before,
+  .side-collapse .nav-icon {
+    animation: none;
+    transition: none;
   }
 }
 

@@ -241,4 +241,13 @@
    * fokus przewinięty „do góry" nie chował się POD HUD-em (WCAG 2.2 SC 2.4.11).
    * Wartość z zapasem pokrywa HUD także po zawinięciu na wąskich ekranach. */
   --hud-h: 5.5rem;
+
+  /* ---- Układ: powłoka z bocznym nawigatorem (M12.1) -------------------- */
+  /* Wspólny, szerszy cap dla HUD-u, klastra treści i stopki — krawędzie trzech
+   * pasm równają się na tej samej wyśrodkowanej szerokości, a rail (osobny od
+   * treści) nie odbiera już miejsca panelom. */
+  --shell-max: 1600px;
+  /* Szerokość pionowego railu nawigacji oraz jego wariant zwinięty (sam rząd ikon). */
+  --rail-w: 15rem;            /* 240px — rail z etykietami        */
+  --rail-w-collapsed: 3.75rem; /* 60px — rail tylko z ikonami      */
 }

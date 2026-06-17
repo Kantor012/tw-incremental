@@ -3,7 +3,7 @@ import { RESOURCE_IDS, type ResourceId, type VillageId } from '../engine/state'
 import { formatNumber, formatInt, formatRate, formatTime } from '../engine/format'
 import { usedPopulation } from '../systems/recruitment'
 import type { UiCtx, Panel } from './types'
-import { h, resourceIcon, shieldIcon, RESOURCE_NAMES } from './dom'
+import { h, resourceIcon, shieldIcon, navIcon, chevronIcon, menuIcon, RESOURCE_NAMES } from './dom'
 import { villageCrest } from './crest'
 
 /**
@@ -52,6 +52,56 @@ function persistTabId(id: string): void {
     /* ignore */
   }
 }
+
+/** localStorage key remembering whether the desktop rail is collapsed (UI pref). */
+const NAV_COLLAPSED_STORAGE_KEY = 'tw-incremental:nav-collapsed'
+
+/**
+ * Read the persisted desktop-rail collapse preference ('1' = collapsed). Best-effort,
+ * same try/catch discipline as {@link restoreTabIndex}: this is a UI PREF (like the
+ * active tab), never game state, so a blocked storage simply degrades to "expanded".
+ */
+function readNavCollapsed(): boolean {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      return localStorage.getItem(NAV_COLLAPSED_STORAGE_KEY) === '1'
+    }
+  } catch {
+    /* private mode / blocked storage — fall through to expanded */
+  }
+  return false
+}
+
+/** Persist the desktop-rail collapse preference (best-effort; storage may be unavailable). */
+function persistNavCollapsed(collapsed: boolean): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(NAV_COLLAPSED_STORAGE_KEY, collapsed ? '1' : '0')
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/** One sidebar group: a visible heading + the ordered tab ids it contains. */
+interface NavGroup {
+  label: string
+  tabIds: string[]
+}
+
+/**
+ * Sidebar grouping (M12.1). The rail walks these in order, rendering a decorative
+ * heading then the group's tabs. This is purely PRESENTATION ordering — adding/
+ * moving a tab is a data edit here; tabs not covered by any group fall into a
+ * trailing "Inne" group so none is ever dropped (see the build loop). The active
+ * tab is restored/persisted by ID, so regrouping needs no migration.
+ */
+const NAV_GROUPS: NavGroup[] = [
+  { label: 'Osada', tabIds: ['buildings', 'villages', 'market', 'automation'] },
+  { label: 'Wojna', tabIds: ['army', 'map', 'raids', 'reports'] },
+  { label: 'Postęp', tabIds: ['tech', 'prestige', 'era', 'dynasty', 'challenges'] },
+  { label: 'Archiwum', tabIds: ['achievements', 'codex', 'save'] },
+]
 
 /** Set a `.bar > i` fill width and the host's aria-valuenow from a 0..100 pct. */
 function setBar(bar: HTMLElement, pct: number): void {
@@ -327,6 +377,22 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   hud.appendChild(hudInner)
   shell.appendChild(hud)
 
+  // --hud-h reflects the REAL HUD height instead of a static guess (Fix 4/7). It
+  // drives the sticky rail's `top`, the rail's max-height and the scroll-padding/
+  // scroll-margin that keep keyboard-focused tabs/content out from behind the
+  // banner (WCAG 2.2 SC 2.4.11). `.hud-inner` is flex-wrap, so on mid widths the
+  // HUD wraps to ~2 rows and the 5.5rem token under-measures — pinning the rail
+  // beneath the banner. Publish the measured height to :root so it cascades to
+  // html's scroll-padding-top AND every descendant. Layout-driven only (no Date/
+  // Math.random, no game state); the token stays as the static fallback. Guarded
+  // for headless/jsdom where ResizeObserver is absent.
+  if (typeof ResizeObserver !== 'undefined') {
+    const hudResize = new ResizeObserver(() => {
+      document.documentElement.style.setProperty('--hud-h', hud.offsetHeight + 'px')
+    })
+    hudResize.observe(hud)
+  }
+
   /**
    * Refresh every HUD node from the ACTIVE village. Runs on EVERY store revision
    * AND on every village selection (the effect tracks both signals). Falls back to
@@ -368,15 +434,52 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     setBar(popStat.bar, v.popCap.gt(0) ? pctOf(used.div(v.popCap).mul(100).toNumber()) : 0)
   }
 
-  // ---- b) Tab bar (tablist) + c) content area (tabpanels) ------------------
-  const tabsBar = h('nav', 'tabs-bar')
-  tabsBar.setAttribute('aria-label', 'Nawigacja sekcji')
-  const tablist = h('div', 'tabs container')
-  tablist.setAttribute('role', 'tablist')
-  tablist.setAttribute('aria-label', 'Sekcje gry')
-  tabsBar.appendChild(tablist)
+  // ---- b) Side navigation rail (vertical tablist) + c) content (tabpanels) --
+  // The horizontal strip is replaced by a LEFT RAIL: a grouped, vertical tablist
+  // collapsible to an icon-only rail on desktop, and a disclosure ("Menu") on
+  // mobile. The tablist/tabpanel wiring, selectTab, the roving tabindex and the
+  // keyboard nav are unchanged — only the chrome around them moved.
+  const sideNav = h('nav', 'side-nav')
+  sideNav.setAttribute('aria-label', 'Nawigacja sekcji')
 
-  const main = h('main', 'tabpanels container')
+  // Head row: mobile disclosure toggle (CSS-hidden on desktop) + desktop collapse
+  // toggle (CSS-hidden on mobile). Both icons are decorative; their accessible
+  // names come from text / aria-label below.
+  const sideHead = h('div', 'side-nav-head')
+
+  const menuToggle = h('button', 'side-menu-toggle')
+  menuToggle.type = 'button'
+  menuToggle.appendChild(menuIcon())
+  menuToggle.appendChild(h('span', 'side-menu-text', 'Menu'))
+  // Decorative context label: selectTab writes the active section name here so a
+  // collapsed mobile disclosure still tells the user where they are.
+  const menuCurrent = h('span', 'side-menu-current')
+  menuToggle.appendChild(menuCurrent)
+  menuToggle.setAttribute('aria-expanded', 'false')
+  menuToggle.setAttribute('aria-controls', 'side-tabs')
+
+  const sideCollapse = h('button', 'side-collapse')
+  sideCollapse.type = 'button'
+  // Widoczna etykieta + szewron: czyni z railowego nagłówka rozpoznawalną kontrolkę
+  // (NN/Jakob: same ikony bez etykiety są słabo odkrywane). Etykietę chowa CSS w
+  // stanie zwiniętym; dostępną nazwę i tak niesie aria-label (ustawiany niżej).
+  sideCollapse.appendChild(h('span', 'side-collapse-text', 'Zwiń'))
+  sideCollapse.appendChild(chevronIcon())
+
+  sideHead.appendChild(menuToggle)
+  sideHead.appendChild(sideCollapse)
+  sideNav.appendChild(sideHead)
+
+  // The vertical tablist itself (id is the disclosure's aria-controls target).
+  const tablist = h('div', 'side-tabs')
+  tablist.id = 'side-tabs'
+  tablist.setAttribute('role', 'tablist')
+  tablist.setAttribute('aria-orientation', 'vertical')
+  tablist.setAttribute('aria-label', 'Sekcje gry')
+  sideNav.appendChild(tablist)
+
+  // main loses the `container` cap: it fills the remaining body-row width.
+  const main = h('main', 'tabpanels')
 
   interface TabEntry {
     id: string
@@ -386,39 +489,82 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   }
   const entries: TabEntry[] = []
 
-  for (let i = 0; i < tabs.length; i++) {
-    const spec = tabs[i]
+  // Group ordering: assign each spec to its NAV_GROUPS group (first match wins);
+  // any spec NOT covered by a group falls into a trailing "Inne" group so no tab
+  // is ever dropped. The flat `orderedTabs` is the canonical order — entries[],
+  // the rail buttons and the panels all follow it, so visual order == arrow-key
+  // order == panel pairing.
+  const covered = new Set<string>()
+  const renderGroups: { label: string; specs: TabSpec[] }[] = []
+  for (const group of NAV_GROUPS) {
+    const specs: TabSpec[] = []
+    for (const id of group.tabIds) {
+      const spec = tabs.find((t) => t.id === id)
+      if (spec && !covered.has(spec.id)) {
+        specs.push(spec)
+        covered.add(spec.id)
+      }
+    }
+    if (specs.length > 0) renderGroups.push({ label: group.label, specs })
+  }
+  const leftover = tabs.filter((t) => !covered.has(t.id))
+  if (leftover.length > 0) renderGroups.push({ label: 'Inne', specs: leftover })
+  const orderedTabs: TabSpec[] = renderGroups.flatMap((g) => g.specs)
 
-    const tab = h('button', 'tab', spec.label)
-    tab.type = 'button'
-    tab.id = 'tab-' + spec.id
-    tab.setAttribute('role', 'tab')
-    tab.setAttribute('aria-controls', 'panel-' + spec.id)
-    tab.setAttribute('aria-selected', 'false')
-    // Roving tabindex: only the active tab is in the Tab order; arrow keys move
-    // focus within the tablist (set in selectTab).
-    tab.tabIndex = -1
-    tab.addEventListener('click', () => selectTab(i, true))
-    tablist.appendChild(tab)
+  let buildIndex = 0
+  for (const group of renderGroups) {
+    // Decorative group heading: aria-hidden + role=presentation removes it from the
+    // a11y tree, so the tablist's exposed children are exactly the role=tab buttons.
+    const groupLabel = h('div', 'side-group-label')
+    groupLabel.setAttribute('aria-hidden', 'true')
+    groupLabel.setAttribute('role', 'presentation')
+    groupLabel.appendChild(h('span', 'side-group-text', group.label))
+    tablist.appendChild(groupLabel)
 
-    const panelWrap = h('section', 'tabpanel')
-    panelWrap.id = 'panel-' + spec.id
-    panelWrap.setAttribute('role', 'tabpanel')
-    panelWrap.setAttribute('aria-labelledby', 'tab-' + spec.id)
-    panelWrap.tabIndex = 0
-    panelWrap.hidden = true
-    // Nagłówek sekcji (h2) dla nawigacji po nagłówkach: domyka łańcuch h1 > h2 >
-    // h3, więc podtytuły paneli (h3) nigdy nie przeskakują poziomu. Wizualnie
-    // ukryty — sekcję nazywa już zakładka (aria-labelledby → tab-<id>).
-    panelWrap.appendChild(h('h2', 'visually-hidden', spec.label))
-    const panel = spec.create(ctx)
-    panelWrap.appendChild(panel.el)
-    main.appendChild(panelWrap)
+    for (const spec of group.specs) {
+      const i = buildIndex++
 
-    entries.push({ id: spec.id, tab, panelWrap, panel })
+      const tab = h('button', 'tab')
+      tab.type = 'button'
+      tab.id = 'tab-' + spec.id
+      tab.setAttribute('role', 'tab')
+      tab.setAttribute('aria-controls', 'panel-' + spec.id)
+      tab.setAttribute('aria-selected', 'false')
+      // Roving tabindex: only the active tab is in the Tab order; arrow keys move
+      // focus within the tablist (set in selectTab).
+      tab.tabIndex = -1
+      // data-label feeds the collapsed-rail CSS tooltip AND the mobile context label.
+      tab.dataset.label = spec.label
+      // navIcon is decorative (aria-hidden); the span carries the accessible name.
+      tab.appendChild(navIcon(spec.id))
+      tab.appendChild(h('span', 'tab-label', spec.label))
+      // A mouse/touch pick also collapses the mobile disclosure; keyboard arrows
+      // (selectTab without closeMobileMenu) keep the list open for traversal.
+      tab.addEventListener('click', () => {
+        selectTab(i, true)
+        closeMobileMenu()
+      })
+      tablist.appendChild(tab)
+
+      const panelWrap = h('section', 'tabpanel')
+      panelWrap.id = 'panel-' + spec.id
+      panelWrap.setAttribute('role', 'tabpanel')
+      panelWrap.setAttribute('aria-labelledby', 'tab-' + spec.id)
+      panelWrap.tabIndex = 0
+      panelWrap.hidden = true
+      // Nagłówek sekcji (h2) dla nawigacji po nagłówkach: domyka łańcuch h1 > h2 >
+      // h3, więc podtytuły paneli (h3) nigdy nie przeskakują poziomu. Wizualnie
+      // ukryty — sekcję nazywa już zakładka (aria-labelledby → tab-<id>).
+      panelWrap.appendChild(h('h2', 'visually-hidden', spec.label))
+      const panel = spec.create(ctx)
+      panelWrap.appendChild(panel.el)
+      main.appendChild(panelWrap)
+
+      entries.push({ id: spec.id, tab, panelWrap, panel })
+    }
   }
 
-  let activeIndex = restoreTabIndex(tabs)
+  let activeIndex = restoreTabIndex(orderedTabs)
 
   /**
    * Activate tab `index`: update aria-selected + roving tabindex + `.is-active`,
@@ -446,6 +592,10 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     p.classList.add('tabpanel-enter')
     p.addEventListener('animationend', () => p.classList.remove('tabpanel-enter'), { once: true })
     if (moveFocus) entries[index].tab.focus()
+    // Mobile context label (decorative): name the active section beside "Menu" so a
+    // collapsed disclosure still shows where the player is. NOT a close trigger —
+    // selectTab also runs on mount + keyboard nav, which must keep the list open.
+    menuCurrent.textContent = entries[index].tab.dataset.label ?? ''
     persistTabId(entries[index].id)
     entries[index].panel.update()
   }
@@ -477,8 +627,81 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     selectTab(next, true)
   })
 
-  shell.appendChild(tabsBar)
-  shell.appendChild(main)
+  // ---- Collapse (desktop icon-rail) + mobile disclosure (ephemeral) --------
+  // Two independent UI prefs, NEITHER is game state. Collapse persists (like the
+  // active tab); the mobile open state is ephemeral (always closed on load).
+  let collapsed = readNavCollapsed()
+
+  /**
+   * Reflect the collapse state on the DOM. One STABLE a11y pattern (Fix 2): a
+   * NEXT-ACTION accessible name ("Zwiń/Rozwiń nawigację") with NO aria-pressed —
+   * a dynamic label + aria-pressed announced contradictory state ("Rozwiń …,
+   * pressed"). The same string is mirrored to a native `title` so mouse users get
+   * the hint too (Fix 5; with the visible "Zwiń" the name still contains it →
+   * WCAG 2.5.3 holds). Each collapsed icon also gets a native `title` = its label
+   * (Fix 3): the rail now scrolls (overflow-y:auto) so a CSS ::after tooltip would
+   * be clipped — title renders outside the clip and survives.
+   */
+  const applyCollapseState = (): void => {
+    sideNav.classList.toggle('is-collapsed', collapsed)
+    const label = collapsed ? 'Rozwiń nawigację' : 'Zwiń nawigację'
+    sideCollapse.setAttribute('aria-label', label)
+    sideCollapse.title = label
+    for (const en of entries) {
+      if (collapsed) en.tab.title = en.tab.dataset.label ?? ''
+      else en.tab.removeAttribute('title')
+    }
+  }
+  applyCollapseState()
+
+  const toggleCollapse = (): void => {
+    collapsed = !collapsed
+    applyCollapseState()
+    persistNavCollapsed(collapsed)
+  }
+  sideCollapse.addEventListener('click', toggleCollapse)
+
+  let menuOpen = false
+  const openMobileMenu = (): void => {
+    menuOpen = true
+    sideNav.classList.add('is-open')
+    menuToggle.setAttribute('aria-expanded', 'true')
+    // Land keyboard focus inside the list (on the active tab).
+    entries[activeIndex].tab.focus()
+  }
+  function closeMobileMenu(): void {
+    if (!menuOpen) return
+    menuOpen = false
+    sideNav.classList.remove('is-open')
+    menuToggle.setAttribute('aria-expanded', 'false')
+    // Return focus to a stable element so it is never lost when the list hides.
+    menuToggle.focus()
+  }
+  menuToggle.addEventListener('click', () => {
+    if (menuOpen) closeMobileMenu()
+    else openMobileMenu()
+  })
+
+  // Escape zamyka rozwiniętą listę (standardowe oczekiwanie dla disclosure/menu);
+  // fokus wraca na menuToggle przez closeMobileMenu. Handler na sideNav, bo fokus
+  // jest WEWNĄTRZ listy gdy otwarta; keydown tablisty ignoruje Escape, więc bez kolizji.
+  sideNav.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && menuOpen) {
+      e.preventDefault()
+      closeMobileMenu()
+    }
+  })
+  // Kliknięcie POZA railem także zamyka otwartą listę (strażnik menuOpen; toggle i
+  // zakładki są wewnątrz sideNav, więc to odpala się tylko przy realnym kliknięciu obok).
+  document.addEventListener('pointerdown', (e) => {
+    if (menuOpen && !sideNav.contains(e.target as Node)) closeMobileMenu()
+  })
+
+  // ---- Body row: rail + content fill the row; footer follows below ---------
+  const appBody = h('div', 'app-body')
+  appBody.appendChild(sideNav)
+  appBody.appendChild(main)
+  shell.appendChild(appBody)
 
   // ---- d) Footer (version + offline credit) --------------------------------
   const footer = h('footer', 'app-footer container muted')
