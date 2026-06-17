@@ -1,7 +1,10 @@
 import { effect } from '../engine/store'
-import { RESOURCE_IDS, type ResourceId, type VillageId } from '../engine/state'
+import { RESOURCE_IDS, type ResourceId, type VillageId, type GameState } from '../engine/state'
 import { formatNumber, formatInt, formatRate, formatTime } from '../engine/format'
 import { usedPopulation } from '../systems/recruitment'
+import { BUILDING_IDS } from '../content/buildings'
+import { UNIT_IDS } from '../content/units'
+import { tabVisible, TECH_AUTOMATION_NODE_IDS, DYNASTY_AUTOMATION_NODE_IDS } from './tab-visibility'
 import type { UiCtx, Panel } from './types'
 import { h, resourceIcon, shieldIcon, navIcon, chevronIcon, menuIcon, RESOURCE_NAMES } from './dom'
 import { villageCrest } from './crest'
@@ -28,20 +31,37 @@ export interface TabSpec {
 /** localStorage key remembering the last active tab across reloads. */
 const TAB_STORAGE_KEY = 'tw-incremental:tab'
 
-/** Read the persisted active-tab id, mapped to an index (0 when absent/unknown). */
-function restoreTabIndex(tabs: TabSpec[]): number {
+/**
+ * Index of the always-visible 'buildings' tab — the softlock-safe fallback used
+ * whenever a desired tab is hidden by progressive disclosure (M12.2). 'buildings'
+ * is one of the two tabs {@link tabVisible} can never hide, so this index is always
+ * a legal, visible selection. Degrades to 0 only if (impossibly) absent.
+ */
+function buildingsIndex(tabs: TabSpec[]): number {
+  const i = tabs.findIndex((t) => t.id === 'buildings')
+  return i >= 0 ? i : 0
+}
+
+/**
+ * Read the persisted active-tab id, mapped to an index. Falls back to the
+ * always-visible 'buildings' tab when there is no valid persisted id OR when the
+ * persisted tab is currently HIDDEN by progressive disclosure (M12.2) — focus and
+ * the opening panel must never land on a tab the player cannot see (no softlock).
+ */
+function restoreTabIndex(tabs: TabSpec[], state: GameState): number {
+  const fallback = buildingsIndex(tabs)
   try {
     if (typeof localStorage !== 'undefined') {
       const saved = localStorage.getItem(TAB_STORAGE_KEY)
       if (saved) {
         const idx = tabs.findIndex((t) => t.id === saved)
-        if (idx >= 0) return idx
+        if (idx >= 0 && tabVisible(tabs[idx].id, state)) return idx
       }
     }
   } catch {
-    /* private mode / blocked storage — fall through to the first tab */
+    /* private mode / blocked storage — fall through to the fallback tab */
   }
-  return 0
+  return fallback
 }
 
 /** Persist the active-tab id (best-effort; storage may be unavailable). */
@@ -113,6 +133,101 @@ function setBar(bar: HTMLElement, pct: number): void {
 /** Clamp a raw ratio*100 to a finite 0..100 percentage (NaN/∞ → full). */
 function pctOf(part: number): number {
   return Number.isFinite(part) ? Math.max(0, Math.min(100, part)) : 100
+}
+
+/**
+ * Alloc-free sum of building levels across the whole empire — mirrors tab-visibility's
+ * sumBuildingLevels but iterates the FIXED {@link BUILDING_IDS} instead of Object.values,
+ * so it allocates nothing on the hot per-frame coarse-signature path (M12.2 perf).
+ */
+function coarseBuildingSum(s: GameState): number {
+  let total = 0
+  for (const vid of s.villageOrder) {
+    const v = s.villages[vid]
+    if (!v) continue
+    const b = v.buildings
+    for (const bid of BUILDING_IDS) {
+      const lvl = b[bid]
+      if (typeof lvl === 'number' && lvl > 0) total += lvl
+    }
+  }
+  return total
+}
+
+/** Alloc-free "does any owned village hold any unit" (iterates the fixed {@link UNIT_IDS}). */
+function coarseAnyUnits(s: GameState): boolean {
+  for (const vid of s.villageOrder) {
+    const v = s.villages[vid]
+    if (!v) continue
+    const u = v.units
+    for (const uid of UNIT_IDS) {
+      const c = u[uid]
+      if (typeof c === 'number' && c > 0) return true
+    }
+  }
+  return false
+}
+
+/**
+ * The CHEAP coarse signature for progressive disclosure (M12.2). A string of the
+ * MONOTONIC scalars every {@link tabVisible} predicate reads — and NOTHING that needs a
+ * meta-tree fold (`effectiveMods` + its ~6 TechModifiers bags), a Decimal pow (`foundCost`)
+ * or the prestige/era score. recomputeVisibility() re-evaluates the real predicates only
+ * when this string changes, so the per-frame path stays an O(villages·buildings) scan with
+ * no bag allocation. It is strictly a SUPERSET trigger: any progression event that could
+ * flip a predicate also moves one of these scalars — building purchases bump the building
+ * sum; recruiting bumps anyUnits; battles/founding/scouting/trading bump the lifetime
+ * stats; the meta layers bump their account counts; an automation un/re-lock bumps the raw
+ * gateway node levels — so a reveal is never silently missed.
+ */
+function coarseVisibilitySig(s: GameState): string {
+  const st = s.stats
+  let sig =
+    s.villageOrder.length +
+    '|' +
+    coarseBuildingSum(s) +
+    '|' +
+    (coarseAnyUnits(s) ? '1' : '0') +
+    '|' +
+    s.battleLog.length +
+    '|' +
+    s.prestige.ascensions +
+    ',' +
+    s.prestige.totalEarned +
+    '|' +
+    s.era.eras +
+    '|' +
+    s.dynasty.dynasties +
+    '|' +
+    (s.challenge.activeId ?? '') +
+    ',' +
+    Object.keys(s.challenge.completed).length +
+    '|' +
+    Object.keys(s.achievements).length +
+    '|' +
+    st.villagesFounded +
+    ',' +
+    st.attacksWon +
+    ',' +
+    st.attacksLost +
+    ',' +
+    st.raidsRepelled +
+    ',' +
+    st.raidsLost +
+    ',' +
+    st.hordesRepelled +
+    ',' +
+    st.hordesBreached +
+    ',' +
+    st.scoutsReturned +
+    '|' +
+    (st.resourcesExchanged.gt(0) ? '1' : '0') +
+    '|'
+  // Raw automation-unlock node levels (the ONLY re-locking signal): tech gateways reset on
+  // ascension, the dynasty gateway persists — read them directly, never via effectiveMods.
+  for (const id of TECH_AUTOMATION_NODE_IDS) sig += (s.tech[id] ?? 0) + ','
+  for (const id of DYNASTY_AUTOMATION_NODE_IDS) sig += (s.dynasty.nodes[id] ?? 0) + ','
+  return sig
 }
 
 interface HudResRefs {
@@ -511,6 +626,11 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   if (leftover.length > 0) renderGroups.push({ label: 'Inne', specs: leftover })
   const orderedTabs: TabSpec[] = renderGroups.flatMap((g) => g.specs)
 
+  // Group-label elements paired with the tab ids they head — recomputeVisibility()
+  // hides a heading when ALL its tabs are hidden, so the rail never shows an empty
+  // "Wojna"/"Postęp" heading during early-game progressive disclosure (M12.2).
+  const navGroupEls: { labelEl: HTMLElement; tabIds: string[] }[] = []
+
   let buildIndex = 0
   for (const group of renderGroups) {
     // Decorative group heading: aria-hidden + role=presentation removes it from the
@@ -520,6 +640,7 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     groupLabel.setAttribute('role', 'presentation')
     groupLabel.appendChild(h('span', 'side-group-text', group.label))
     tablist.appendChild(groupLabel)
+    navGroupEls.push({ labelEl: groupLabel, tabIds: group.specs.map((sp) => sp.id) })
 
     for (const spec of group.specs) {
       const i = buildIndex++
@@ -564,7 +685,8 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     }
   }
 
-  let activeIndex = restoreTabIndex(orderedTabs)
+  const buildingsIdx = buildingsIndex(orderedTabs)
+  let activeIndex = restoreTabIndex(orderedTabs, state)
 
   /**
    * Activate tab `index`: update aria-selected + roving tabindex + `.is-active`,
@@ -600,25 +722,55 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     entries[index].panel.update()
   }
 
-  // Keyboard navigation within the tablist (automatic activation): arrows wrap,
-  // Home/End jump to the ends. Enter/Space need no special handling — a focused
-  // tab is already selected, and the button's native click covers them anyway.
+  // --- Progressive disclosure (M12.2): visibility helpers ------------------
+  // Hidden tabs (entry.tab.hidden) are skipped by keyboard nav so focus never
+  // lands on a tab the player cannot see. All four helpers operate over the
+  // CURRENT hidden flags, so they stay correct as the rail grows mid-game.
+
+  /** Next VISIBLE entry index from `from` in direction `dir`, wrapping over visible only. */
+  const nextVisible = (from: number, dir: 1 | -1): number => {
+    const n = entries.length
+    if (n === 0) return from
+    let i = from
+    for (let step = 0; step < n; step++) {
+      i = (i + dir + n) % n
+      if (!entries[i].tab.hidden) return i
+    }
+    return from
+  }
+
+  /** First VISIBLE entry index (Home). Falls back to 0 if (impossibly) none is visible. */
+  const firstVisible = (): number => {
+    for (let i = 0; i < entries.length; i++) if (!entries[i].tab.hidden) return i
+    return 0
+  }
+
+  /** Last VISIBLE entry index (End). Falls back to the last entry if none is visible. */
+  const lastVisible = (): number => {
+    for (let i = entries.length - 1; i >= 0; i--) if (!entries[i].tab.hidden) return i
+    return entries.length - 1
+  }
+
+  // Keyboard navigation within the tablist (automatic activation): arrows wrap over
+  // VISIBLE tabs only, Home/End jump to the first/last VISIBLE tab. Enter/Space need
+  // no special handling — a focused tab is already selected, and the button's native
+  // click covers them anyway.
   tablist.addEventListener('keydown', (e: KeyboardEvent) => {
     let next = -1
     switch (e.key) {
       case 'ArrowRight':
       case 'ArrowDown':
-        next = (activeIndex + 1) % entries.length
+        next = nextVisible(activeIndex, 1)
         break
       case 'ArrowLeft':
       case 'ArrowUp':
-        next = (activeIndex - 1 + entries.length) % entries.length
+        next = nextVisible(activeIndex, -1)
         break
       case 'Home':
-        next = 0
+        next = firstVisible()
         break
       case 'End':
-        next = entries.length - 1
+        next = lastVisible()
         break
       default:
         return
@@ -626,6 +778,54 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     e.preventDefault()
     selectTab(next, true)
   })
+
+  // recomputeVisibility() reconciles each nav button's `hidden` flag (and each group
+  // heading's) with tabVisible(). It runs every frame but is gated TWICE so the hot path
+  // stays cheap and allocation-free:
+  //   1. the cheap COARSE signature (monotonic scalars only — see coarseVisibilitySig)
+  //      guards PREDICATE EVALUATION: bail before calling any tabVisible() unless a
+  //      monotonic input some predicate reads has actually moved. This keeps the heavy
+  //      tabVisible() work (effectiveMods / foundCost / prestigeScore) OFF the per-frame
+  //      path — it fires only on a real progression event (or, for `automation`, a re-lock
+  //      after an ascension).
+  //   2. the FINE visibility signature (one char per tab) guards the DOM WRITES below — it
+  //      changes only when a tab actually flips, so the DOM is touched rarely.
+  // Panels/entries are never destroyed (the reports pulse needs the reports entry alive
+  // while hidden); only the rail button is hidden.
+  let coarseSig = ''
+  let visibilitySig = ''
+  const recomputeVisibility = (): void => {
+    const st = ctx.store.state
+    // (1) Coarse gate: skip the predicate fold entirely unless a relevant scalar moved.
+    const coarse = coarseVisibilitySig(st)
+    if (coarse === coarseSig) return
+    coarseSig = coarse
+
+    // (2) A coarse input moved → evaluate the real predicates; the fine sig gates the DOM.
+    let sig = ''
+    for (const en of entries) sig += tabVisible(en.id, st) ? '1' : '0'
+    if (sig === visibilitySig) return
+    visibilitySig = sig
+
+    for (let i = 0; i < entries.length; i++) entries[i].tab.hidden = sig[i] === '0'
+    // Hide a group heading when ALL its tabs are hidden (no empty headings early on).
+    for (const g of navGroupEls) {
+      let anyVisible = false
+      for (let k = 0; k < g.tabIds.length; k++) {
+        const idx = entries.findIndex((en) => en.id === g.tabIds[k])
+        if (idx >= 0 && sig[idx] === '1') {
+          anyVisible = true
+          break
+        }
+      }
+      g.labelEl.hidden = !anyVisible
+    }
+    // SOFTLOCK GUARD: if the active tab just became hidden, retreat to the
+    // always-visible 'buildings' tab so the player is never stranded.
+    if (entries[activeIndex] && entries[activeIndex].tab.hidden) {
+      selectTab(buildingsIdx, false)
+    }
+  }
 
   // ---- Collapse (desktop icon-rail) + mobile disclosure (ephemeral) --------
   // Two independent UI prefs, NEITHER is game state. Collapse persists (like the
@@ -712,8 +912,12 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   shell.appendChild(footer)
 
   // ---- Reactivity ----------------------------------------------------------
-  // Show the initial tab (also runs its first update), then subscribe a single
-  // effect that refreshes the HUD + ONLY the active panel on every revision.
+  // Apply progressive disclosure ONCE before the first paint so hidden tabs never
+  // flash visible, then show the initial tab (also runs its first update) and
+  // subscribe a single effect that refreshes the HUD + ONLY the active panel on
+  // every revision. restoreTabIndex already kept activeIndex on a visible tab, so
+  // this initial recompute never trips the softlock guard.
+  recomputeVisibility()
   selectTab(activeIndex, false)
   // Puls "nowy raport": tani, O(1) cache ostatniego wpisu battleLog. battleLog to
   // ograniczone okno przesuwne (długość się nasyca), więc porównujemy TOŻSAMOŚĆ
@@ -745,6 +949,11 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
       }
     }
     lastReportTop = top
+    // Reveal/relock tabs the instant their stage unlocks (cheap: a no-op unless the
+    // coarse signature changed, so the heavy predicate fold stays off the per-frame path).
+    // May retreat the active tab to 'buildings' via its softlock guard, so it runs BEFORE
+    // the final active-panel update below.
+    recomputeVisibility()
     rebuildVillageSwitch()
     updateVillageActive()
     updateHud()
