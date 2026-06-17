@@ -4,6 +4,9 @@ import './ui/styles/layout.css'
 // Ruch + mikro-interakcje (M11.3): wczytany PO layout.css, by mógł nadpisywać
 // pojedyncze reguły (skrócone przejście paska, docisk karty). Czysto prezentacyjny.
 import './ui/styles/motion.css'
+// Toasty celebracyjne (M11.6): kontener live-region + karta toasta. Wczytane PO
+// layout.css (spełnia wymóg „po layout.css"); czysto prezentacyjne, zero logiki gry.
+import './ui/styles/toast.css'
 
 import { createInitialState, GameStore, type GameState, type VillageId } from './engine/state'
 import { signal } from './engine/store'
@@ -29,6 +32,8 @@ import { newDynasty, purchaseDynasty } from './systems/dynasty'
 import { abandonChallenge, startChallenge } from './systems/challenges'
 import type { UnitId } from './content/units'
 import { mountApp } from './ui/app'
+import { mountToasts } from './ui/toast'
+import type { UiCtx } from './ui/types'
 
 /**
  * Browser entry point. Boots the persisted (or fresh) state, credits offline
@@ -63,7 +68,10 @@ const activeVillageId = signal<VillageId>(store.state.villageOrder[0])
 const root = document.getElementById('app')
 if (!root) throw new Error('#app')
 
-mountApp(root, {
+// Nazwany ctx (zamiast literału w wywołaniu): ten SAM obiekt trafia do mountApp
+// i do mountToasts — bez tego watcher toastów nie miałby dostępu do store. Adnotacja
+// UiCtx zachowuje kontekstowe typowanie nieotypowanych callbacków (onBuild/onFound…).
+const ctx: UiCtx = {
   store,
   bus,
   activeVillageId,
@@ -332,9 +340,15 @@ mountApp(root, {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.32.0',
+  version: '0.33.0',
   offlineSeconds,
-})
+}
+
+mountApp(root, ctx)
+// M11.6: watcher kamieni milowych + kontener toastów. Raz na sesję; subskrybuje
+// store.rev jak puls raportów (M11.3) i odpala gratulacyjny toast TYLKO na realny
+// wzrost licznika (read-only ze stanu). Disposer zwracany dla symetrii — sesja go nie woła.
+mountToasts(ctx)
 
 loop.start()
 

@@ -1,0 +1,278 @@
+/* ============================================================================
+ * TW Incremental — Toasty kamieni milowych (M11.6)
+ * --------------------------------------------------------------------------
+ * Warstwa CZYSTO prezentacyjna: świętuje wielkie chwile (podbój wioski, ascensję,
+ * nową erę/dynastię, zburzenie fortecy, ukończone wyzwanie, odpartą hordę) lekkim,
+ * znikającym samoczynnie toastem w rogu ekranu. NIE dotyka stanu gry ani logiki:
+ * detekcja kamieni milowych żyje w toast.ts (cache-and-compare liczników stanu),
+ * a tu jest tylko skóra + ruch. Zero zewnętrznych assetów — głif to proceduralny
+ * SVG z dom.ts, reszta to CSS na tokenach (twarde ograniczenia projektu #1/#2).
+ *
+ * Kontrakt wczytywania: ten plik idzie PO base.css/layout.css/motion.css (main.ts).
+ * Rozmiar głifu wymusza reguła `.toast-glyph > svg` (selektor potomka bije
+ * swoistością klasy ikon na samym <svg>) — niezależnie od kolejności wczytywania.
+ *
+ * Klasy (nadawane przez toast.ts):
+ *   .toast-region                       — stały kontener-róg; ARIA live region
+ *   .toast                              — karta pojedynczego toasta
+ *   .toast--victory|--celebrate|--meta  — wariant tonalny (akcent krawędzi + głif)
+ *   .toast--leaving                     — stan wyjścia (animacja znikania)
+ *   .toast-glyph                        — proceduralny SVG (czysta dekoracja)
+ *   .toast-text                         — kolumna tekstu
+ *   .toast-title / .toast-message       — REALNY tekst (czyta go aria-live)
+ *   .toast-dismiss                      — przycisk „Zamknij"
+ *
+ * Wydajność (bramka jakości CLAUDE.md): animujemy WYŁĄCZNIE transform/opacity
+ * (kompozytor). Stos jest capowany w JS do ~3 kart — brak pracy per-klatka w CSS.
+ *
+ * Dostępność (WCAG 2.3.3 / 1.4.1 / 1.4.3):
+ *   - cały ruch wyłączany w @media (prefers-reduced-motion: reduce) na końcu pliku
+ *     (toast wtedy po prostu pojawia się i znika);
+ *   - ruch i kolor NIGDY nie są jedynym nośnikiem treści — komunikat niosą realne
+ *     teksty .toast-title/.toast-message (głif jest aria-hidden);
+ *   - kontener nie blokuje UI: pointer-events tylko na samych kartach.
+ * ========================================================================== */
+
+/* ----------------------------------------------------------------------------
+ * Kontener — stały róg ekranu (dół-prawo)
+ * --------------------------------------------------------------------------
+ * Róg dolny-prawy świadomie omija przyklejony HUD i pasek zakładek u góry, więc
+ * toasty nie zasłaniają krytycznych kontrolek. pointer-events:none na kontenerze
+ * przepuszcza klik/hover w głąb sceny — tylko karty (poniżej) łapią wskaźnik.
+ * Szerokość capowana do viewportu, by na wąskich ekranach nie wyjść poza krawędź.
+ * -------------------------------------------------------------------------- */
+.toast-region {
+  position: fixed;
+  right: var(--space-4);
+  bottom: var(--space-4);
+  z-index: var(--z-toast);
+
+  display: flex;
+  flex-direction: column;
+  /* Najnowszy toast dokładany jest na KONIEC (na dole, najbliżej rogu), więc przy
+   * przekroczeniu capa JS zdejmuje NAJSTARSZY z góry — wizualnie spójny stos. */
+  gap: var(--space-2);
+  align-items: stretch;
+
+  width: min(clamp(260px, 28vw, 360px), calc(100vw - var(--space-4) * 2));
+
+  /* Kontener przezroczysty dla wskaźnika — nie przechwytuje kliknięć w rogu. */
+  pointer-events: none;
+}
+
+/* ----------------------------------------------------------------------------
+ * Karta toasta — powierzchnia panelu + złoto-tonalny akcent
+ * --------------------------------------------------------------------------
+ * Najwyższa półka rampy (--surface-overlay) + gradient + warstwowy cień (--shadow-4,
+ * półka „toast") + połysk krawędzi = wrażenie unoszenia nad sceną. Lewa krawędź
+ * niesie akcent tonalny (zwycięstwo / świętowanie / meta), wzmocniony delikatnym
+ * halo w tym samym odcieniu. Kontrast --text/--muted na tej powierzchni trzyma AA.
+ * -------------------------------------------------------------------------- */
+.toast {
+  /* Domyślny ton = złoto; warianty poniżej podmieniają parę kolor + kanały RGB.
+   * Trzymamy je w zmiennych lokalnych, by JEDNA reguła karty malowała krawędź,
+   * halo i głif spójnym odcieniem. */
+  --toast-tone: var(--accent);
+  --toast-tone-rgb: var(--accent-rgb);
+
+  position: relative;
+  pointer-events: auto;
+
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  /* Zapas z prawej na przycisk „Zamknij" (pozycjonowany absolutnie). */
+  padding: var(--space-3);
+  padding-right: var(--space-5);
+
+  color: var(--text);
+  background-color: var(--surface-overlay);
+  background-image: var(--grad-panel-raised);
+  border: 1px solid var(--border-strong);
+  /* Celebracyjna krawędź akcentu — gruba listwa w odcieniu tonalnym. */
+  border-left: 3px solid var(--toast-tone);
+  border-radius: var(--radius-md);
+  box-shadow:
+    var(--shadow-4),
+    var(--edge-highlight),
+    0 0 16px rgba(var(--toast-tone-rgb), 0.18);
+
+  /* Wejście: łagodne wynurzenie w górę + ledwie wyczuwalne skalowanie. Kończy w
+   * spoczynku (opacity:1; transform:none), więc po animacji nic nie szarpie. */
+  animation: toast-in var(--dur-slow) var(--ease-out) both;
+}
+
+/* Warianty tonalne — tylko podmiana koloru akcentu + jego kanałów RGB. */
+.toast--victory {
+  /* Zwycięstwo militarne (podbój, forteca, odparta horda) — zieleń sukcesu. */
+  --toast-tone: var(--good);
+  --toast-tone-rgb: var(--good-rgb);
+}
+.toast--celebrate {
+  /* Świętowanie rozrostu (nowa osada) — sztandarowe złoto. */
+  --toast-tone: var(--accent);
+  --toast-tone-rgb: var(--accent-rgb);
+}
+.toast--meta {
+  /* Wielkie resety meta (ascensja, era, dynastia, wyzwanie) — fiolet łupu
+   * (odbicie --cat-plunder #b388d6; CSS nie wyłuska RGB z heksu, więc kanały
+   * podane wprost obok). „Transcendentny" odcień odróżnia meta od bitewnych. */
+  --toast-tone: #b388d6;
+  --toast-tone-rgb: 179, 136, 214;
+}
+
+/* Subtelny hover-cue (bez transformacji, by nie kolidować z animacją wejścia):
+ * mocniejsze halo tonalne. Pauza auto-dismissu na hover żyje w JS (clearTimeout). */
+.toast:hover {
+  box-shadow:
+    var(--shadow-4),
+    var(--edge-highlight),
+    0 0 22px rgba(var(--toast-tone-rgb), 0.3);
+}
+
+/* Stan wyjścia — JS dokłada klasę, na `animationend` zdejmuje element z DOM. Reguła
+ * jest PÓŹNIEJ w pliku niż .toast, więc jej `animation` nadpisuje wejście. */
+.toast--leaving {
+  animation: toast-out var(--dur-base) var(--ease) both;
+}
+
+/* ----------------------------------------------------------------------------
+ * Głif — proceduralny SVG (dekoracja), barwiony tonem i przygaszony
+ * --------------------------------------------------------------------------
+ * Ikony z dom.ts malują się w currentColor, więc `color` tu nadaje im odcień
+ * tonalny. Wrapper to kwadratowy box (grid + place-items:center), a ROZMIAR
+ * narzuca reguła `.toast-glyph > svg`: selektor potomka bije swoistością klasy
+ * ikon (.unit-icon/.building-icon/.shield) niesione przez samo <svg>, więc każdy
+ * kamień milowy ma jednolity, wyśrodkowany 2rem (bez tej reguły ikony niosłyby
+ * własne 1.25/1.5/2.5rem). flex:none chroni przed ściśnięciem przy długim tekście.
+ * -------------------------------------------------------------------------- */
+.toast-glyph {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--toast-tone);
+  /* Lekkie przygaszenie — głif to akcent, nie krzyk. */
+  opacity: 0.9;
+  /* Drobne wyrównanie wzrokowe do wiersza nagłówka. */
+  margin-top: 1px;
+}
+
+/* Dziecko-SVG wypełnia kwadrat wrappera. Selektor potomka ma WYŻSZĄ swoistość niż
+ * klasy ikon z dom.ts na tym samym <svg>, więc to ON ujednolica rozmiar głifu —
+ * niezależnie od tego, czy glif pochodzi z unitIcon/buildingIcon/shieldIcon, czy
+ * z lokalnych proceduralnych helperów (toast.ts). */
+.toast-glyph > svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* ----------------------------------------------------------------------------
+ * Tekst — realny komunikat (czyta go aria-live)
+ * -------------------------------------------------------------------------- */
+.toast-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  /* Pozwala tekstowi zawijać się zamiast rozpychać kartę. */
+  min-width: 0;
+  flex: 1;
+}
+
+.toast-title {
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  font-size: var(--text-base);
+  line-height: var(--leading-tight);
+  color: var(--text);
+}
+
+.toast-message {
+  font-size: var(--text-sm);
+  line-height: var(--leading-base);
+  color: var(--muted);
+}
+
+/* ----------------------------------------------------------------------------
+ * Przycisk „Zamknij" — ręczne odrzucenie (poza auto-dismissem)
+ * --------------------------------------------------------------------------
+ * Mały, przygaszony „×" w rogu karty. Focus-ring bierze z globalnego
+ * :focus-visible (base.css), więc tu go nie dublujemy. aria-label nadaje JS.
+ * -------------------------------------------------------------------------- */
+.toast-dismiss {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+
+  font-size: var(--text-lg);
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.toast-dismiss:hover {
+  color: var(--text);
+  background: var(--overlay-hi-2);
+}
+
+/* Krzyżyk wewnątrz przycisku — stały rozmiar, by globalny `svg{height:auto}`
+ * (base.css) go nie rozdął w nieokreślonym <button>; potomek bije swoistością. */
+.toast-dismiss > svg {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+/* ----------------------------------------------------------------------------
+ * @keyframes — wejście/wyjście (transform/opacity, kompozytorowo)
+ * -------------------------------------------------------------------------- */
+
+/* Wejście: świeży toast wnosi się w górę z drobnym skalowaniem (jak „przyleciał",
+ * nie mrugnął). Spoczynek = opacity:1; transform:none. */
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Wyjście: toast odsuwa się ku prawej krawędzi i gaśnie. JS sprząta go z DOM na
+ * `animationend`; `both` trzyma stan końcowy (opacity:0) do tego momentu. */
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateX(24px) scale(0.98);
+  }
+}
+
+/* ----------------------------------------------------------------------------
+ * Ograniczony ruch (WCAG 2.3.3) — toast po prostu pojawia się i znika
+ * --------------------------------------------------------------------------
+ * Znosimy obie animacje. Uwaga dla toast.ts: bez animacji NIE poleci zdarzenie
+ * `animationend`, więc usunięcie karty po `.toast--leaving` musi mieć w JS
+ * fallback (np. natychmiastowe zdjęcie / krótki setTimeout) — inaczej toast
+ * utknąłby przezroczysty w stosie.
+ * -------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .toast,
+  .toast--leaving {
+    animation: none;
+  }
+}
