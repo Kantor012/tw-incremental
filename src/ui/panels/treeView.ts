@@ -1,6 +1,6 @@
 import type { NodePos } from '../../systems/techLayout'
 import type { Panel } from '../types'
-import { h, svg, SVG_NS } from '../dom'
+import { h, svg, SVG_NS, pulseFx } from '../dom'
 
 /**
  * Generic Path-of-Exile-style CONSTELLATION renderer (M4.1).
@@ -1040,6 +1040,10 @@ export function buildTreeView(config: TreeViewConfig): Panel {
       return
     }
     const ok = config.purchase(id)
+    // Udany zakup: krótki puls sukcesu na GLIFIE węzła (.tech-node-shape) — element,
+    // którego klas update() nie nadpisuje (rekoncyliacja rusza tylko klasy stanu na
+    // grupie ref.g i krawędziach), więc fx-bump nie jest zbijany przez poniższy render.
+    if (ok) pulseFx(refById.get(id)?.shape)
     msg.textContent = ok ? 'Wykupiono: ' + node.name + '.' : 'Nie udało się wykupić węzła.'
     update()
   })

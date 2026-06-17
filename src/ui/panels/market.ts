@@ -11,7 +11,7 @@ import {
   exchangeRate,
 } from '../../systems/market'
 import type { UiCtx, Panel } from '../types'
-import { h, resourceIcon, RESOURCE_NAMES, emptyState, segmented } from '../dom'
+import { h, resourceIcon, RESOURCE_NAMES, emptyState, segmented, pulseFx } from '../dom'
 
 /**
  * Market panel — the „Rynek" screen (M9). The player-facing front end of the
@@ -210,6 +210,9 @@ export function createMarketPanel(ctx: UiCtx): Panel {
       const toName = ctx.store.state.villages[toId]?.name ?? toId
       msg.textContent = 'Wysłano kupców do: ' + toName + '.'
       for (const r of RESOURCE_IDS) rows[r].input.value = '0'
+      // Success pulse on the dispatch card (M12.4) — brief visual confirmation that
+      // the transport left; the in-flight list update below is the lasting cue.
+      pulseFx(form)
     } else {
       msg.textContent = 'Nie udało się wysłać kupców.'
     }
@@ -374,6 +377,9 @@ export function createMarketPanel(ctx: UiCtx): Panel {
         RESOURCE_NAMES[toRes] +
         '.'
       exAmountInput.value = '0'
+      // Success pulse on the exchange card (M12.4) — brief visual confirmation that
+      // the conversion went through (the receipt in exMsg is the lasting cue).
+      pulseFx(exForm)
     } else {
       exMsg.textContent = 'Nie udało się wymienić surowców.'
     }

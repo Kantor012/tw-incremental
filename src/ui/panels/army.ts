@@ -16,7 +16,7 @@ import { effectiveMods } from '../../systems/prestige'
 import { hordePower, hordeForecast } from '../../systems/hordes'
 import { HORDE_BREACH_RESOURCE_FRAC, HORDE_BREACH_ARMY_FRAC } from '../../content/hordes'
 import type { UiCtx, Panel } from '../types'
-import { h, unitIcon, RESOURCE_NAMES, collapsible } from '../dom'
+import { h, unitIcon, RESOURCE_NAMES, collapsible, pulseFx } from '../dom'
 import { applyForecastClass } from '../combatForecast'
 
 /**
@@ -314,7 +314,8 @@ export function createArmyPanel(ctx: UiCtx): Panel {
       const count = readCount()
       const verdict = canRecruit(v, id, count)
       if (verdict.ok) {
-        ctx.onRecruit(villageId, id, count)
+        const ok = ctx.onRecruit(villageId, id, count)
+        if (ok) pulseFx(card)
         recMsg.textContent = 'Rozpoczęto szkolenie: ' + def.name + ' ×' + count + '.'
       } else {
         recMsg.textContent = verdict.reason ?? 'Nie można rekrutować.'

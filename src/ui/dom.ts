@@ -1058,3 +1058,45 @@ export function segmented(
 
   return { root, select }
 }
+
+/* ============================================================================
+ * M12.4 — Puls potwierdzenia akcji (sukces)
+ * --------------------------------------------------------------------------
+ * Współdzielony prymityw warstwy „delight": gdy akcja pętli rdzeniowej się POWIODŁA
+ * (rozbudowa, rekrutacja, zakup węzła drzewa, ruch na Rynku), karta/węzeł raz „popa"
+ * krótkim, smacznym pulsem (skala + złota poświata). To CZYSTO prezentacyjne — żadnego
+ * stanu gry, zero importu store'a.
+ *
+ * Dyscyplina jak reszta motion.css: animacja żyje WYŁĄCZNIE w CSS (@keyframes .fx-bump),
+ * a JS tylko dokłada/zdejmuje samo-sprzątającą klasę na ZDARZENIE (nie w pętli ticka).
+ * Przy reduced-motion motion.css ustawia `animation: none` (animation-name: none), więc
+ * zdarzenie `animationend` NIGDY by nie padło — listener `once` nie posprzątałby klasy,
+ * a na stałych (raz budowanych, tylko rekonsyliowanych) kartach/węzłach klasa zostałaby
+ * na trwałe, a listenery kumulowałyby się przy każdej akcji. Dlatego dla reduced-motion
+ * robimy wczesny return: zero klasy, zero listenera — kontrakt „one-shot, samo-sprzątające"
+ * pozostaje spełniony także bez animacji.
+ * ========================================================================== */
+
+/**
+ * Retrigger-safe puls sukcesu na elemencie `el` (HTML karta LUB węzeł SVG).
+ *
+ * Zdejmuje klasę `fx-bump`, WYMUSZA synchroniczny reflow (odczyt `offsetWidth` dla HTML,
+ * `getBoundingClientRect()` dla SVG — `offsetWidth` istnieje tylko na HTMLElement), po czym
+ * dokłada klasę z powrotem. Dzięki temu animacja restartuje się od zera nawet w trakcie
+ * trwania (szybkie, powtórne kliknięcia). Klasę zdejmuje JEDNORAZOWY listener `animationend`
+ * (`once`), więc nigdy się nie kumuluje i sama się sprząta. Bezpieczny no-op dla null/undefined.
+ */
+export function pulseFx(el: HTMLElement | SVGElement | null | undefined): void {
+  if (!el) return
+  // Reduced-motion: motion.css ma `animation: none`, więc `animationend` nigdy nie padnie
+  // i listener `once` nie posprzątałby klasy (trwała klasa + kumulacja listenerów na stałych
+  // kartach/węzłach). Wczesny return = zero klasy, zero listenera; CSS `animation: none` zostaje.
+  if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+  el.classList.remove('fx-bump')
+  // Wymuszony reflow: bez niego ponowne dodanie klasy nie zrestartuje @keyframes.
+  if (el instanceof HTMLElement) void el.offsetWidth
+  else el.getBoundingClientRect()
+  el.classList.add('fx-bump')
+  // Jednorazowo, samo-sprzątająco: po zakończeniu animacji zdejmij klasę (bez kumulacji).
+  el.addEventListener('animationend', () => el.classList.remove('fx-bump'), { once: true })
+}

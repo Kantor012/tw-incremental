@@ -94,6 +94,29 @@
   }
 }
 
+/* Puls potwierdzenia akcji (M12.4): gdy akcja pętli rdzeniowej się POWIODŁA (rozbudowa,
+ * rekrutacja, zakup węzła, ruch na Rynku), karta/węzeł raz „popa" — drobne skalowanie
+ * w górę i z powrotem + krótki złoty rozbłysk. Poświatę niesie `filter: drop-shadow`
+ * (NIE box-shadow): drop-shadow renderuje się także na elementach SVG (box-shadow nie),
+ * więc ten sam keyframe ożywia kartę HTML i węzeł drzewa SVG, a poświata przylega do
+ * KSZTAŁTU elementu. Animujemy wyłącznie transform/filter (kompozytor). Start i koniec w
+ * spoczynku (scale 1, poświata przezroczysta), więc po jednym przebiegu (bez fill-mode)
+ * element wraca do swojego naturalnego cienia/transformu — bez resztkowego śladu. */
+@keyframes fx-bump {
+  0% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 rgba(var(--accent-rgb), 0));
+  }
+  40% {
+    transform: scale(1.035);
+    filter: drop-shadow(0 0 6px rgba(var(--accent-rgb), 0.55));
+  }
+  100% {
+    transform: scale(1);
+    filter: drop-shadow(0 0 0 rgba(var(--accent-rgb), 0));
+  }
+}
+
 /* ----------------------------------------------------------------------------
  * Klasy narzędziowe (włączane JS-em wyłącznie na ZDARZENIE; samo-sprzątane)
  * -------------------------------------------------------------------------- */
@@ -120,6 +143,18 @@
  * ją `animationend` (once). */
 .report-enter {
   animation: report-enter var(--dur-base) var(--ease-out) both;
+}
+
+/* Puls sukcesu — klasę dokłada pulseFx() (dom.ts) na UDANE zdarzenie akcji, z wymuszonym
+ * reflow (retrigger-safe), a zdejmuje ją listener `animationend` (once). JEDEN przebieg
+ * (~220ms), bez fill-mode → po końcu element wraca do spoczynku. `transform-box: fill-box`
+ * + `transform-origin: center` sprawiają, że SKALOWANIE odbywa się W MIEJSCU także dla
+ * węzłów SVG (domyślny origin SVG to 0,0 układu — bez tego węzeł „odjeżdżałby"). Dla HTML
+ * fill-box sprowadza się do content-box, więc karta także popa od swojego środka. */
+.fx-bump {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: fx-bump var(--dur-base) var(--ease-out) 1;
 }
 
 /* ----------------------------------------------------------------------------
@@ -191,6 +226,7 @@
   .tabpanel-enter,
   .tab-pulse,
   .report-enter,
+  .fx-bump,
   .tab.is-active::after {
     animation: none;
   }

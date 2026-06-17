@@ -16,7 +16,7 @@ import {
 import { nextCostAffordable, costReduction, villageDefenseMult } from '../../systems/buildings'
 import { aggregateTechMods } from '../../systems/tech'
 import type { UiCtx, Panel } from '../types'
-import { h, RESOURCE_NAMES, buildingIcon } from '../dom'
+import { h, RESOURCE_NAMES, buildingIcon, pulseFx } from '../dom'
 
 /**
  * Buildings panel — a RESPONSIVE GRID of building cards (replaces the old single
@@ -215,7 +215,8 @@ export function createBuildingsPanel(ctx: UiCtx): Panel {
     button.setAttribute('aria-label', 'Rozbuduj: ' + def.name)
     button.style.marginTop = 'auto'
     button.addEventListener('click', () => {
-      ctx.onBuild(ctx.activeVillageId.value, id)
+      const ok = ctx.onBuild(ctx.activeVillageId.value, id)
+      if (ok) pulseFx(card)
       update()
     })
 
