@@ -598,9 +598,24 @@ a:hover {
   gap: var(--space-2);
 }
 
+/* Tytuł karty (budynek ORAZ jednostka — obie używają .building-name) w kroju
+ * NAGŁÓWKOWYM (display serif), spójnie z resztą hierarchii nagłówków aplikacji — to
+ * jedyne miejsce, gdzie tytuł karty wpadał w systemowy bezszeryfowy domyślny krój.
+ * Pogrubienie + lekki tracking poszerza dystans do wiersza efektu pod spodem (mocniejsza
+ * hierarchia w karcie). Ta sama barwa na tej samej powierzchni — kontrast bez zmian. */
 .building-name {
-  font-weight: var(--weight-medium);
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.01em;
   color: var(--text);
+}
+
+/* Cieńszy pasek poziomu NA KARTACH BUDYNKÓW: przy poz. 1/30 pełna 12px rynna jest w
+ * ~96% pusta i ciąży przez całą siatkę. 6px zachowuje sygnał „na rzut oka", a wycisza
+ * chrom. Zakres celowo wąski (.building-card) — współdzielony .bar trzyma 12px tam,
+ * gdzie wysokość niesie znaczenie (HP/magazyn/populacja). */
+.building-card .bar {
+  height: 6px;
 }
 
 .building-level {
@@ -941,8 +956,12 @@ a:hover {
   gap: var(--space-2);
 }
 
+/* Nazwa celu na karcie wyprawy — ten sam nagłówkowy krój co .building-name, dla
+ * spójnej hierarchii tytułów kart między zakładkami. */
 .target-name {
-  font-weight: var(--weight-medium);
+  font-family: var(--font-display);
+  font-weight: var(--weight-bold);
+  letter-spacing: -0.01em;
   color: var(--text);
 }
 
