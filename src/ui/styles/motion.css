@@ -117,6 +117,30 @@
   }
 }
 
+/* Mignięcie wydatku w HUD (M12.5): gdy wartość surowca SPADA klatka-do-klatki (gracz
+ * wydał na rozbudowę/rekrutację/transport/giełdę), chip raz „dipuje" — drobny zjazd w
+ * dół i lekkie skurczenie + krótki rozbłysk w WŁASNEJ barwie surowca. Świadomie czyta
+ * się INACZEJ niż złoty pop sukcesu (fx-bump skaluje W GÓRĘ + złoto): tu koszt „opada",
+ * więc ruch jest skierowany w DÓŁ, a poświata bierze ton surowca (--spend-tone-rgb), nie
+ * akcent. Czerwień należy do .is-near-cap (ostrzeżenie capu) — tu jej nie ruszamy.
+ * Animujemy wyłącznie transform/filter (kompozytor). Start i koniec w spoczynku
+ * (transform:none, poświata przezroczysta), więc po jednym przebiegu (bez fill-mode) chip
+ * wraca do swojego naturalnego stanu — bez resztkowego śladu. */
+@keyframes hud-spend {
+  0% {
+    transform: none;
+    filter: drop-shadow(0 0 0 rgba(var(--spend-tone-rgb), 0));
+  }
+  35% {
+    transform: translateY(2px) scale(0.97);
+    filter: drop-shadow(0 0 8px rgba(var(--spend-tone-rgb), 0.5));
+  }
+  100% {
+    transform: none;
+    filter: drop-shadow(0 0 0 rgba(var(--spend-tone-rgb), 0));
+  }
+}
+
 /* ----------------------------------------------------------------------------
  * Klasy narzędziowe (włączane JS-em wyłącznie na ZDARZENIE; samo-sprzątane)
  * -------------------------------------------------------------------------- */
@@ -155,6 +179,28 @@
   transform-box: fill-box;
   transform-origin: center;
   animation: fx-bump var(--dur-base) var(--ease-out) 1;
+}
+
+/* Mignięcie wydatku — klasę dokłada updateHud() (layout.ts) na WYKRYTY spadek kwoty
+ * surowca, z wymuszonym reflow (retrigger-safe: seria szybkich wydatków odpala kolejne
+ * błyski), a zdejmuje ją listener `animationend` (once). JEDEN krótki przebieg
+ * (~var(--dur-base)), bez fill-mode → po końcu chip wraca do spoczynku.
+ * --spend-tone-rgb nadaje poświacie barwę KONKRETNEGO surowca (domyślnie akcent),
+ * dzięki czemu drewno/glina/żelazo błyskają własnym tonem, nie wspólnym złotem. */
+.hud-res {
+  --spend-tone-rgb: var(--accent-rgb);
+}
+.hud-res--wood {
+  --spend-tone-rgb: var(--wood-rgb);
+}
+.hud-res--clay {
+  --spend-tone-rgb: var(--clay-rgb);
+}
+.hud-res--iron {
+  --spend-tone-rgb: var(--iron-rgb);
+}
+.hud-spend {
+  animation: hud-spend var(--dur-base) var(--ease-out) 1;
 }
 
 /* ----------------------------------------------------------------------------
@@ -227,6 +273,7 @@
   .tab-pulse,
   .report-enter,
   .fx-bump,
+  .hud-spend,
   .tab.is-active::after {
     animation: none;
   }

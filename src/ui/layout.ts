@@ -1,5 +1,6 @@
 import { effect } from '../engine/store'
-import { RESOURCE_IDS, type ResourceId, type VillageId, type GameState } from '../engine/state'
+import { RESOURCE_IDS, type ResourceId, type VillageId, type Village, type GameState } from '../engine/state'
+import type { Decimal } from '../engine/decimal'
 import { formatNumber, formatInt, formatRate, formatTime } from '../engine/format'
 import { usedPopulation } from '../systems/recruitment'
 import { BUILDING_IDS } from '../content/buildings'
@@ -508,6 +509,48 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     hudResize.observe(hud)
   }
 
+  // ---- HUD spend-flash (M12.5) ---------------------------------------------
+  // Cel: gdy gracz WYDAJE surowiec (rozbudowa/rekrutacja/założenie/transport/giełda),
+  // chip HUD danego surowca na chwilę „mrugnie" — koszt widać, jak schodzi z zapasu.
+  //
+  // Jak wykrywamy wydatek BEZ nowego okablowania: surowce rosną wyłącznie z produkcji
+  // i są przycinane do capu (przycięcie nigdy nie schodzi PONIŻEJ bieżącej wartości).
+  // Zatem SPADEK kwoty klatka-do-klatki = wydatek (lub ładunek opuszczający wioskę).
+  // Porównujemy więc każdą wartość z jej wartością z poprzedniej klatki — bez
+  // eventbusa, bez sygnału, bez stanu. Przy PRZEŁĄCZENIU wioski różnica to zmiana
+  // kontekstu (inne zapasy), nie wydatek: wtedy przesiewamy bazę i NIE migamy.
+  //
+  // Klucz przesiewu to REFERENCJA obiektu wioski (nie jej id): reset w miejscu
+  // (ascend/era/dynastia/wyzwanie/import) odbudowuje stolicę jako NOWY obiekt z tym
+  // samym id 'v0', więc gdyby kluczem był string, spadek zapasów po resecie wziąłby
+  // się za wydatek. Porównanie referencji łapie to jako zmianę kontekstu (nowy obiekt
+  // → switched), a normalny tick mutuje TEN SAM obiekt w miejscu, więc realne wydatki
+  // wciąż porównują się poprawnie. Przełączenie wioski (inny obiekt) też jest pokryte.
+  let prevAmounts: Record<ResourceId, Decimal> | null = null
+  let prevVillage: Village | null = null
+
+  // Powrót do karty (visibilitychange → widoczna): main.ts robi wtedy applyOffline()
+  // + jeden store.commit(), a symulacja offline (najazdy/horda/automatyzacja) może
+  // zostawić surowiec NIŻEJ niż przy ukryciu karty — bez przełączenia wioski (ten sam
+  // obiekt), więc reset z findingu 1 tego NIE łapie. Wymuszamy przesiew, zerując klucz:
+  // ten listener jest rejestrowany z buildShell (mountApp) PRZED handlerem main.ts, więc
+  // pada pierwszy — kolejny commit → updateHud widzi null → switched → przesiew bez błysku.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) prevVillage = null
+  })
+
+  /** Odpal mignięcie „wydatku" na chipie surowca — retrigger-safe i samo-sprzątające. */
+  const flashSpend = (chip: HTMLElement): void => {
+    // Reduced-motion: motion.css ustawia `animation: none`, więc `animationend` nie
+    // padnie i listener `once` nie zdjąłby klasy (zostałaby na stałe). Wczesny return
+    // = zero klasy/listenera; nieruchomy chip pozostaje nieruchomy.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return
+    chip.classList.remove('hud-spend')
+    void chip.offsetWidth // wymuszony reflow — restart @keyframes przy serii wydatków
+    chip.classList.add('hud-spend')
+    chip.addEventListener('animationend', () => chip.classList.remove('hud-spend'), { once: true })
+  }
+
   /**
    * Refresh every HUD node from the ACTIVE village. Runs on EVERY store revision
    * AND on every village selection (the effect tracks both signals). Falls back to
@@ -516,20 +559,35 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
    */
   const updateHud = (): void => {
     const s = ctx.store.state
-    const v = s.villages[ctx.activeVillageId.value] ?? s.villages[s.villageOrder[0]]
+    // Wioska FAKTYCZNIE pokazywana: aktywny wybór albo pierwsza wioska, gdy wybór jest
+    // chwilowo nieaktualny. Śledzimy jej REFERENCJĘ pod spend-flash, żeby PRZEŁĄCZENIE
+    // wioski ORAZ reset w miejscu (nowy obiekt o tym samym id) nigdy nie zostały wzięte
+    // za wydatek — tick mutuje ten sam obiekt, więc realne wydatki wciąż się łapią.
+    const shownId: VillageId = s.villages[ctx.activeVillageId.value] ? ctx.activeVillageId.value : s.villageOrder[0]
+    const v = s.villages[shownId]
     const cap = v.storageCap
+    const switched = prevVillage !== v
+    prevVillage = v
+    if (prevAmounts === null) prevAmounts = {} as Record<ResourceId, Decimal>
+    const prev = prevAmounts
     // Resource amounts + rates; track the fullest resource for the storage bar
     // (storage cap is per-resource, so the closest-to-capping resource is the
     // binding "how full is the magazyn" signal — when it caps, production wastes).
     let fullest = v.resources[RESOURCE_IDS[0]]
     for (const id of RESOURCE_IDS) {
       const r = hudRes[id]
-      r.value.textContent = formatNumber(v.resources[id])
+      const cur = v.resources[id]
+      // Spadek względem poprzedniej klatki = wydatek → mignij chipem. Pomijamy przy
+      // przełączeniu wioski (to zmiana kontekstu, nie wydatek). Bez alokacji w pętli:
+      // nadpisujemy współdzielony rekord referencją istniejącego Decimala stanu.
+      if (!switched && cur.lt(prev[id])) flashSpend(r.chip)
+      prev[id] = cur
+      r.value.textContent = formatNumber(cur)
       r.rate.textContent = formatRate(v.production[id])
-      if (v.resources[id].gt(fullest)) fullest = v.resources[id]
+      if (cur.gt(fullest)) fullest = cur
       // Per-resource zapełnienie + ostrzeżenie near-cap (>= 90%) — gracz widzi
       // nadchodzące marnowanie produkcji zanim surowiec dobije do wspólnego capu.
-      const pct = cap.gt(0) ? pctOf(v.resources[id].div(cap).mul(100).toNumber()) : 0
+      const pct = cap.gt(0) ? pctOf(cur.div(cap).mul(100).toNumber()) : 0
       setBar(r.capBar, pct)
       const nearCap = pct >= 90
       r.chip.classList.toggle('is-near-cap', nearCap)

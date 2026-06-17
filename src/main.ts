@@ -343,7 +343,7 @@ const ctx: UiCtx = {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.40.0',
+  version: '0.41.0',
   offlineSeconds,
 }
 
