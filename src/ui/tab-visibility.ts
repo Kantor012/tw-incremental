@@ -6,8 +6,8 @@ import { pendingEraPoints } from '../systems/era'
  * PROGRESSIVE DISCLOSURE (M12.2) — which sidebar tabs are VISIBLE right now.
  *
  * A PURE, read-only module: {@link tabVisible} maps a sidebar tab id to a boolean
- * by reading EXISTING {@link GameState} only — there is NO new game state, NO save
- * field and NO migration (the save stays v22). The sidebar (src/ui/layout.ts) calls
+ * by reading EXISTING {@link GameState} only — this module itself adds NO game state,
+ * NO save field and NO migration (it is purely derived). The sidebar (src/ui/layout.ts) calls
  * this every time it reconciles the rail so each tab appears exactly when the player
  * reaches the game stage that makes it relevant — a calmer onboarding and a built-in
  * progression cue.
@@ -171,6 +171,12 @@ export function tabVisible(id: string, state: GameState): boolean {
       )
     case 'raids':
       return someVillage(s, hasAnyUnits) || hasFought(s)
+    case 'events':
+      // Revealed by the manually-built Wieża strażnicza (the mechanic's gate); the lifetime
+      // `eventsResolved` clause keeps it visible across a reset that rebuilds a fresh capital
+      // (monotonic — the counter only ever grows), so a player who has claimed an offer never
+      // loses the tab.
+      return someVillageHasBuilding(s, 'watchtower') || s.stats.eventsResolved > 0
     case 'reports':
       return (
         s.battleLog.length > 0 ||

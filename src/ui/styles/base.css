@@ -888,6 +888,60 @@ a:hover {
   margin-top: var(--space-2);
 }
 
+/* ---- Panel wydarzeń (M13) --------------------------------------------
+ * Kontenery budowane proceduralnie w ui/panels/events.ts. Globalny reset
+ * (* { margin: 0 }) zeruje marginesy akapitów, więc rytm pionowy niosą
+ * tu wyłącznie flex + gap (jak w innych panelach). Bez tego intro, wiersz
+ * licznika i sekcja oferty stykałyby się, a trzy kwoty windfallu (span =
+ * inline) zlałyby się w jedną linię. Wyłącznie tokeny odstępów. */
+.events-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* Sekcja oferty: nagłówek + trzy wzajemnie wykluczające się stany. */
+.event-offer,
+.event-idle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Podgląd nagrody: wiersze surowców zawijają się i mają oddech w poziomie
+ * (gap pionowy mniejszy, poziomy większy) — czytelne kwoty zamiast zlepka. */
+.event-grant {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+
+.event-grant-row {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* Ikona oferty — niech przylega do nazwy zamiast być rozrzucona na krawędzie
+ * przez .target-head { justify-content: space-between }, które zakłada parę
+ * nazwa↔poziom; tutaj para to ikona↔nazwa. */
+.event-offer-card .target-head {
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+
+/* Wrapper ikony (aria-hidden): nie ściska się przy długiej nazwie oferty. */
+.event-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+/* Proceduralny glif wydarzenia (SVG) — rozmiar wzorowany na .building-icon. */
+.event-glyph {
+  width: 1.6rem;
+  height: 1.6rem;
+}
+
 .save-actions {
   display: flex;
   gap: var(--space-2);

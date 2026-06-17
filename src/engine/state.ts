@@ -267,6 +267,18 @@ export const RAID_BASE_INTERVAL = 900
 export const HORDE_INTERVAL = 14400
 
 /**
+ * World-events schedule timing (M13). {@link EVENT_INTERVAL} is the seconds between OFFERS;
+ * {@link EVENT_TTL} is how long an unclaimed offer stays on the table before it lapses. Owned
+ * here (not in systems/events.ts) — exactly like {@link RAID_BASE_INTERVAL} / {@link HORDE_INTERVAL}
+ * — so createInitialState and the save migration can seed/re-arm the event clock without importing
+ * a system module (which would form a cycle); systems/events.ts imports them the other way. v1 keeps
+ * a FIXED interval (no per-level frequency scaling), so the watchtower's description must not promise
+ * faster events.
+ */
+export const EVENT_INTERVAL = 1200
+export const EVENT_TTL = 300
+
+/**
  * The single GLOBAL horde schedule (M7.2) — one telegraphed, escalating invasion of the
  * CAPITAL ({@link GameState.villageOrder}[0]), the active-defence counterpart to the
  * silent per-village raid drip. Unlike raids (a per-village timer), there is ONE horde
@@ -277,6 +289,39 @@ export interface HordeState {
   timer: number
   /** Escalation counter: rises by 1 after EVERY horde (repelled or breached); hordePower grows with it. Starts 0. */
   level: number
+}
+
+/**
+ * One ACTIVE world-event offer (M13) — the time-limited windfall currently on the table,
+ * waiting for the player to CLAIM it before {@link ttl} runs out. `defId` indexes the
+ * WORLD_EVENTS catalogue (content/events.ts); `roll` is the deterministic [0,1) scalar drawn
+ * from the events RNG stream at spawn that sizes the grant; `ttl` counts down on the tick and
+ * lapses the unclaimed offer at <= 0. Plain numbers (ttl seconds, roll a unit scalar) — the
+ * grant amounts are computed on claim (on Decimal), so the offer itself stays Decimal-free and
+ * serializes trivially.
+ */
+export interface ActiveEvent {
+  defId: string
+  ttl: number
+  roll: number
+}
+
+/**
+ * The single GLOBAL world-events schedule (M13) — one offer clock for the whole run, gated by
+ * the manually-built WATCHTOWER (the `watchtower` building, autoBuildable:false). Draws from its
+ * OWN seeded RNG stream ({@link rngState}, seeded from `seed + '::events'`) so it NEVER touches
+ * the combat-luck stream ({@link GameState.rngState}): with no watchtower {@link advanceEvents}
+ * is a pure no-op (timer/rng frozen, active stays null) and the main run + combat stream stay
+ * byte-identical to pre-M13. `timer` counts down to the next offer (re-armed to
+ * {@link EVENT_INTERVAL}); while an offer is `active` the timer is frozen.
+ */
+export interface EventState {
+  /** SEPARATE RNG stream state (never the combat stream) — only advanced at offer spawn. */
+  rngState: number
+  /** Seconds until the next offer; re-armed to {@link EVENT_INTERVAL}. Frozen while {@link active} is set. */
+  timer: number
+  /** The offer currently on the table, or null when idle. */
+  active: ActiveEvent | null
 }
 
 /**
@@ -625,6 +670,8 @@ export interface Stats {
   campsRazed: number
   /** Fortresses RAZED across the run's life (M7; bumped once per won fortress assault). */
   fortressesRazed: number
+  /** World-event offers CLAIMED across the run's life (M13; bumped once per claimEvent). */
+  eventsResolved: number
   /** Scout marches that completed and returned home. */
   scoutsReturned: number
   /** New villages FOUNDED by the player. */
@@ -672,6 +719,13 @@ export interface GameState {
    * deterministic tick. See {@link HordeState}.
    */
   horde: HordeState
+  /**
+   * The single GLOBAL world-events schedule (M13) — the time-limited windfall OFFERS, gated by
+   * the manually-built watchtower. Draws from its OWN seeded RNG stream (never the combat
+   * stream), so with no watchtower {@link advanceEvents} is a pure no-op and the run stays
+   * byte-identical to pre-M13. See {@link EventState}.
+   */
+  events: EventState
   /**
    * GLOBAL passive tree (M3.1): purchased level per node id (absent key = level 0).
    * The single account-wide tech state — its economic effects are TRANSIENT
@@ -966,6 +1020,7 @@ export function createInitialStats(): Stats {
     hordesBreached: 0,
     campsRazed: 0,
     fortressesRazed: 0,
+    eventsResolved: 0,
     scoutsReturned: 0,
     villagesFounded: 0,
     villagesConquered: 0,
@@ -988,6 +1043,15 @@ export function createInitialState(seed: string, now: number): GameState {
     world: generateWorld(seed),
     battleLog: [],
     horde: { timer: HORDE_INTERVAL, level: 0 },
+    // World events (M13) draw from a SEPARATE seeded RNG stream (seed + '::events'), exactly
+    // like world-gen uses its own stream — so they never perturb the combat-luck `rngState`.
+    // The clock starts a full interval out and idle (active null), and with no watchtower
+    // advanceEvents never touches any of this, keeping the run byte-identical to pre-M13.
+    events: {
+      rngState: RNG.fromString(seed + '::events').getState(),
+      timer: EVENT_INTERVAL,
+      active: null,
+    },
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },
     era: { points: 0, totalEarned: 0, eras: 0, nodes: {} },

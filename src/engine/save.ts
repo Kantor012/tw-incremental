@@ -1,4 +1,5 @@
 import { Decimal, isFiniteDecimal } from './decimal'
+import { RNG } from './rng'
 import type { GameState } from './state'
 import {
   recomputeDerived,
@@ -6,8 +7,10 @@ import {
   INITIAL_UNITS,
   RAID_BASE_INTERVAL,
   HORDE_INTERVAL,
+  EVENT_INTERVAL,
   createInitialStats,
 } from './state'
+import { WORLD_EVENTS_BY_ID } from '../content/events'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
@@ -54,7 +57,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 22
+export const SAVE_VERSION = 23
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -706,6 +709,62 @@ export function migrate(raw: any): any {
         : s.stats,
       version: 22,
     }),
+    // v22 -> v23: world events + watchtower (M13). A v22 save predates the new 'watchtower'
+    // BUILDING key (appended to BUILDING_IDS after 'stable'), the GLOBAL world-events schedule and
+    // the lifetime `stats.eventsResolved` counter, so backfill all three WITHOUT disturbing the
+    // player's progress:
+    //  - every village's `buildings` gains watchtower:0 by spreading INITIAL_BUILDINGS *first*, so
+    //    the save's own levels win over the seed and existing progress is preserved (exactly as the
+    //    v19->v20 market / v20->v21 stable backfills did). Without this, validateVillage — which
+    //    iterates the now-longer BUILDING_IDS — would reject the save;
+    //  - `events` — the { rngState, timer, active } schedule — seeded { rngState from a SEPARATE
+    //    stream (s.seed + '::events', so it NEVER touches the combat-luck rngState), timer a full
+    //    EVENT_INTERVAL out, active null }. An old save genuinely has no event history to recover;
+    //    starting idle is the honest default. A forward-compat save that already carries an object
+    //    `events` keeps it verbatim;
+    //  - `stats.eventsResolved` — the lifetime trophy counter — seeded to 0 (an event tally with no
+    //    recoverable trace), mirroring the v16->v17 fortressesRazed backfill.
+    // The watchtower's defense_bonus effect touches NO production/storage/pop stat and is
+    // autoBuildable:false, and advanceEvents is a no-op until a watchtower is built, so a migrated
+    // run is byte-identical to pre-M13 until the player builds one. Malformed entries are left as-is
+    // so validateState rejects them loudly. Nothing is recomputed here; importSave's recomputeDerived
+    // pass runs afterwards exactly as for every other migration.
+    22: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+        }
+      }
+      return {
+        ...s,
+        villages,
+        events: isObject(s.events)
+          ? s.events
+          : {
+              rngState: RNG.fromString(s.seed + '::events').getState(),
+              timer: EVENT_INTERVAL,
+              active: null,
+            },
+        stats: isObject(s.stats)
+          ? {
+              ...s.stats,
+              eventsResolved:
+                typeof s.stats.eventsResolved === 'number' ? s.stats.eventsResolved : 0,
+            }
+          : s.stats,
+        version: 23,
+      }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -1139,6 +1198,48 @@ export function validateState(s: unknown): GameState {
     throw new Error('save: invalid horde level')
   }
 
+  // GLOBAL world-events schedule (M13) — the single { rngState, timer, active } offer clock for the
+  // run. `rngState` is the SEPARATE events RNG stream state (a finite integer — never the combat
+  // stream, so a corrupt value cannot perturb combat luck); `timer` a finite, non-negative number of
+  // seconds until the next offer. `active` is null (idle) OR a well-formed offer: a `defId` that
+  // indexes the WORLD_EVENTS catalogue (a stray id would mis-resolve the grant and then get
+  // autosaved — CLAUDE.md hard rule #3), a finite, non-negative `ttl`, and a `roll` finite in [0, 1]
+  // (the unit scalar that sizes the windfall). The v22->v23 migration backfills the idle default, so
+  // a migrated save always passes.
+  const { events } = s
+  if (!isObject(events)) throw new Error('save: missing events')
+  if (typeof events.rngState !== 'number' || !Number.isInteger(events.rngState)) {
+    throw new Error('save: invalid events rngState')
+  }
+  if (typeof events.timer !== 'number' || !Number.isFinite(events.timer) || events.timer < 0) {
+    throw new Error('save: invalid events timer')
+  }
+  const activeEvent = events.active
+  if (activeEvent !== null) {
+    if (!isObject(activeEvent)) throw new Error('save: invalid events active')
+    if (
+      typeof activeEvent.defId !== 'string' ||
+      !Object.prototype.hasOwnProperty.call(WORLD_EVENTS_BY_ID, activeEvent.defId)
+    ) {
+      throw new Error('save: invalid events active defId')
+    }
+    if (
+      typeof activeEvent.ttl !== 'number' ||
+      !Number.isFinite(activeEvent.ttl) ||
+      activeEvent.ttl < 0
+    ) {
+      throw new Error('save: invalid events active ttl')
+    }
+    if (
+      typeof activeEvent.roll !== 'number' ||
+      !Number.isFinite(activeEvent.roll) ||
+      activeEvent.roll < 0 ||
+      activeEvent.roll > 1
+    ) {
+      throw new Error('save: invalid events active roll')
+    }
+  }
+
   // GLOBAL passive tree (M3.1) — a sparse `{ nodeId: level }` map (absent key = level
   // 0). It is the ONLY tech field that serializes; the economic multipliers it drives
   // are TRANSIENT (recomputeDerived re-derives them via aggregateTechMods after import),
@@ -1363,6 +1464,7 @@ export function validateState(s: unknown): GameState {
     'hordesBreached',
     'campsRazed',
     'fortressesRazed',
+    'eventsResolved',
     'scoutsReturned',
     'villagesFounded',
     'villagesConquered',

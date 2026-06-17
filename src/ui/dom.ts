@@ -558,9 +558,110 @@ export function buildingIcon(id: BuildingId): SVGSVGElement {
         nail('17', '15.5'),
       ])
     }
+    case 'watchtower': {
+      // Wieża strażnicza = wysoka, smukła wieża obserwacyjna z wystającą, blankowaną platformą
+      // widokową na szczycie, wąskim okienkiem-szczeliną i proporczykiem. Smukła sylwetka +
+      // nadwieszona platforma odróżniają ją od szerokiego Muru i krępego donżonu Ratusza.
+      const shaft = svg('rect', { x: '9', y: '8', width: '6', height: '12', fill: '#9aa3ad' })
+      const platform = svg('rect', { x: '7', y: '6', width: '10', height: '3', fill: '#9aa3ad' })
+      const merlon = (x: string): SVGElement =>
+        svg('rect', { x, y: '4', width: '2', height: '2', fill: '#9aa3ad' })
+      const slit = svg('rect', { x: '11', y: '11', width: '2', height: '4', rx: '0.6', fill: '#3a4048' })
+      const pole = svg('path', { d: 'M12 4 12 1', stroke: '#6b7682', 'stroke-width': '0.9', fill: 'none' })
+      const pennant = svg('path', { d: 'M12 1 16 2 12 3Z', fill: '#c1663b' })
+      return svgIcon('0 0 24 24', BUILDINGS[id].name, 'building-icon', [
+        shaft,
+        platform,
+        merlon('7'),
+        merlon('11'),
+        merlon('15'),
+        slit,
+        pole,
+        pennant,
+      ])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla budynku: ' + String(_exhaustive))
+    }
+  }
+}
+
+/**
+ * Procedural ikona wydarzenia świata (M13) — rysowana SVG, NIGDY emoji. Mechanika
+ * wydarzeń ma `defId: string` (data-driven, bez unii literałów), więc — inaczej niż
+ * {@link buildingIcon} — nie wymusza tu wyczerpalności `never`: znane wydarzenia
+ * dostają dedykowaną sylwetkę, a każde nowe (lub nieznane) — neutralny złoty błysk.
+ * Dzięki temu dodanie wpisu do `content/events.ts` NIGDY nie pokaże „tofu" na
+ * systemach bez fontu emoji (lekcja M11.9), zachowując twardą zasadę #2 (grafika
+ * tylko kodem). Dekoracyjna — etykietę niesie nazwa oferty obok (WCAG 1.4.1).
+ */
+export function eventIcon(defId: string, label = 'Wydarzenie'): SVGSVGElement {
+  switch (defId) {
+    case 'karawana': {
+      // Karawana kupiecka = sakwa ze złotem: pękaty mieszek ze ściągniętą szyjką
+      // i monetą — czyta się od razu jako „zastrzyk surowców / okazja".
+      const pouch = svg('path', {
+        d: 'M7 10 Q4 12 5 16 Q6 20 12 20 Q18 20 19 16 Q20 12 17 10 Z',
+        fill: '#d9a441',
+      })
+      const flaps = svg('path', { d: 'M9 9 L10.5 5.5 L12 9 L13.5 5.5 L15 9 Z', fill: '#c0824a' })
+      const tie = svg('rect', { x: '8', y: '8.4', width: '8', height: '2', rx: '0.6', fill: '#8a5a2b' })
+      const coin = svg('circle', { cx: '12', cy: '15', r: '2.7', fill: '#e3b755', stroke: '#8a5a2b', 'stroke-width': '0.8' })
+      const mark = svg('path', {
+        d: 'M12 13.4 V16.6 M10.4 15 H13.6',
+        stroke: '#8a5a2b',
+        'stroke-width': '0.8',
+        'stroke-linecap': 'round',
+      })
+      return svgIcon('0 0 24 24', label, 'event-glyph', [pouch, flaps, tie, coin, mark])
+    }
+    case 'zyla_zelaza': {
+      // Żyła żelaza = kilof: stalowy łuk głowicy z połyskiem nad drewnianym stylem.
+      const head = svg('path', {
+        d: 'M4 9 Q12 2 20 9',
+        fill: 'none',
+        stroke: '#9aa3ad',
+        'stroke-width': '2.8',
+        'stroke-linecap': 'round',
+      })
+      const shine = svg('path', {
+        d: 'M5.5 8 Q12 3 18.5 8',
+        fill: 'none',
+        stroke: '#c6cdd5',
+        'stroke-width': '1',
+        'stroke-linecap': 'round',
+      })
+      const handle = svg('path', {
+        d: 'M12 5 V20',
+        stroke: '#6b431d',
+        'stroke-width': '2.4',
+        'stroke-linecap': 'round',
+      })
+      return svgIcon('0 0 24 24', label, 'event-glyph', [head, handle, shine])
+    }
+    case 'dary_lasu': {
+      // Dary lasu = ułożone kłody (czoła słojów) — drwa/budulec, na palecie brązów
+      // (brak zieleni w tokenach ikon), spójne z kłodą Tartaku.
+      const logEnd = (cx: string, cy: string): SVGElement[] => [
+        svg('circle', { cx, cy, r: '3.4', fill: '#a96f3a', stroke: '#6b431d', 'stroke-width': '0.9' }),
+        svg('circle', { cx, cy, r: '1.7', fill: 'none', stroke: '#6b431d', 'stroke-width': '0.8' }),
+        svg('circle', { cx, cy, r: '0.5', fill: '#6b431d' }),
+      ]
+      return svgIcon('0 0 24 24', label, 'event-glyph', [
+        ...logEnd('7', '16'),
+        ...logEnd('14', '16'),
+        ...logEnd('10.5', '9.5'),
+      ])
+    }
+    default: {
+      // Nieznane/przyszłe wydarzenie — neutralny złoty błysk „okazji" (czter'opromienna
+      // gwiazda), zawsze SVG, nigdy tofu.
+      const star = svg('path', {
+        d: 'M12 2 L14 10 L22 12 L14 14 L12 22 L10 14 L2 12 L10 10 Z',
+        fill: '#d9a441',
+      })
+      return svgIcon('0 0 24 24', label, 'event-glyph', [star])
     }
   }
 }

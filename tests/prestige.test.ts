@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest'
 import { D } from '../src/engine/decimal'
+import { RNG } from '../src/engine/rng'
 import {
   createInitialState,
   createVillage,
   NO_TECH_MODS,
   RESOURCE_IDS,
+  EVENT_INTERVAL,
   type GameState,
 } from '../src/engine/state'
 import {
@@ -584,6 +586,23 @@ describe('ascend', () => {
     }
     // Lifetime total is the running sum; never less than the current balance.
     expect(s.prestige.totalEarned).toBeGreaterThanOrEqual(s.prestige.points)
+  })
+
+  it('re-seeds the world-events schedule from the per-ascension seed (M13 — no stale offer survives)', () => {
+    const s = createInitialState('ascend-events', 0)
+    // Simulate a run that had a watchtower: a stale ACTIVE offer plus an advanced events
+    // RNG stream and a mid-cycle timer that MUST NOT leak across the reset.
+    s.events = { rngState: 123456789, timer: 7, active: { defId: 'karawana', ttl: 42, roll: 0.5 } }
+
+    ascend(s)
+
+    // The events schedule is reset to a fresh, idle clock — no stale offer, timer re-armed.
+    expect(s.events.active).toBeNull()
+    expect(s.events.timer).toBe(EVENT_INTERVAL)
+    // ...and its RNG stream is reproducible from THIS ascension's own seed (ascensions === 1),
+    // exactly like the combat stream — the events stream is no longer the lone non-reproducible
+    // source of randomness after a reset.
+    expect(s.events.rngState).toBe(RNG.fromString('ascend-events:asc1' + '::events').getState())
   })
 })
 

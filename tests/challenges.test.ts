@@ -7,6 +7,7 @@ import {
   recomputeDerived,
   NO_TECH_MODS,
   HORDE_INTERVAL,
+  EVENT_INTERVAL,
   type GameState,
   type TechModifiers,
 } from '../src/engine/state'
@@ -212,6 +213,20 @@ describe('startChallenge (RESET mirroring ascend, meta preserved, deterministic)
     expect(s.era).toEqual({ points: 3, totalEarned: 9, eras: 1, nodes: {} })
     expect(s.dynasty).toEqual({ points: 1, totalEarned: 4, dynasties: 1, nodes: {} })
     expect(s.stats.attacksWon).toBe(7)
+  })
+
+  it('re-seeds the world-events schedule from the per-challenge seed (M13 — no stale offer survives)', () => {
+    const id = CHALLENGE_IDS[0]
+    const s = dirtyState('chal-events')
+    // A stale ACTIVE offer + advanced events stream that MUST NOT leak into the challenge run.
+    s.events = { rngState: 222333444, timer: 8, active: { defId: 'karawana', ttl: 30, roll: 0.9 } }
+
+    startChallenge(s, id)
+
+    expect(s.events.active).toBeNull()
+    expect(s.events.timer).toBe(EVENT_INTERVAL)
+    // Reproducible from THIS challenge's own seed, mirroring the combat-stream re-seed.
+    expect(s.events.rngState).toBe(RNG.fromString('chal-events:chal:' + id + '::events').getState())
   })
 })
 

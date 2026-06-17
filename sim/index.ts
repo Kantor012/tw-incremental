@@ -625,6 +625,34 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M13 world events coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  // The spawn / claim TALLY (the events metrics) rides the events-spawned / events-claimed detail
+  // strings (mirrors how cavalry-recruited / shipments-delivered carry their counts), surfaced below.
+  console.log('--- M13 world events: WYDARZENIA (coverage) ---')
+  const m13Names = [
+    'events-spawned',
+    'events-claimed',
+    'events-inert',
+    'events-determinism',
+    'events-save-load',
+  ]
+  for (const r of results) {
+    const line = m13Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing spawn/claim tally + inertness / determinism / save-load is visible.
+    for (const name of m13Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Automation per seed (M5.1 idle routines; SEPARATE coverage run, automation ON) ---
   console.log('--- Automation (idle routines, separate coverage run) ---')
   console.log('seed     | auto-built (levels) | auto-recruited (units) | auto-attacked (resolved)')

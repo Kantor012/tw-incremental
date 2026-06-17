@@ -4,6 +4,7 @@ import {
   createInitialState,
   NO_TECH_MODS,
   RESOURCE_IDS,
+  EVENT_INTERVAL,
   type GameState,
 } from '../src/engine/state'
 import {
@@ -459,5 +460,18 @@ describe('newEra (the great reset)', () => {
     }
     // Lifetime EP total is the running sum; never less than the current balance.
     expect(s.era.totalEarned).toBeGreaterThanOrEqual(s.era.points)
+  })
+
+  it('re-seeds the world-events schedule from the per-era seed (M13 — no stale offer survives)', () => {
+    const s = readyForEra('era-events')
+    // A stale ACTIVE offer + advanced events stream that MUST NOT leak across the great reset.
+    s.events = { rngState: 987654321, timer: 11, active: { defId: 'zyla_zelaza', ttl: 99, roll: 0.7 } }
+
+    newEra(s)
+
+    expect(s.events.active).toBeNull()
+    expect(s.events.timer).toBe(EVENT_INTERVAL)
+    // Reproducible from THIS era's own seed (eras === 1), mirroring the combat-stream re-seed.
+    expect(s.events.rngState).toBe(RNG.fromString('era-events:era1' + '::events').getState())
   })
 })

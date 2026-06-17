@@ -69,7 +69,7 @@ describe('cavalry save — v20 -> v21 migration backfill (M10)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(22)
+    expect(m.version).toBe(23)
 
     for (const id of m.villageOrder) {
       expect(m.villages[id].buildings.stable).toBe(0)

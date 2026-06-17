@@ -119,7 +119,7 @@ interface NavGroup {
  */
 const NAV_GROUPS: NavGroup[] = [
   { label: 'Osada', tabIds: ['buildings', 'villages', 'market', 'automation'] },
-  { label: 'Wojna', tabIds: ['army', 'map', 'raids', 'reports'] },
+  { label: 'Wojna', tabIds: ['army', 'map', 'raids', 'events', 'reports'] },
   { label: 'Postęp', tabIds: ['tech', 'prestige', 'era', 'dynasty', 'challenges'] },
   { label: 'Archiwum', tabIds: ['achievements', 'codex', 'save'] },
 ]
@@ -221,6 +221,8 @@ function coarseVisibilitySig(s: GameState): string {
     st.hordesBreached +
     ',' +
     st.scoutsReturned +
+    ',' +
+    st.eventsResolved +
     '|' +
     (st.resourcesExchanged.gt(0) ? '1' : '0') +
     '|'
@@ -983,6 +985,13 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
   // referencja zmienia się niezawodnie. Brak porównania długości, brak iteracji.
   let lastReportTop = ctx.store.state.battleLog.at(-1)
   const reportsEntry = entries.find((e) => e.id === 'reports')
+  // Puls "nowa oferta" (M13): czasowo-ograniczona oferta wydarzenia (TTL krótki)
+  // jest łatwa do przegapienia spoza panelu Wydarzenia, więc — wzorem pulsu raportów —
+  // błyskamy przyciskiem, gdy pojawi się ŚWIEŻA oferta. Każdy spawn tworzy nowy obiekt
+  // `events.active`, więc porównanie TOŻSAMOŚCI referencji wykrywa nową ofertę O(1),
+  // bez iteracji; null gdy brak oferty (po odbiorze/wygaśnięciu) nie pulsuje.
+  let lastEventActive = ctx.store.state.events.active
+  const eventsEntry = entries.find((e) => e.id === 'events')
   effect(() => {
     // Track BOTH the store revision and the active-village selection: a tick OR a
     // village switch refreshes the switcher, the HUD and the active panel. Reading
@@ -1007,6 +1016,24 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
       }
     }
     lastReportTop = top
+    // Ten sam tani wzorzec dla świeżej oferty wydarzenia: referencja `active` zmienia się
+    // na nowy obiekt przy spawnie (null po odbiorze/wygaśnięciu), więc pulsujemy tylko przy
+    // przejściu na nową ofertę i tylko gdy gracz jest na innej zakładce. animationend zdejmuje
+    // klasę, więc puls się nie kumuluje. Przycisk ukryty (brak Wieży) i tak nie ma offerty.
+    const ev = ctx.store.state.events
+    if (
+      ev.active !== null &&
+      ev.active !== lastEventActive &&
+      eventsEntry &&
+      entries[activeIndex].id !== 'events'
+    ) {
+      const te = eventsEntry.tab
+      if (!te.classList.contains('tab-pulse')) {
+        te.classList.add('tab-pulse')
+        te.addEventListener('animationend', () => te.classList.remove('tab-pulse'), { once: true })
+      }
+    }
+    lastEventActive = ev.active
     // Reveal/relock tabs the instant their stage unlocks (cheap: a no-op unless the
     // coarse signature changed, so the heavy predicate fold stays off the per-frame path).
     // May retreat the active tab to 'buildings' via its softlock guard, so it runs BEFORE

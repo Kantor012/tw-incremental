@@ -28,6 +28,7 @@ import { recruit } from './systems/recruitment'
 import { sendAttack, sendScout } from './systems/marches'
 import { foundVillage } from './systems/villages'
 import { sendShipment, canExchange, exchangeResources } from './systems/market'
+import { claimEvent } from './systems/events'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
@@ -218,6 +219,19 @@ const ctx: UiCtx = {
     }
     return ok
   },
+  onClaimEvent: () => {
+    // claimEvent (M13) grants the active world-event windfall to the capital (each resource
+    // clamped to the storage cap, overflow spilled), bumps the lifetime eventsResolved counter
+    // and clears the offer; it no-ops (returns false) when there is no live offer / no
+    // watchtower. A benign one-way gain, so — like onExchange — we commit + persist only on a
+    // successful claim. Player-initiated; never runs in the tick.
+    const ok = claimEvent(store.state)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onPurchaseTech: (nodeId: string) => {
     // purchaseTech spends from the GLOBAL resource pool and recomputes derived
     // multipliers internally; we only persist + commit on success.
@@ -343,7 +357,7 @@ const ctx: UiCtx = {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.43.0',
+  version: '0.44.0',
   offlineSeconds,
 }
 

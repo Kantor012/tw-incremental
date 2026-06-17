@@ -5,6 +5,7 @@ import { RNG } from './rng'
 import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
 import { advanceShipments } from '../systems/market'
+import { advanceEvents } from '../systems/events'
 import { advanceRaids } from '../systems/raids'
 import { advanceHorde } from '../systems/hordes'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
@@ -160,6 +161,13 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // on the same TICK_RATE sub-step grid as marches, so online == offline == sim stay
   // byte-identical; cargo is delivered to its destination (clamped to storage cap) on arrival.
   advanceShipments(state, dt)
+  // World events (M13) advance here on the fixed grid, ONCE per sub-step in this FIXED position
+  // (right after advanceShipments, before automation). It draws from its OWN events RNG stream
+  // (state.events.rngState), NEVER the per-subStep combat `rng`, so its order relative to the combat
+  // draws above is irrelevant — pinned for determinism like advanceShipments. With no watchtower it
+  // early-returns (no timer move, no draw), so a run without one is BYTE-IDENTICAL to pre-M13 —
+  // online == offline == sim. The offer is CLAIMED only by the player (claimEvent), never in the tick.
+  advanceEvents(state, dt)
   // Automation (M5.1) runs LAST, after the world has fully settled this sub-step
   // (captures applied + barbarians removed by applyConquest, loyalty regenerated): so
   // auto-attack never targets a camp that was floored-and-removed this very step, and

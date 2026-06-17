@@ -4,6 +4,7 @@ import {
   createInitialState,
   NO_TECH_MODS,
   RESOURCE_IDS,
+  EVENT_INTERVAL,
   type GameState,
 } from '../src/engine/state'
 import {
@@ -548,5 +549,18 @@ describe('newDynasty (the great-great reset)', () => {
     }
     // Lifetime DP total is the running sum; never less than the current balance.
     expect(s.dynasty.totalEarned).toBeGreaterThanOrEqual(s.dynasty.points)
+  })
+
+  it('re-seeds the world-events schedule from the per-dynasty seed (M13 — no stale offer survives)', () => {
+    const s = readyForDynasty('dyn-events')
+    // A stale ACTIVE offer + advanced events stream that MUST NOT leak across the great-great reset.
+    s.events = { rngState: 555111777, timer: 3, active: { defId: 'dary_lasu', ttl: 12, roll: 0.2 } }
+
+    newDynasty(s)
+
+    expect(s.events.active).toBeNull()
+    expect(s.events.timer).toBe(EVENT_INTERVAL)
+    // Reproducible from THIS dynasty's own seed (dynasties === 1), mirroring the combat re-seed.
+    expect(s.events.rngState).toBe(RNG.fromString('dyn-events:dyn1' + '::events').getState())
   })
 })

@@ -9,6 +9,7 @@ import {
   INITIAL_BUILDINGS,
   NO_TECH_MODS,
   HORDE_INTERVAL,
+  EVENT_INTERVAL,
   type GameState,
   type Stats,
   type Village,
@@ -87,6 +88,8 @@ import {
   exchangeRate,
 } from '../src/systems/market'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
+import { watchtowerBuilt } from '../src/systems/events'
+import { WORLD_EVENTS } from '../src/content/events'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
@@ -4370,5 +4373,147 @@ export function checkExchangeInert(seed: string): InvariantResult {
           : !backfillZero
             ? 'the v21→v22 migration did NOT backfill resourcesExchanged at Decimal 0'
             : 'pre-M9.2-stripped save migrated with changes beyond the zero-counter backfill',
+  }
+}
+
+// --- M13 world events (time-limited windfall OFFERS) coverage -----------------------------------
+//
+// World events are an ADDITIVE, OPT-IN mechanic gated by the MANUALLY-built Wieża strażnicza
+// (watchtower, autoBuildable:false). The gate is the IDENTITY guarantee: with no watchtower
+// advanceEvents early-returns — the event timer never moves, the SEPARATE events RNG stream
+// (events.rngState, seeded from `seed + '::events'`) never advances and `active` stays null — so the
+// MAIN run and the combat-luck stream (state.rngState) stay BYTE-IDENTICAL to pre-M13. The sim bot /
+// auto-build never raise an autoBuildable:false building, so the main run never opens the gate (no
+// change to bot.ts). These deterministic proof-of-mechanic checks (no bot) mirror the M7 fortress /
+// M10 cavalry coverage: a no-watchtower run leaves the events stream INERT (events-inert), an offer
+// spawning through the tick replays byte-identically online vs chunked-offline (events-determinism),
+// and a state carrying an injected ACTIVE offer survives the real save/load path (events-save-load).
+
+/**
+ * World events are INERT in a no-watchtower run (M13 — the byte-identity guarantee): after a normal
+ * MAIN run (the bot never builds the autoBuildable:false Wieża, so {@link watchtowerBuilt} is false
+ * throughout), {@link advanceEvents} was a pure no-op every sub-step — so the SEPARATE events RNG
+ * stream still sits at its fresh `RNG.fromString(seed + '::events')` value, no offer ever spawned
+ * (`active` null), the spawn timer never moved off {@link EVENT_INTERVAL}, and `stats.eventsResolved`
+ * is still 0. This is exactly what keeps the combat-luck stream + the whole run byte-identical to
+ * pre-M13: the events clock never draws, so it can never perturb the run. Takes the PRIMARY run's
+ * final `state` (mirrors {@link checkStatsAccumulated}) — pure, no clock.
+ */
+export function checkEventsInert(state: GameState, seed: string): InvariantResult {
+  const issues: string[] = []
+  // The gate must have stayed shut for the whole run — otherwise inertness would be vacuous.
+  if (watchtowerBuilt(state)) issues.push('a village built the Wieża (gate opened) — inert check is not meaningful')
+  const ev = state.events
+  const freshRng = RNG.fromString(seed + '::events').getState()
+  if (ev.rngState !== freshRng) issues.push(`events.rngState=${ev.rngState} (expected fresh ${freshRng}) — the events stream advanced`)
+  if (ev.active !== null) issues.push(`events.active=${JSON.stringify(ev.active)} (expected null) — an offer spawned`)
+  if (ev.timer !== EVENT_INTERVAL) issues.push(`events.timer=${ev.timer} (expected ${EVENT_INTERVAL}) — the spawn clock moved`)
+  if (state.stats.eventsResolved !== 0) issues.push(`stats.eventsResolved=${state.stats.eventsResolved} (expected 0)`)
+  const ok = issues.length === 0
+  return {
+    name: 'events-inert',
+    ok,
+    detail: ok
+      ? `no-watchtower run left the events stream fully inert (rngState fresh, no spawn, timer ${EVENT_INTERVAL}, 0 resolved) — byte-identical to pre-M13`
+      : issues.join('; '),
+  }
+}
+
+/**
+ * Put a fresh state into the world-events scenario: build the Wieża (OPEN the gate so
+ * {@link advanceEvents} runs) and arm the spawn clock to fire WELL inside the determinism window so
+ * >= 1 offer spawns through the real tick. Both branches of the determinism check seed this
+ * identically, so the equality isolates a real online/offline split rather than masking one.
+ */
+function seedEventsDue(state: GameState): void {
+  const v = firstVillage(state)
+  v.buildings.watchtower = 1 // OPEN the gate (autoBuildable:false — the main run never does this)
+  recomputeDerived(state)
+  // Short arm: with EVENT_TTL = 300 between spawns, several offers spawn-and-lapse across an hour
+  // window (the tick never claims — claim is a player action), so the events stream advances repeatedly.
+  state.events.timer = 300
+}
+
+/**
+ * World-events DETERMINISM at INTEGRATION level (M13): an offer spawning inside the deterministic tick
+ * sub-step draws ONLY from the persisted, seeded events RNG stream on the fixed tick grid, so crediting a
+ * span as one big {@link simulate} (online catch-up) must be byte-identical to the chunked offline path
+ * ({@link applyOffline}) — same events.rngState, same spawned offers. Mirrors {@link checkHordeDeterminism}
+ * but on {@link seedEventsDue}, which arms the events clock to fire mid-span (the existing offline checks
+ * never build a watchtower, so advanceEvents is a no-op there and no offer ever spawns). Also asserts
+ * NON-VACUITY: the events stream ACTUALLY advanced (>= 1 spawn), so "identical" can never pass by drawing
+ * nothing. `seconds` stays within {@link import('../src/engine/offline').MAX_OFFLINE_SECONDS} (the caller
+ * uses an hour). NOTE: the tick never claims, so `eventsResolved` stays 0 in BOTH branches (equal) — the
+ * lock-step proof is the events.rngState + the spawned `active` offer riding the serialization identically.
+ */
+export function checkEventsDeterminism(seed: string, seconds: number): InvariantResult {
+  const big = createInitialState(seed, 0)
+  seedEventsDue(big)
+  const rng0 = big.events.rngState
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = createInitialState(seed, 0)
+  seedEventsDue(chunked)
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const equal = serialize(big) === serialize(chunked)
+  const advanced = big.events.rngState !== rng0
+  const rngMatches = big.events.rngState === chunked.events.rngState
+  const ok = equal && advanced && rngMatches
+  return {
+    name: 'events-determinism',
+    ok,
+    detail: ok
+      ? `events stream identical online vs chunked-offline (rngState ${rng0} -> ${big.events.rngState}, active ${big.events.active ? big.events.active.defId : 'null'})`
+      : !advanced
+        ? 'events stream never advanced — no offer spawned in the window (vacuous determinism check)'
+        : !equal
+          ? 'chunked offline catch-up diverged from a single-step simulate WITH an offer spawning (events stream / timer split)'
+          : `events.rngState diverged online (${big.events.rngState}) vs offline (${chunked.events.rngState})`,
+  }
+}
+
+/**
+ * A pending world-event offer SURVIVES save/load (M13, CLAUDE.md hard rule #3): the {@link GameState.events}
+ * stream — the SEPARATE events `rngState`, the spawn `timer` AND a live `active` offer (defId / ttl / roll)
+ * — must ride the real export/import (base64) path byte-for-byte. The whole-state {@link checkRoundTrip}
+ * proves serialize/deserialize is loss-free; this is the targeted proof that the v23 save carries
+ * `state.events` (incl. an unclaimed offer) specifically, so a player who saves mid-offer reloads to the
+ * SAME offer with the SAME countdown. Injects a distinctive offer + dirtied stream (so the round-trip must
+ * carry every field, not the seed defaults) and runs it through the validating importSave. Mirrors
+ * {@link checkHordeSaveLoad} / {@link checkFortressSaveLoad}. Pure function of a fresh seeded state.
+ */
+export function checkEventsSaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  // Distinctive, valid non-default values (defId in the catalogue, ttl >= 0, roll in [0,1]) so the
+  // round-trip must carry BOTH the active offer AND the dirtied stream/counter — not just the defaults.
+  const defId = WORLD_EVENTS[0].id
+  state.events.active = { defId, ttl: 123.5, roll: 0.4242 }
+  state.events.timer = 777.5
+  state.events.rngState = 987654
+  state.stats.eventsResolved = 5
+
+  const restored = importSave(exportSave(state))
+  const a = serialize(state)
+  const b = serialize(restored)
+  const ra = restored.events.active
+  const activeSurvived =
+    ra !== null && ra.defId === defId && ra.ttl === 123.5 && ra.roll === 0.4242
+  const streamSurvived =
+    restored.events.timer === 777.5 &&
+    restored.events.rngState === 987654 &&
+    restored.stats.eventsResolved === 5
+  const ok = a === b && activeSurvived && streamSurvived
+  return {
+    name: 'events-save-load',
+    ok,
+    detail: ok
+      ? `a pending "${defId}" offer (ttl 123.5, roll 0.4242) + the events stream survived export/import byte-identically`
+      : a !== b
+        ? 'state with a pending offer changed across export/import'
+        : !activeSurvived
+          ? 'the active offer did not survive export/import intact'
+          : 'the events stream (timer / rngState / eventsResolved) did not survive export/import',
   }
 }

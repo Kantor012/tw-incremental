@@ -5,6 +5,7 @@ import {
   recomputeDerived,
   RESOURCE_IDS,
   HORDE_INTERVAL,
+  EVENT_INTERVAL,
   type GameState,
   type TechModifiers,
 } from '../engine/state'
@@ -225,6 +226,17 @@ export function startChallenge(state: GameState, id: string): boolean {
   // Re-arm the GLOBAL horde schedule, exactly as createInitialState / ascend seed it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation 0).
   state.horde = { timer: HORDE_INTERVAL, level: 0 }
+  // Re-seed the GLOBAL world-events schedule too (M13), mirroring the horde re-arm AND the
+  // combat-stream re-seed above: a challenge run gets a fresh, idle event clock whose RNG stream
+  // is reproducible from THIS challenge's own seed (`chalSeed + '::events'`, the same per-run seed
+  // family as `rngState`). Without this a stale offer from the prior run would survive into a free
+  // windfall once the player rebuilds the watchtower, and the events stream would be the lone
+  // source of randomness not replayable from the per-run seed.
+  state.events = {
+    rngState: RNG.fromString(chalSeed + '::events').getState(),
+    timer: EVENT_INTERVAL,
+    active: null,
+  }
 
   // Turn the challenge on (defensive: seed the record if a hand-edited save lacks it).
   if (!state.challenge) state.challenge = { activeId: null, completed: {} }

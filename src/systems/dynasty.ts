@@ -4,6 +4,7 @@ import {
   recomputeDerived,
   RESOURCE_IDS,
   HORDE_INTERVAL,
+  EVENT_INTERVAL,
   type GameState,
   type ResourceId,
   type TechModifiers,
@@ -392,6 +393,17 @@ export function newDynasty(state: GameState): number {
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation
   // level back to 0). Otherwise the accumulated escalation would wipe the level-1 capital.
   state.horde = { timer: HORDE_INTERVAL, level: 0 }
+  // Re-seed the GLOBAL world-events schedule too (M13), mirroring the horde re-arm AND the
+  // combat-stream re-seed above: each dynasty gets a fresh, idle event clock whose RNG stream is
+  // reproducible from THIS dynasty's own seed (`dynSeed + '::events'`, the same per-run seed
+  // family as `rngState`). Without this a stale offer would survive the great-great reset into a
+  // free windfall once the player rebuilds the watchtower, and the events stream would be the lone
+  // source of randomness not replayable from the per-run seed.
+  state.events = {
+    rngState: RNG.fromString(dynSeed + '::events').getState(),
+    timer: EVENT_INTERVAL,
+    active: null,
+  }
 
   // Reconcile derived stats with the surviving dynasty multipliers (era + prestige empty).
   recomputeDerived(state)

@@ -331,12 +331,13 @@ describe('wall (Mur — defensive building)', () => {
   })
 
   it('appears right before the M9 market in the stable BUILDING_IDS order (was last until M9)', () => {
-    // The wall (M5.2) was the last key until M9 appended the market after it, and M10 then
-    // appended the stable after the market; the wall now sits third-to-last, still after the
-    // academy, the market second-to-last and the stable last. Pins the stable, append-only order.
-    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('stable')
-    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('market')
-    expect(BUILDING_IDS[BUILDING_IDS.length - 3]).toBe('wall')
+    // The wall (M5.2) was the last key until M9 appended the market after it, M10 then appended
+    // the stable after the market, and M13 appended the watchtower last; the wall now sits
+    // fourth-to-last, still after the academy. Pins the append-only order through M13.
+    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('watchtower')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('stable')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 3]).toBe('market')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 4]).toBe('wall')
   })
 
   it('recomputeVillageDerived ignores it — raising the wall changes no derived stat', () => {

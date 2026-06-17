@@ -109,6 +109,17 @@ export interface UiCtx {
     amount: number,
   ) => boolean
   /**
+   * CLAIM the active world-event offer (M13) — grant the bounded resource windfall to the
+   * CAPITAL and clear the offer; returns true on success, false when there is no live offer (or
+   * no watchtower). On success the windfall is credited (each resource clamped to the storage
+   * cap, overflow spilled), the lifetime `eventsResolved` counter bumped and the change committed
+   * + persisted. A benign, one-way gain (never spends, never destabilises), so no confirmation is
+   * needed. The events panel reads `store.state.events.active` itself for the disabled cue; this
+   * callback is the commit, not the validation. Mirrors {@link onExchange} (a player-initiated,
+   * commit-on-success action).
+   */
+  onClaimEvent: () => boolean
+  /**
    * Purchase the NEXT level of the global tech node `nodeId`, paid from the GLOBAL
    * resource pool (summed across all villages); returns true on success (cost spent,
    * `state.tech[nodeId]` incremented, derived multipliers recomputed, committed +

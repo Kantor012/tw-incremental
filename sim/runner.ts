@@ -15,6 +15,7 @@ import { recruit, canRecruit, freePopulation } from '../src/systems/recruitment'
 import { sendAttack, stationedUnits } from '../src/systems/marches'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
 import { sendShipment, exchangeResources } from '../src/systems/market'
+import { claimEvent } from '../src/systems/events'
 import { purchaseTech } from '../src/systems/tech'
 import { TECH_NODES, TECH_NODE_IDS } from '../src/content/tech'
 import { fortressTarget } from '../src/content/fortresses'
@@ -120,6 +121,9 @@ import {
   checkExchangeGated,
   checkExchangeDeterminism,
   checkExchangeInert,
+  checkEventsInert,
+  checkEventsDeterminism,
+  checkEventsSaveLoad,
   type InvariantResult,
 } from './invariants'
 import {
@@ -1856,6 +1860,127 @@ export function runCavalry(seed: string, ticks: number = CAVALRY_TICKS): Cavalry
   return { state, invariants, metrics: { cavalryRecruited, stableBuilt } }
 }
 
+// --- M13 world events (time-limited windfall OFFERS) dedicated run -------------------------------
+//
+// A SEPARATE run, the ONLY one that ever builds the Wieża strażnicza (watchtower, autoBuildable:false)
+// and so the ONLY one that OPENS the world-events gate. The main + meta runs never build it (the bot /
+// auto-build skip autoBuildable:false buildings — MAIN_BUILD_IDS), so advanceEvents stays a no-op there
+// and a no-watchtower run is BYTE-IDENTICAL to pre-M13 (the events identity, proven by events-inert on
+// the main state). This run builds the Wieża DIRECTLY (the dedicated-run helper pattern, mirroring
+// runCavalry's Stajnia), arming the events clock, then CLAIMS every offer the moment it lands (claim is
+// a PLAYER action, never the tick — like the market exchange / cavalry dispatch) and proves the
+// spawn→claim pipeline is reachable and the bounded windfall never breaks the economy.
+
+/**
+ * Step budget for the SEPARATE M13 world-events run. Sized so the run spans several EVENT_INTERVAL
+ * (1200s) spawn cycles within the budget — at TARGETS.tickSeconds (1s) per step it covers a handful of
+ * offers (claimed immediately, so each re-arms the spawn clock a full interval out). Generous headroom
+ * over the bare >= 1 the 'events-spawned'/'events-claimed' proofs require.
+ */
+const EVENTS_TICKS = 5000
+
+/** What a world-events run yields: sampled invariants + the spawn / claim tally. */
+interface EventsRun {
+  invariants: InvariantResult[]
+  spawned: number
+  claimed: number
+}
+
+/**
+ * Drive a fresh seeded capital through the M13 world-events loop and prove the OFFER→CLAIM pipeline is
+ * reachable and BOUNDED. Builds the Wieża strażnicza DIRECTLY to its data max (autoBuildable:false — the
+ * gate the main run never opens), which UNLOCKS world events ({@link watchtowerBuilt} is now true so
+ * advanceEvents runs in the tick). Freezes raids + the global horde so the ONLY thing exercised is the
+ * events clock (isolate the mechanic from combat attrition — exactly as runFortress/runCavalry freeze
+ * them). Each step runs the real {@link simulate} (whose tick spawns offers from the SEPARATE events RNG
+ * stream), detects a fresh idle→active spawn, then CLAIMS it deterministically the moment it lands (claim
+ * is a player action, never the tick). Samples the hard invariants periodically + at the end (the
+ * resources-finite / non-negative / within-cap checks ARE the bounded-windfall constraint — claimEvent
+ * clamps each grant to the storage cap), plus bare 'events-spawned' / 'events-claimed' proofs carrying the
+ * tally. Records the offers spawned + claimed. Deterministic — the only randomness is the seeded events stream.
+ */
+export function runEvents(seed: string, ticks: number = EVENTS_TICKS): EventsRun {
+  const dt = TARGETS.tickSeconds
+  const state = createInitialState(seed, 0)
+  const invariants: InvariantResult[] = []
+  const v = state.villages[state.villageOrder[0]]
+
+  // Build the Wieża DIRECTLY (dedicated-run helper pattern, mirrors runCavalry's Stajnia): the main
+  // bot / auto-build never raise it (autoBuildable:false), so the main run stays byte-identical; here
+  // it OPENS the events gate. A maxed warehouse via recomputeDerived keeps the windfall room realistic.
+  v.buildings.watchtower = BUILDINGS.watchtower.maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  // Freeze raids + the global horde so the ONLY clock that matters is the events clock (isolate it).
+  v.raidTimer = ticks * dt + 1e9
+  state.horde.timer = ticks * dt + 1e9
+
+  let spawned = 0
+  let claimed = 0
+  let prevActive = state.events.active !== null
+  let prevTotal = totalResources(state)
+  let actedInWindow = 0
+
+  for (let i = 0; i < ticks; i++) {
+    simulate(state, dt)
+
+    // A fresh idle→active transition means the tick spawned exactly one new offer this step.
+    const nowActive = state.events.active !== null
+    if (nowActive && !prevActive) {
+      spawned += 1
+      actedInWindow += 1
+    }
+    // CLAIM the offer the instant it lands (a PLAYER action — never the tick). Claiming the same step
+    // it spawns means an offer never lapses unclaimed, so claimed == spawned and each claim re-arms the
+    // spawn clock a full EVENT_INTERVAL out. The grant is clamped to the storage cap inside claimEvent,
+    // so the sampled resources-within-cap invariant is exactly the bounded-windfall constraint check.
+    if (state.events.active) {
+      if (claimEvent(state)) claimed += 1
+      prevActive = false
+    } else {
+      prevActive = nowActive
+    }
+
+    if ((i + 1) % SAMPLE_EVERY === 0) {
+      const phase = `evt t${i + 1}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
+      prevTotal = totalResources(state)
+      actedInWindow = 0
+    }
+  }
+
+  // Final pass (mirrors the other dedicated runs): the post-claim state stays valid + playable.
+  invariants.push(...tag(runInvariants(state), 'evtfinal'))
+  invariants.push(...tag([checkArmyConsistency(state)], 'evtfinal'))
+  invariants.push(...tag([checkNoSoftlock(state, totalResources(state), claimed > 0)], 'evtfinal'))
+
+  // Bare-named HARD invariants (mirror runCavalry's 'cavalry-recruited' / runMarket's 'shipments-
+  // delivered'): the dedicated run must SPAWN at least one offer AND CLAIM every offer it spawned within
+  // budget — proof the M13 offer→claim pipeline completes and the lifetime counter tracks it exactly.
+  invariants.push({
+    name: 'events-spawned',
+    ok: spawned >= 1,
+    detail:
+      spawned >= 1
+        ? `spawned ${spawned} world-event offer(s) through the tick (Wieża at level ${v.buildings.watchtower})`
+        : `no world-event offer spawned within ${ticks} ticks (gate / clock issue)`,
+  })
+  invariants.push({
+    name: 'events-claimed',
+    ok: claimed >= 1 && claimed === spawned && state.stats.eventsResolved === claimed,
+    detail:
+      claimed >= 1 && claimed === spawned && state.stats.eventsResolved === claimed
+        ? `claimed ${claimed}/${spawned} offer(s), each a bounded windfall clamped to the storage cap (eventsResolved=${state.stats.eventsResolved})`
+        : `claimed ${claimed} of ${spawned} spawned (eventsResolved=${state.stats.eventsResolved}) — offer→claim pipeline incomplete`,
+  })
+
+  return { invariants, spawned, claimed }
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -2238,6 +2363,25 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkCavalryInert(seed))
   invariants.push(checkCavalryUpkeep(seed))
   invariants.push(checkCavalrySaveLoad(seed))
+
+  // M13 world events (time-limited windfall OFFERS) — a SEPARATE dedicated run, the ONLY one that ever
+  // builds the Wieża strażnicza (autoBuildable:false) and so the ONLY one that opens the events gate. The
+  // main + meta runs never build it, so advanceEvents stays a no-op there and a no-watchtower run is BYTE-
+  // IDENTICAL to pre-M13 — proven directly by events-inert on the PRIMARY run's final state below (the
+  // events stream untouched, combat-luck stream therefore unchanged). The dedicated run drives the
+  // offer→claim pipeline and folds in its 'events-spawned' / 'events-claimed' reachability proofs.
+  const events = runEvents(seed, EVENTS_TICKS)
+  invariants.push(...events.invariants)
+
+  // M13 proof-of-mechanic checks (self-contained, deterministic — events draw from a SEPARATE seeded
+  // stream, never the combat-luck stream): the MAIN run left the events stream fully INERT (no spawn, no
+  // RNG draw, 0 resolved — the byte-identity guarantee, events-inert); an offer spawning through the tick
+  // replays byte-identically online vs chunked-offline with the events stream advancing in lock-step
+  // (events-determinism); and a state carrying a pending ACTIVE offer round-trips through the v23 save
+  // (events-save-load). events-inert reads the PRIMARY run's final state (mirrors checkStatsAccumulated).
+  invariants.push(checkEventsInert(primary.state, seed))
+  invariants.push(checkEventsDeterminism(seed, OFFLINE_CHECK_SECONDS))
+  invariants.push(checkEventsSaveLoad(seed))
 
   const metrics = collect(
     seed,

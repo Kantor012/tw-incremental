@@ -27,10 +27,11 @@ export type BuildingId =
   | 'wall'
   | 'market'
   | 'stable'
+  | 'watchtower'
 
 /**
  * Stable iteration order for derived-stat recompute and UI listing. New buildings are
- * APPENDED (here `stable`, after `market`) so older saves' building key order is never
+ * APPENDED (here `watchtower`, after `stable`) so older saves' building key order is never
  * disturbed, keeping migration and round-trip deterministic.
  */
 export const BUILDING_IDS: readonly BuildingId[] = [
@@ -45,6 +46,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'wall',
   'market',
   'stable',
+  'watchtower',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -299,6 +301,30 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     // auto-build/MAIN-run path is what keeps a no-Stajnia run BYTE-IDENTICAL to pre-M10 —
     // the cavalry it gates never unlocks, so the bot/auto-build never recruit it. See
     // autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
+    autoBuildable: false,
+  },
+  watchtower: {
+    id: 'watchtower',
+    name: 'Wieża strażnicza',
+    desc: 'Wypatruje wydarzeń w świecie i wzmacnia obronę osady. Każdy poziom nieco zwiększa siłę obrony wioski.',
+    category: 'military',
+    // Finite ceiling like every other building; at perLevel 0.02 a maxed watchtower is +20%
+    // village defence — a modest, bounded shield (smaller per-level than the Mur).
+    maxLevel: 10,
+    // ~stable/market-tier baseCost (a later military build). provisional — Balance tunes it.
+    baseCost: { wood: 2000, clay: 1800, iron: 1500 },
+    costFactor: 1.25,
+    // +2% village defence per level (M13). REUSES the existing defense_bonus kind (no new effect
+    // kind, so ZERO engine change — villageDefenseMult already sums it). Building it to level 1 is
+    // what UNLOCKS world events (systems/events.ts gates on a built watchtower); its own defensive
+    // effect is deliberately minor.
+    effect: { kind: 'defense_bonus', perLevel: 0.02 },
+    // Starts at 0: an optional, PLAYER-managed build that opens the world-events mechanic.
+    initialLevel: 0,
+    // Player-managed: auto-build must NOT spend on the Wieża. Keeping it off the auto-build /
+    // MAIN-run path is what keeps a no-watchtower run BYTE-IDENTICAL to pre-M13 — the events it
+    // gates never spawn, so the bot/auto-build never builds it and advanceEvents stays a no-op.
+    // See autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
     autoBuildable: false,
   },
 }

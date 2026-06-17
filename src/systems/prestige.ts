@@ -4,6 +4,7 @@ import {
   recomputeDerived,
   RESOURCE_IDS,
   HORDE_INTERVAL,
+  EVENT_INTERVAL,
   type GameState,
   type ResourceId,
   type TechModifiers,
@@ -419,6 +420,17 @@ export function ascend(state: GameState): number {
   // bear down on a level-1 capital with no garrison, a guaranteed-breach wipe (the threat
   // scales with the level, the defence with the now-wiped progress).
   state.horde = { timer: HORDE_INTERVAL, level: 0 }
+  // Re-seed the GLOBAL world-events schedule too (M13), mirroring the horde re-arm AND the
+  // combat-stream re-seed above: a fresh run gets a fresh, idle event clock whose RNG stream
+  // is reproducible from THIS ascension's own seed (`ascSeed + '::events'`, the same per-run
+  // seed family as `rngState`). Without this a stale offer (active != null) would survive the
+  // reset and become a free windfall the moment the player rebuilds the watchtower, and the
+  // events stream would be the one source of randomness NOT replayable from the per-run seed.
+  state.events = {
+    rngState: RNG.fromString(ascSeed + '::events').getState(),
+    timer: EVENT_INTERVAL,
+    active: null,
+  }
 
   // Reconcile derived stats with the surviving prestige multipliers.
   recomputeDerived(state)
