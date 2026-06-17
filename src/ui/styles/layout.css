@@ -662,13 +662,40 @@ html {
   display: block;
   width: 100%;
   height: 100%;
-  /* Subtelna głębia pola mapy; siatkę rysuje JS jako linie SVG na wierzchu. */
+  /* ATMOSFERYCZNY TEREN pola mapy (M11.4b): pole czyta się jako CIEPŁA, CIEMNA ziemia,
+   * nie płaska czerń. Trzy warstwy tła CSS malowane w układzie ELEMENTU (nie viewBox),
+   * więc świat (pan/zoom) przesuwa się NAD nieruchomym tłem-kulisą; siatkę-odniesienie
+   * odległości nadal rysuje JS w przestrzeni świata (gridGroup) na wierzchu. Od góry:
+   *   (1) bardzo subtelne, proceduralne ZIARNO gleby — ten sam przepis feTurbulence co
+   *       token --grain, ale z WPISANYM niskim opacity: warstwy background-image nie mają
+   *       własnej przezroczystości, a element <svg> nie przyjmuje ::before/::after użytego
+   *       dla --grain na .app-shell. Szum nie ma literału koloru → reguła „bez hardkodowanych
+   *       barw" pozostaje spełniona (zero plików/CDN). background-blend-mode: overlay trzyma
+   *       średnią luminancję ciemnego pola, więc ziarno NIE podnosi jasności (kontrast orbów cały);
+   *   (2) ciepła ziemista WINIETA: marginalnie rozjaśniony, ciepły rdzeń (--bg-2 z domieszką
+   *       --accent) → ciemniejsza krawędź (--bg ku czerni) = głębia; barwy z tokenów;
+   *   (3) baza --bg-2.
+   * Tożsamość MROCZNO-średniowieczna zachowana: rdzeń to ledwie 5% domieszki --accent, więc jego
+   * luminancja jest praktycznie na poziomie dotychczasowej niemal-czerni (--bg-2) — czerwony orb
+   * (--bad) zostaje wyraźną, nasyconą plamą na KAŻDYM tierze. Kontrast najniższego tieru
+   * (fill-opacity 0.5) nad rdzeniem to ~2,1:1 — porównywalny z dotychczasowym na płaskiej czerni
+   * (winieta jest przyklejona do ELEMENTU, więc każda kropka może przesunąć się pod rdzeń) —
+   * dodatkowo wsparty rozmiarem/kryciem per tier, ciemnym rantem orbu oraz obrysem --border.
+   * Uwaga: to próg poniżej WCAG 1.4.11 (3:1), tak jak i wcześniej — dlatego tier niesie też
+   * rozmiar i krycie, nie sam hue (stan nigdy wyłącznie kolorem). */
   background-color: var(--bg-2);
-  background-image: radial-gradient(
-    circle at 50% 42%,
-    transparent 0%,
-    color-mix(in srgb, var(--bg) 65%, transparent) 100%
-  );
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.06'/%3E%3C/svg%3E"),
+    radial-gradient(
+      ellipse 125% 105% at 50% 42%,
+      color-mix(in srgb, var(--bg-2) 95%, var(--accent)) 0%,
+      var(--bg) 55%,
+      color-mix(in srgb, var(--bg) 62%, #000) 100%
+    );
+  background-repeat: repeat, no-repeat;
+  background-size: 160px 160px, cover;
+  background-position: center, center;
+  background-blend-mode: overlay, normal;
   /* Pan/zoom obsługuje JS — wyłączamy domyślne gesty przeglądarki na płótnie. */
   touch-action: none;
   cursor: grab;
@@ -692,28 +719,37 @@ html {
  * dając mapie jedyny punkt odniesienia dla odległości/orientacji. */
 .map-grid-border {
   stroke: var(--border);
-  stroke-opacity: 0.6;
+  stroke-opacity: 0.55;
 }
 
+/* Linie wewnętrzne ZTONOWANE niżej (0.18), by ciepły teren był głównym tłem, a
+ * siatka pozostała czytelnym, lecz dyskretnym rastrem odległości (nie konkuruje z polem). */
 .map-grid-lines {
   stroke: var(--border);
-  stroke-opacity: 0.25;
+  stroke-opacity: 0.18;
 }
 
 /* Pierścień AKTYWNEJ wioski gracza i ZAZNACZONEGO celu — wspólne markery, które
  * JS pozycjonuje co klatkę. Bez wypełnienia; czytelny obrys akcentu to osobny
  * sygnał poza samym kolorem węzła (WCAG 1.4.1). Pierścień celu jest przerywany,
  * by odróżnić go od ciągłego pierścienia aktywnej wioski. */
+/* Wspólny, miękki bloom <filter id="mapGlow"> (z <defs> w map.ts) blooomuje SAM SourceGraphic,
+ * więc każdy marker świeci WE WŁASNEJ barwie obrysu (token-following, bez stałego flooda). Filtr
+ * dotyka tylko TYCH kilku wspólnych nakładek (oraz tarcz gracza) — NIGDY 125 spoczynkowych kropek
+ * (wydajność). Grubszy obrys + pełne krycie = „premium" odczyt aktywnej/zaznaczonej wioski. */
 .map-active-ring {
   stroke: var(--accent);
-  stroke-width: 2;
-  stroke-opacity: 0.9;
+  stroke-width: 2.5;
+  stroke-opacity: 1;
+  filter: url(#mapGlow);
 }
 
 .map-sel-ring {
   stroke: var(--accent-2);
-  stroke-width: 2;
-  stroke-dasharray: 3 3;
+  stroke-width: 2.5;
+  stroke-opacity: 0.95;
+  stroke-dasharray: 4 4;
+  filter: url(#mapGlow);
 }
 
 /* ---- Kontrolki nawigacji (zoom +/- , wycentruj) ----------------------- */
@@ -766,6 +802,9 @@ html {
  * pierścień .map-active-ring, nie ten węzeł). */
 .map-node--player {
   color: var(--accent);
+  /* Wspólny bloom (#mapGlow) daje złotej stolicy ciepłą aureolę — tylko garstka tarcz,
+   * więc filtr jest tani; bloomuje SourceGraphic, więc świeci barwą currentColor (--accent). */
+  filter: url(#mapGlow);
 }
 
 /* Wioska barbarzyńska — czerwony znacznik (hue z tokenu; intensywność wg poziomu
@@ -778,18 +817,31 @@ html {
   vector-effect: non-scaling-stroke;
 }
 
-/* Najazd kursorem / hover — jaśniejszy, grubszy obrys (sygnał nie tylko kolorem). */
+/* Obóz jako ORB 3D: WSPÓLNY <radialGradient id="mapBarbOrb"> (z <defs> w map.ts) daje każdej
+ * kropce identyczny WZGLĘDNY refleks (objectBoundingBox: cx/cy/r to ułamki bboxu okręgu), więc
+ * mały orb niskiego tieru i duży orb wysokiego tieru mają tę samą trójwymiarową bryłę. Stopy
+ * gradientu wyprowadzone z tokenu --bad (rozjaśniony hotspot → midton → ciemny rant) — zmiana
+ * palety nadal przepływa. Kolor zapasowy `var(--bad)` chroni kropkę, gdyby gradient był niedostępny.
+ * fill-opacity per tier (ustawiane przez JS) mnoży krycie CAŁEGO orbu → kodowanie „jaśniej = groźniej"
+ * w pełni zachowane. Obrys --border (z reguły wyżej) wciąż oddziela sąsiadów. */
+.map-node-dot {
+  fill: url(#mapBarbOrb) var(--bad);
+}
+
+/* Najazd kursorem / hover — jaśniejszy, grubszy obrys + miękka poświata mosiądzu (sygnał nie
+ * tylko kolorem). drop-shadow działa na POJEDYNCZY węzeł pod kursorem, nie na 125 kropek. */
 .map-node--barb:hover {
   stroke: var(--accent-2);
   stroke-width: 2;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent-2) 80%, transparent));
 }
 
 /* Zaznaczony cel — wyraźny złoty pierścień (grubość = sygnał poza kolorem) plus
- * delikatna poświata. Wygrywa źródłowo nad :hover (ta sama specyficzność). */
+ * mocniejsza poświata. Wygrywa źródłowo nad :hover (ta sama specyficzność). */
 .map-node--barb.is-selected {
   stroke: var(--accent);
   stroke-width: 3;
-  filter: drop-shadow(0 0 3px var(--accent));
+  filter: drop-shadow(0 0 5px var(--accent));
 }
 
 /* ---- Forteca (M7): znacznik bossa — GWIAZDA, odrębny kształt I barwa ----- */
@@ -803,6 +855,20 @@ html {
   stroke: var(--border);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+  /* Spoczynkowa poświata bossa (M11.4b): wspólny #mapGlow blooomuje SAM SourceGraphic, więc
+   * gwiazda świeci WE WŁASNEJ barwie (fiolet --cat-plunder) — boss „tli się" groźnie w idle,
+   * pasując głębią do błyszczących orbów obozów. Fortec jest tylko FORTRESS_COUNT (≪ 125), więc
+   * filtr jest tani — jak garstka tarcz gracza, a NIE 125 kropek (reguła wydajności zachowana).
+   * Stany o wyższej specyficzności (:hover/.is-selected/.is-razed) nadpisują filtr poniżej. */
+  filter: url(#mapGlow);
+}
+
+/* Gwiazda fortecy jako ORB 3D: WSPÓLNY <radialGradient id="mapFortOrb"> (z <defs> w map.ts)
+ * daje pięcioramiennej gwieździe ten sam refleks → ciemny rant co kuli obozu, więc boss-cel nie
+ * jest już jedyną płaską figurą na mapie. Stopy wyprowadzone z tokenu --cat-plunder (zmiana palety
+ * przepływa); kolor zapasowy `var(--cat-plunder)` chroni figurę, gdyby gradient był niedostępny. */
+.map-node-fortress-mark {
+  fill: url(#mapFortOrb) var(--cat-plunder);
 }
 
 /* Hover — jaśniejszy, grubszy obrys (sygnał poza kolorem). */
@@ -819,9 +885,11 @@ html {
 }
 
 /* Zniszczona forteca (razed) — przygaszona i PRZEKREŚLONA: stan niosą też kształt
- * (ukośna kreska) i przezroczystość, nie sam kolor. */
+ * (ukośna kreska) i przezroczystość, nie sam kolor. Martwy boss GASI spoczynkową
+ * poświatę (filter:none) — nie ma już „tlić się" groźnie. */
 .map-node--fortress.is-razed {
   opacity: 0.4;
+  filter: none;
 }
 
 /* Ukośna kreska „przekreślenia" — ukryta, dopóki węzeł nie ma klasy .is-razed. */
@@ -842,9 +910,12 @@ html {
 .map-march {
   fill: none;
   stroke: var(--accent);
-  stroke-width: 2;
+  /* Cieńsza, lekko przezroczysta nić z drobniejszym rastrem „mrówek" = czytelniejszy, mniej
+   * natarczywy szlak (delikatny dash-flow niżej; przy prefers-reduced-motion wyłączony). */
+  stroke-width: 1.75;
+  stroke-opacity: 0.85;
   stroke-linecap: round;
-  stroke-dasharray: 6 6;
+  stroke-dasharray: 5 5;
   vector-effect: non-scaling-stroke;
   pointer-events: none;
   animation: map-march-flow 900ms linear infinite;
@@ -862,17 +933,20 @@ html {
   animation-name: map-march-flow-rev;
 }
 
-/* Marker postępu marszu (czoło armii) — JS pozycjonuje, CSS koloruje wg fazy. */
+/* Marker postępu marszu (czoło armii) — JS pozycjonuje, CSS koloruje wg fazy. Delikatna
+ * poświata wyodrębnia „głowę" kolumny ze szlaku; drop-shadow tylko na TYCH kilku markerach. */
 .map-march-marker {
   pointer-events: none;
   fill: var(--accent);
   stroke: var(--bg);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 70%, transparent));
 }
 
 .map-march-marker.is-returning {
   fill: var(--good);
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--good) 70%, transparent));
 }
 
 @keyframes map-march-flow {

@@ -339,9 +339,99 @@ export function createMapPanel(ctx: UiCtx): Panel {
   const fortSelRing = svg('circle', { class: 'map-sel-ring', r: '0', fill: 'none' })
   fortSelRing.setAttribute('vector-effect', 'non-scaling-stroke')
   fortSelRing.style.display = 'none'
+  // Miękka poświata (url(#mapGlow)) na NIELICZNYCH markerach nakładki: aktywny i
+  // wybrany pierścień świecą WŁASNĄ barwą obrysu (token-following) — premium read
+  // bez nakładania filtra na 125 idle-kropek (te mają tani CSS drop-shadow tylko
+  // przy :hover/.is-selected).
+  activeRing.style.filter = 'url(#mapGlow)'
+  selRing.style.filter = 'url(#mapGlow)'
+  fortSelRing.style.filter = 'url(#mapGlow)'
   overlayGroup.appendChild(activeRing)
   overlayGroup.appendChild(selRing)
   overlayGroup.appendChild(fortSelRing)
+
+  // ---- Współdzielone <defs>: gradient „orba" obozu + miękka poświata ------
+  // Jeden radialny gradient na WSZYSTKIE ~125 kropek (tani: jedna definicja, wiele
+  // referencji url(#mapBarbOrb)). gradientUnits=objectBoundingBox (domyślne) → cx/cy/r
+  // to ułamki bboxu każdego okręgu, więc ten sam względny refleks i ciemny rant
+  // renderują się identycznie niezależnie od promienia (tieru) kropki — efekt kuli 3D.
+  // Refleks przesunięty w górę-lewo (cx/cy + fx/fy) daje hotspot + spadek krawędzi.
+  // Stopy WYPROWADZONE z tokenu --bad (zmiana palety przepływa przez wszystkie trzy)
+  // i ustawione przez style.stopColor, bo color-mix()/var() to nie jest poprawna
+  // gramatyka atrybutów prezentacji SVG (to samo dokumentuje dom.ts shieldIcon).
+  const defs = document.createElementNS(SVG_NS, 'defs') as SVGDefsElement
+  {
+    const orb = svg('radialGradient', {
+      id: 'mapBarbOrb',
+      cx: '0.36',
+      cy: '0.32',
+      r: '0.78',
+      fx: '0.30',
+      fy: '0.26',
+    })
+    // Refleks (góra-lewo): rozjaśniony token. Trzymamy go wąsko, by nawet mała
+    // kropka niskiego tieru pozostała głównie w barwie tokenu, nie zjedzona przez rant.
+    const sHi = svg('stop', { offset: '0%' })
+    sHi.style.stopColor = 'color-mix(in srgb, white 42%, var(--bad))'
+    // Półton — DOMINUJĄCY korpus orba (czysty token --bad).
+    const sMid = svg('stop', { offset: '55%' })
+    sMid.style.stopColor = 'var(--bad)'
+    // Zacieniony rant: token zepchnięty ku tłu — spadek krawędzi kuli (tylko skraj).
+    const sRim = svg('stop', { offset: '100%' })
+    sRim.style.stopColor = 'color-mix(in srgb, var(--bad) 58%, var(--bg))'
+    orb.appendChild(sHi)
+    orb.appendChild(sMid)
+    orb.appendChild(sRim)
+    defs.appendChild(orb)
+
+    // Analogiczny orb GWIAZDY fortecy (M11.4b): osobny <radialGradient> wyprowadzony z
+    // tokenu „fioletu łupu" (--cat-plunder, NIE --bad), by boss-cel przestał być jedyną
+    // PŁASKĄ figurą wśród błyszczących obozów-kul. Fortec jest garstka (FORTRESS_COUNT « 125),
+    // więc dodatkowy gradient nic nie kosztuje. Te same względne cx/cy/r co orb obozu →
+    // spójna bryła 3D; stopy: rozjaśniony hotspot → czysty token → token zepchnięty ku tłu (rant).
+    const fortOrb = svg('radialGradient', {
+      id: 'mapFortOrb',
+      cx: '0.36',
+      cy: '0.32',
+      r: '0.78',
+      fx: '0.30',
+      fy: '0.26',
+    })
+    const fHi = svg('stop', { offset: '0%' })
+    fHi.style.stopColor = 'color-mix(in srgb, white 50%, var(--cat-plunder))'
+    const fMid = svg('stop', { offset: '55%' })
+    fMid.style.stopColor = 'var(--cat-plunder)'
+    const fRim = svg('stop', { offset: '100%' })
+    fRim.style.stopColor = 'color-mix(in srgb, var(--cat-plunder) 55%, var(--bg))'
+    fortOrb.appendChild(fHi)
+    fortOrb.appendChild(fMid)
+    fortOrb.appendChild(fRim)
+    defs.appendChild(fortOrb)
+
+    // Miękka poświata SOURCE-graphic: blur → scalenie pod oryginałem. Każdy element
+    // świeci własną barwą wypełnienia/obrysu (bez stałego flooda, token-following).
+    // Szeroki region (-60%..160% bboxu), by halo nie było obcięte. Stosowana TYLKO do
+    // kilku markerów nakładki + tarczy gracza — NIGDY do 125 kropek (perf).
+    const glow = svg('filter', {
+      id: 'mapGlow',
+      x: '-60%',
+      y: '-60%',
+      width: '220%',
+      height: '220%',
+    })
+    const blur = svg('feGaussianBlur', {
+      in: 'SourceGraphic',
+      stdDeviation: '1.2',
+      result: 'mapGlowBlur',
+    })
+    const merge = svg('feMerge', {})
+    merge.appendChild(svg('feMergeNode', { in: 'mapGlowBlur' }))
+    merge.appendChild(svg('feMergeNode', { in: 'SourceGraphic' }))
+    glow.appendChild(blur)
+    glow.appendChild(merge)
+    defs.appendChild(glow)
+  }
+  svgEl.appendChild(defs)
 
   svgEl.appendChild(gridGroup)
   svgEl.appendChild(marchesGroup)
@@ -1360,8 +1450,12 @@ export function createMapPanel(ctx: UiCtx): Panel {
         r: String(r),
         class: 'map-node-dot',
       })
+      // Sferyczna głębia: wspólny gradient url(#mapBarbOrb) (objectBoundingBox →
+      // identyczny względny refleks na każdej kropce, niezależnie od promienia/tieru).
+      circle.setAttribute('fill', 'url(#mapBarbOrb)')
       // Tier intensity via fill-opacity on the token hue (--bad from CSS): higher
-      // tiers brighter, never a hardcoded colour.
+      // tiers brighter, never a hardcoded colour. fill-opacity mnoży alfę CAŁEGO
+      // paint-servera (gradientu), więc kodowanie tieru przez przezroczystość zostaje.
       circle.setAttribute('fill-opacity', String(barbOpacity(barb.level)))
       circle.setAttribute('vector-effect', 'non-scaling-stroke')
       const title = document.createElementNS(SVG_NS, 'title')
@@ -1485,6 +1579,9 @@ export function createMapPanel(ctx: UiCtx): Panel {
       if (!v) continue
       const g = document.createElementNS(SVG_NS, 'g') as SVGGElement
       g.setAttribute('class', 'map-node map-node--player')
+      // Ciepłe halo złotej stolicy — ta sama wspólna poświata co pierścienie nakładki
+      // (garstka tarcz, więc filtr jest tani; nie dotyka 125 kropek obozów).
+      g.style.filter = 'url(#mapGlow)'
       const shield = shieldIcon()
       shield.setAttribute('x', String(v.x - size / 2))
       shield.setAttribute('y', String(v.y - size / 2))
