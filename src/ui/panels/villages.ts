@@ -51,8 +51,8 @@ interface VillageCardRefs {
   selectBtn: HTMLButtonElement
   coords: HTMLElement
   prod: Record<ResourceId, HTMLElement>
-  storage: HTMLElement
-  pop: HTMLElement
+  storage: { value: HTMLElement; bar: HTMLElement }
+  pop: { value: HTMLElement; bar: HTMLElement }
   units: HTMLElement
 }
 
@@ -80,6 +80,38 @@ function makeStatRow(label: string): { row: HTMLElement; value: HTMLElement } {
   const value = h('span', 'num')
   row.appendChild(value)
   return { row, value }
+}
+
+// A labeled mini gauge: a 'label..value' line over a thin .bar fill (design-system component).
+function makeGauge(label: string, ariaLabel: string): { row: HTMLElement; value: HTMLElement; bar: HTMLElement } {
+  const wrap = h('div')
+  wrap.style.display = 'flex'
+  wrap.style.flexDirection = 'column'
+  wrap.style.gap = '2px'
+  const line = h('div')
+  line.style.display = 'flex'
+  line.style.justifyContent = 'space-between'
+  line.style.alignItems = 'baseline'
+  line.style.gap = 'var(--space-2)'
+  line.style.fontSize = 'var(--text-sm)'
+  line.appendChild(h('span', 'muted', label))
+  const value = h('span', 'num')
+  line.appendChild(value)
+  const bar = h('div', 'bar')
+  bar.style.height = '6px'
+  bar.setAttribute('role', 'progressbar')
+  bar.setAttribute('aria-valuemin', '0')
+  bar.setAttribute('aria-valuemax', '100')
+  bar.setAttribute('aria-label', ariaLabel)
+  bar.appendChild(h('i'))
+  wrap.appendChild(line)
+  wrap.appendChild(bar)
+  return { row: wrap, value, bar }
+}
+
+// Clamp ratio*100 to a finite 0..100 percentage (NaN/Infinity -> full).
+function gaugePct(part: number): number {
+  return Number.isFinite(part) ? Math.max(0, Math.min(100, part)) : 100
 }
 
 /** Highest current stock across resources — the binding "how full is storage" value. */
@@ -183,10 +215,10 @@ export function createVillagesPanel(ctx: UiCtx): Panel {
     prodWrap.appendChild(prodChips)
     card.appendChild(prodWrap)
 
-    const storageRow = makeStatRow('Magazyn')
-    card.appendChild(storageRow.row)
-    const popRow = makeStatRow('Populacja')
-    card.appendChild(popRow.row)
+    const storageGauge = makeGauge('Magazyn', 'Zapełnienie magazynu wioski: ' + name)
+    card.appendChild(storageGauge.row)
+    const popGauge = makeGauge('Populacja', 'Zapełnienie populacji wioski: ' + name)
+    card.appendChild(popGauge.row)
     const unitsRow = makeStatRow('Wojsko (jedn.)')
     card.appendChild(unitsRow.row)
 
@@ -206,8 +238,8 @@ export function createVillagesPanel(ctx: UiCtx): Panel {
       selectBtn,
       coords: coordsRow.value,
       prod,
-      storage: storageRow.value,
-      pop: popRow.value,
+      storage: { value: storageGauge.value, bar: storageGauge.bar },
+      pop: { value: popGauge.value, bar: popGauge.bar },
       units: unitsRow.value,
     }
   }
@@ -319,11 +351,44 @@ export function createVillagesPanel(ctx: UiCtx): Panel {
       for (const r of RESOURCE_IDS) ref.prod[r].textContent = formatRate(v.production[r])
 
       const fullest = fullestStock(v.resources)
-      ref.storage.textContent =
+      ref.storage.value.textContent =
         formatNumber(v.resources[fullest]) + ' / ' + formatNumber(v.storageCap)
+      const storagePct = v.storageCap.gt(0) ? gaugePct(v.resources[fullest].div(v.storageCap).mul(100).toNumber()) : 0
+      const sFill = ref.storage.bar.firstElementChild as HTMLElement | null
+      if (sFill) sFill.style.width = storagePct + '%'
+      ref.storage.bar.setAttribute('aria-valuenow', String(Math.round(storagePct)))
+      // Near-cap (>=90%) -> czerwone wypełnienie, spójnie z HUD (M11.7). Kolor nie jest
+      // jedynym nośnikiem: długość paska i liczby X / Y również niosą zapełnienie.
+      ref.storage.bar.classList.toggle('is-bad', storagePct >= 90)
+      // Near-cap niesie też DYSKRETNY stan do AT (jak HUD, layout.ts) — z liczbami,
+      // by ostrzeżenie i wartości były ogłoszone razem; poza progiem czyścimy, żeby
+      // czytnik wrócił do aria-valuenow i nie czytał nieaktualnego tekstu.
+      if (storagePct >= 90)
+        ref.storage.bar.setAttribute(
+          'aria-valuetext',
+          formatNumber(v.resources[fullest]) + ' / ' + formatNumber(v.storageCap) +
+            ' (' + Math.round(storagePct) + '% — blisko limitu)',
+        )
+      else ref.storage.bar.removeAttribute('aria-valuetext')
 
       const used = usedPopulation(v)
-      ref.pop.textContent = formatInt(used) + ' / ' + formatInt(v.popCap)
+      ref.pop.value.textContent = formatInt(used) + ' / ' + formatInt(v.popCap)
+      const popPct = v.popCap.gt(0) ? gaugePct(used.div(v.popCap).mul(100).toNumber()) : 0
+      const pFill = ref.pop.bar.firstElementChild as HTMLElement | null
+      if (pFill) pFill.style.width = popPct + '%'
+      ref.pop.bar.setAttribute('aria-valuenow', String(Math.round(popPct)))
+      // Populacja czerwienieje DOPIERO przy osiągniętym limicie (>=100%), nie przy 90% jak
+      // magazyn: pełen magazyn marnuje produkcję (pilne ostrzeżenie), a pełna populacja to
+      // twardy sufit rekrutacji, nie strata — inny próg, ta sama gramatyka koloru+tekstu.
+      // AT dostaje dyskretny stan z liczbami; poniżej progu czyścimy aria-valuetext.
+      ref.pop.bar.classList.toggle('is-bad', popPct >= 100)
+      if (popPct >= 100)
+        ref.pop.bar.setAttribute(
+          'aria-valuetext',
+          formatInt(used) + ' / ' + formatInt(v.popCap) +
+            ' (' + Math.round(popPct) + '% — limit osiągnięty)',
+        )
+      else ref.pop.bar.removeAttribute('aria-valuetext')
 
       let total = 0
       for (const u of UNIT_IDS) total += v.units[u]
