@@ -130,6 +130,17 @@ export interface UiCtx {
    */
   onUpgradeUnit: (unitId: UnitId) => boolean
   /**
+   * ACTIVATE (M16 PALADYN) the paladin's cooldown-gated ability — the game's FIRST player-
+   * triggered buff; returns true on success, false when it cannot fire (no Pałac paladyna / too
+   * low level / on cooldown / already active). On success the buff is armed (`abilityRemaining`)
+   * and the cooldown locked (`cooldownRemaining`), then committed + persisted. No recompute is
+   * needed — the buff's combat effect is read on demand at resolution (via paladinMods), not folded
+   * into derived stats. The paladin panel reads `canActivateAbility` (systems/paladin) itself for
+   * the disabled cue — this callback is the commit, not the validation. Mirrors {@link onClaimEvent}
+   * / {@link onUpgradeUnit} (a player-initiated, commit-on-success action; never runs in the tick).
+   */
+  onActivatePaladin: () => boolean
+  /**
    * Purchase the NEXT level of the global tech node `nodeId`, paid from the GLOBAL
    * resource pool (summed across all villages); returns true on success (cost spent,
    * `state.tech[nodeId]` incremented, derived multipliers recomputed, committed +

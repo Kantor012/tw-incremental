@@ -35,6 +35,14 @@ import {
 import { canUpgrade, upgradeUnit } from '../src/systems/forge'
 import { isUpgradeable } from '../src/content/forge'
 import {
+  paladinUnlocked,
+  paladinMods,
+  canActivateAbility,
+  activateAbility,
+  advancePaladin,
+} from '../src/systems/paladin'
+import { MAX_PALADIN_LEVEL, PALADIN_ABILITY, paladinAuraMult } from '../src/content/paladin'
+import {
   effectiveMods,
   ascend,
   purchasePrestige,
@@ -138,6 +146,14 @@ import {
   checkUpgradeDeterminism,
   checkUpgradeSaveLoad,
   checkForgeResetsOnAscend,
+  checkPaladinInert,
+  checkXpGains,
+  checkAuraApplies,
+  checkAbilityApplies,
+  checkPaladinDeterminism,
+  checkPaladinBigVsChunked,
+  checkPaladinSaveLoad,
+  checkPaladinResetsOnAscend,
   type InvariantResult,
 } from './invariants'
 import {
@@ -2162,6 +2178,212 @@ export function runForge(seed: string, ticks: number = FORGE_TICKS): ForgeRun {
   return { invariants, upgrades, attackBefore, attackAfter, defenseBefore, defenseAfter }
 }
 
+// --- M16 paladin (PALADYN — the hero that grows in battle) dedicated run -------------------------
+//
+// A SEPARATE run, the ONLY one that ever builds the Pałac paladyna (content/buildings.paladin,
+// autoBuildable:false) and so the ONLY one that UNLOCKS the paladin. The paladin is the game's FIRST
+// progress driver fed by the PvE loop ITSELF: it earns XP from WON attacks (xpFromBattle at resolution in
+// advanceMarches), promotes up a finite ladder, and radiates a scaling AURA — a GLOBAL attack+defence
+// multiplier folded into effectiveMods (the 7th combine source, paladinMods). The main + meta runs never
+// build the Pałac (the bot / auto-build skip autoBuildable:false buildings — MAIN_BUILD_IDS), so
+// paladinUnlocked stays false, paladinMods folds to identity, the battle-XP accrual is gated off, and a
+// no-Palace run is BYTE-IDENTICAL to pre-M16 — proven directly by paladin-inert on the PRIMARY run's final
+// state. This run builds the Pałac DIRECTLY (the dedicated-run helper pattern, mirroring runCavalry's
+// Stajnia), recruits an axeman strike force and FARMS a beatable barbarian camp through the REAL tick so
+// the self-reinforcing loop (fight → stronger paladin → fight) drives the hero up several levels, then
+// proves the aura folds into effectiveMods and the active ability overlays + expires. Pure + deterministic.
+
+/**
+ * Step budget for the SEPARATE M16 paladin run. Generous: it must recruit a strike force, then march it at
+ * a camp and back ONCE or twice to accrue enough XP for the level goal (breaks the moment the goal is met).
+ */
+const PALADIN_TICKS = 12000
+
+/**
+ * Paladin levels the dedicated run must reach through real wins — "kilka poziomów" (several).
+ * Set ABOVE what a single win can buy: xpForLevel(5)=3000 XP, while the SUBLINEAR xpFromBattle
+ * (sqrt, content/paladin.ts) caps a single win on the strongest beatable camp (L30, defence
+ * ~94k) at ~2455 XP. So reaching this goal ALWAYS takes more than one battle — the invariant
+ * below asserts exactly that, proving the M16 loop is self-reinforcing, NOT a one-shot max.
+ */
+const PALADIN_LEVEL_GOAL = 5
+
+/** What a paladin run yields: sampled invariants + the level / XP / win tally. */
+interface PaladinRun {
+  invariants: InvariantResult[]
+  finalLevel: number
+  xpGained: number
+  wins: number
+}
+
+/**
+ * Drive a fresh seeded capital through the M16 paladin loop and prove the FIGHT→XP→LEVEL→AURA pipeline is
+ * reachable and self-reinforcing. Hands the capital the PROVEN endgame economy (every building — which
+ * BUILDS the Pałac paladyna, the gate the main run never opens — AND every tech maxed, so the strike force
+ * out-fights real camps), freezes raids + the global horde (isolate the mechanic — exactly as
+ * runFortress/runCavalry do), then each tick recruits axemen and, once a stack stands, marches it at the
+ * STRONGEST barbarian camp it beats even at WORST luck (no catapults / nobles, so the camp persists and can
+ * be FARMED). Every WON attack feeds the paladin XP at resolution (gainPaladinXp threaded through the real
+ * simulate), so the hero climbs the ladder. Stops once the level goal is met, then proves: the aura lifts
+ * effectiveMods attack AND defence to EXACTLY baseline × paladinAuraMult(level) (paladin-aura-active), and
+ * the active ability overlays its surge onto the aura and reverts on its tick-grid expiry
+ * (paladin-ability-active). Samples the hard invariants throughout + a bare 'paladin-leveled' reachability
+ * proof. Deterministic — the paladin draws no rng; the only randomness is the seeded combat-luck stream.
+ */
+export function runPaladin(seed: string, ticks: number = PALADIN_TICKS): PaladinRun {
+  const dt = TARGETS.tickSeconds
+  const state = createInitialState(seed, 0)
+  const invariants: InvariantResult[] = []
+  const v = state.villages[state.villageOrder[0]]
+
+  // Proven endgame economy (mirrors runCavalry/runFortress): every building + tech at its data max. This
+  // BUILDS the Pałac paladyna (which the MAIN bot/auto-build never raise — autoBuildable:false), UNLOCKING
+  // the paladin the dedicated run grows. Direct set is the dedicated-run helper pattern.
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  for (const nodeId of TECH_NODE_IDS) state.tech[nodeId] = TECH_NODES[nodeId].maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  // Freeze raids + the global horde so the ONLY combat is the paladin's attacks (isolate the mechanic).
+  v.raidTimer = ticks * dt + 1e9
+  state.horde.timer = ticks * dt + 1e9
+  const mods = effectiveMods(state)
+
+  const paladinBuilt = v.buildings.paladin // the gate the main run never opens (maxed here).
+  if (!paladinUnlocked(state)) {
+    invariants.push({ name: 'paladin-leveled', ok: false, detail: 'Pałac paladyna did not unlock the paladin' })
+    return { invariants, finalLevel: 0, xpGained: 0, wins: 0 }
+  }
+
+  // BASELINE mods captured with the paladin still at level 0 (paladinMods identity → mods === baseline).
+  // After the hero levels, effectiveMods.attackMult/defenseMult must be EXACTLY this × paladinAuraMult(level).
+  const baseAttackMult = mods.attackMult
+  const baseDefenseMult = mods.defenseMult
+
+  let wins = 0
+  let prevLog: BattleReport[] = state.battleLog.slice()
+  let prevTotal = totalResources(state)
+  let actedInWindow = 0
+
+  for (let i = 0; i < ticks; i++) {
+    // Train axemen toward the popCap (held at home until a strike force stands).
+    recruitToward(v, 'axeman', Number.MAX_SAFE_INTEGER, mods)
+
+    // Once a stack stands and nothing is already marching, march the WHOLE stationed axeman force at the
+    // STRONGEST barbarian camp it beats even at WORST luck (camps are tier-ascending, so the last beatable
+    // is the strongest/richest = the most XP per win). No catapults / nobles, so the camp survives to be
+    // farmed again — the self-reinforcing loop.
+    if (v.marches.length === 0) {
+      const home = stationedUnits(v)
+      if (home.axeman >= 1) {
+        const strike = zeroRoster()
+        strike.axeman = home.axeman
+        const atkWorst = armyAttackPower(strike, mods) * WORST_LUCK
+        let bestId: string | undefined
+        for (const b of state.world.barbarians) {
+          const outcome = battleOutcome(atkWorst, barbarianTarget(b.level).defensePower)
+          if (!outcome.attackerWins) continue
+          if (armyCarry(applyLosses(strike, outcome.attackerLossFrac)) <= 0) continue
+          bestId = b.id // ascending order → keep the strongest beatable (most XP per win)
+        }
+        if (bestId !== undefined) {
+          sendAttack(v, state.world, state.battleLog, bestId, strike, mods)
+        }
+      }
+    }
+
+    simulate(state, dt)
+
+    // Count WON attacks (the only attacks this run sends) through the rolling battle log.
+    for (const r of newBattleReports(prevLog, state.battleLog)) {
+      if (r.kind === 'attack') {
+        actedInWindow += 1
+        if (r.won) wins += 1
+      }
+    }
+    prevLog = state.battleLog.slice()
+
+    if ((i + 1) % SAMPLE_EVERY === 0) {
+      const phase = `pal t${i + 1}`
+      invariants.push(...tag(runInvariants(state), phase))
+      invariants.push(...tag([checkArmyConsistency(state)], phase))
+      invariants.push(...tag([checkWorldConsistency(state)], phase))
+      invariants.push(...tag([checkRoundTrip(state)], phase))
+      invariants.push(...tag([checkNoSoftlock(state, prevTotal, actedInWindow > 0)], phase))
+      prevTotal = totalResources(state)
+      actedInWindow = 0
+    }
+
+    // STOP once the hero has climbed to the level goal — the self-reinforcing loop is proven.
+    if (state.paladin.level >= PALADIN_LEVEL_GOAL) break
+  }
+
+  const finalLevel = state.paladin.level
+  const xpGained = state.paladin.xp
+
+  // Final pass (mirrors the other dedicated runs): the post-farm state stays valid + playable.
+  invariants.push(...tag(runInvariants(state), 'palfinal'))
+  invariants.push(...tag([checkArmyConsistency(state)], 'palfinal'))
+  invariants.push(...tag([checkWorldConsistency(state)], 'palfinal'))
+  invariants.push(...tag([checkNoSoftlock(state, totalResources(state), wins > 0)], 'palfinal'))
+
+  // Bare-named HARD invariant (mirrors runCavalry's 'cavalry-attack-won'): the dedicated run must climb the
+  // paladin to the level goal through the resolved-battle XP path — proof the M16 FIGHT→XP→LEVEL loop
+  // completes end to end through the real tick. Crucially it demands MORE THAN ONE win (`wins > 1`): the
+  // sublinear xpFromBattle (sqrt) means no single battle can buy the goal, so a pass proves the loop is
+  // genuinely self-reinforcing (walcz → silniejszy paladyn → walcz), not a one-shot max — the defect the
+  // FAZA 5 review flagged in the old linear reward. Since this run's ONLY combat is its own attacks, `wins`
+  // at the break is exactly the wins it took to reach the goal.
+  const leveled = wins > 1 && finalLevel >= PALADIN_LEVEL_GOAL && xpGained > 0 && state.stats.paladinLevelUps >= PALADIN_LEVEL_GOAL
+  invariants.push({
+    name: 'paladin-leveled',
+    ok: leveled,
+    detail: leveled
+      ? `won ${wins} attacks (>1) → ${xpGained} XP → paladin level ${finalLevel}/${MAX_PALADIN_LEVEL} (Pałac L${paladinBuilt}, levelUps=${state.stats.paladinLevelUps})`
+      : `paladin loop not proven within ${ticks} ticks (needs >1 win to level ${PALADIN_LEVEL_GOAL}; got wins=${wins}, xp=${xpGained}, level=${finalLevel})`,
+  })
+
+  // AURA folds into effectiveMods: with the hero at level N the global attack AND defence multipliers must
+  // be EXACTLY baseline × paladinAuraMult(N) (strictly above the level-0 baseline). The aura is a GLOBAL
+  // multiplier riding the 7th combine source, so it reaches every combat resolution + forecast through `mods`.
+  const auraMods = effectiveMods(state)
+  const aura = paladinAuraMult(finalLevel)
+  const auraOk =
+    finalLevel >= 1 &&
+    auraMods.attackMult > baseAttackMult &&
+    auraMods.defenseMult > baseDefenseMult &&
+    Math.abs(auraMods.attackMult - baseAttackMult * aura) < 1e-9 &&
+    Math.abs(auraMods.defenseMult - baseDefenseMult * aura) < 1e-9
+  invariants.push({
+    name: 'paladin-aura-active',
+    ok: auraOk,
+    detail: auraOk
+      ? `L${finalLevel} aura (×${aura.toFixed(3)}) lifted effectiveMods attack ${baseAttackMult.toFixed(3)}→${auraMods.attackMult.toFixed(3)} and defence ${baseDefenseMult.toFixed(3)}→${auraMods.defenseMult.toFixed(3)}`
+      : `aura did not fold into effectiveMods as baseline × paladinAuraMult(${finalLevel}=×${aura.toFixed(3)}): attack ${baseAttackMult}→${auraMods.attackMult}, defence ${baseDefenseMult}→${auraMods.defenseMult}`,
+  })
+
+  // ACTIVE ability: fire the player-triggered surge (off cooldown after the farm), confirm paladinMods
+  // overlays the ability's attack multiplier ON TOP of the aura, then advance past the duration and confirm
+  // it EXPIRES (returns the re-aggregation signal) back to the bare aura.
+  const abilityMult = PALADIN_ABILITY.mods.attackMult ?? 1
+  const couldActivate = canActivateAbility(state)
+  const activated = couldActivate && activateAbility(state)
+  const activeAtk = paladinMods(state).attackMult
+  const overlaidOk = activated && Math.abs(activeAtk - aura * abilityMult) < 1e-9
+  const expired = advancePaladin(state, PALADIN_ABILITY.durationSecs)
+  const revertedAtk = paladinMods(state).attackMult
+  const revertOk = expired && Math.abs(revertedAtk - aura) < 1e-9
+  const abilityOk = overlaidOk && revertOk
+  invariants.push({
+    name: 'paladin-ability-active',
+    ok: abilityOk,
+    detail: abilityOk
+      ? `Szarża overlaid ×${abilityMult} attack onto the aura (paladinMods.attackMult ×${activeAtk.toFixed(3)}) then expired back to the aura (×${revertedAtk.toFixed(3)})`
+      : `ability overlay/expiry failed (couldActivate=${couldActivate}, activeAttack=${activeAtk}, expired=${expired}, reverted=${revertedAtk}, expected active=${(aura * abilityMult).toFixed(3)} / reverted=${aura.toFixed(3)})`,
+  })
+
+  return { invariants, finalLevel, xpGained, wins }
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -2597,6 +2819,33 @@ export function runOne(seed: string, ticks: number): RunResult {
   // M15 ↔ meta interaction: the per-run upgrade map must clear on prestige (ascend) AND on the great reset
   // (newEra), exactly like state.tech — otherwise a fresh run keeps free permanent upgrades with a level-0 Kuźnia.
   invariants.push(checkForgeResetsOnAscend(seed))
+
+  // M16 paladin (PALADYN — the hero that grows in battle) — a SEPARATE dedicated run, the ONLY one that ever
+  // builds the Pałac paladyna (autoBuildable:false) and so the ONLY one that unlocks the paladin. The main +
+  // meta runs never build it, so paladinUnlocked stays false: paladinMods folds to identity (the 7th combine
+  // source a no-op) AND the battle-XP accrual is gated off, so state.paladin is never mutated → a no-Palace
+  // run is BYTE-IDENTICAL to pre-M16 — proven directly by paladin-inert on the PRIMARY run's final state. The
+  // dedicated run drives the FIGHT→XP→LEVEL loop and folds in its bare 'paladin-leveled' / 'paladin-aura-active'
+  // / 'paladin-ability-active' reachability proofs.
+  const paladin = runPaladin(seed, PALADIN_TICKS)
+  invariants.push(...paladin.invariants)
+
+  // M16 proof-of-mechanic checks (self-contained, deterministic — the paladin draws NO rng / clock): the MAIN
+  // run left the paladin pristine + paladinMods identity, and the pre-M16-stripped save migrates back byte-
+  // identically (paladin-inert, reading the PRIMARY run's final state — mirrors checkForgeInert); won battles
+  // raise XP and promote deterministically, capped at MAX, with the no-Palace grant a no-op (paladin-xp-gains);
+  // the aura scales attack AND defence by EXACTLY paladinAuraMult (paladin-aura-applies); the active ability
+  // overlays + reverts (paladin-ability-applies); the same action sequence replays byte-identically
+  // (paladin-determinism); a state carrying a paladin survives the v26 save/load path (paladin-save-load); and
+  // every meta reset wipes the per-run paladin (paladin-resets-on-ascend), exactly like state.tech / state.forge.
+  invariants.push(checkPaladinInert(primary.state, seed))
+  invariants.push(checkXpGains(seed))
+  invariants.push(checkAuraApplies(seed))
+  invariants.push(checkAbilityApplies(seed))
+  invariants.push(checkPaladinDeterminism(seed))
+  invariants.push(checkPaladinBigVsChunked(seed))
+  invariants.push(checkPaladinSaveLoad(seed))
+  invariants.push(checkPaladinResetsOnAscend(seed))
 
   const metrics = collect(
     seed,

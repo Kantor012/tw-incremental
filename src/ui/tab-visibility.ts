@@ -164,6 +164,13 @@ export function tabVisible(id: string, state: GameState): boolean {
       // capital (monotonic — the counter only ever grows), so a player who has upgraded a unit
       // never loses the tab. Mirrors `events` (watchtower + eventsResolved).
       return someVillageHasBuilding(s, 'forge') || s.stats.unitsUpgraded > 0
+    case 'paladin':
+      // Revealed by the manually-built Pałac paladyna (the mechanic's gate, autoBuildable:false);
+      // the lifetime `paladinLevelUps` clause keeps it visible across a reset that rebuilds a fresh
+      // capital (monotonic — the counter only ever grows), so a player who has levelled the paladin
+      // never loses the tab. Mirrors `forge` (Kuźnia + unitsUpgraded) / `events` (watchtower +
+      // eventsResolved).
+      return someVillageHasBuilding(s, 'paladin') || s.stats.paladinLevelUps > 0
     case 'map':
       return (
         s.villageOrder.length > 1 ||

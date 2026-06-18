@@ -288,7 +288,7 @@ describe('buff save — v23 -> v24 migration backfill', () => {
     expect('buff' in raw.events).toBe(false) // precondition: genuinely a pre-buff save
 
     const m = migrate(raw)
-    expect(m.version).toBe(25)
+    expect(m.version).toBe(26)
     expect(m.version).toBe(SAVE_VERSION)
     expect(m.events.buff).toBeNull()
     expect(validateState(m).version).toBe(SAVE_VERSION)

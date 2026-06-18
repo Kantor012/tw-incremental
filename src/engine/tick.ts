@@ -6,6 +6,7 @@ import { advanceRecruitment } from '../systems/recruitment'
 import { advanceMarches } from '../systems/marches'
 import { advanceShipments } from '../systems/market'
 import { advanceEvents } from '../systems/events'
+import { advancePaladin } from '../systems/paladin'
 import { advanceRaids } from '../systems/raids'
 import { advanceHorde } from '../systems/hordes'
 import { applyConquest, advanceWorldLoyalty } from '../systems/conquest'
@@ -98,6 +99,15 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // player village would resize villageOrder under the loop. Typed off advanceMarches'
   // return so this stays decoupled from where ConquestEvent is declared.
   const conquests: ReturnType<typeof advanceMarches> = []
+  // M16: snapshot the paladin level BEFORE the village loop. A WON attack inside advanceMarches
+  // feeds XP (gainPaladinXp) that can PROMOTE the paladin mid-sub-step, and the new level raises the
+  // aura (paladinAuraMult) which folds into `mods` (attackMult/defenseMult) via paladinMods — so a
+  // promotion changes what effectiveMods returns for the REMAINING sub-steps of a big-dt span,
+  // exactly like a challenge/buff/ability flip. We OR that into the re-aggregation signal below so
+  // simulate refreshes the threaded `mods` (big-step path == chunked TICK_RATE path). The read is
+  // pure: in the main run (no Pałac) paladinUnlocked is false → gainPaladinXp no-ops → level stays 0
+  // → the comparison is always false → return byte-identical, main-run identity untouched.
+  const paladinLevelBefore = state.paladin.level
   // The EFFECTIVE modifiers (tech × prestige × era × dynasty × challenge) are a pure
   // function of the GLOBAL ledgers that production / recruitment / marches / raids /
   // conquest / automation never touch (state.tech / prestige.nodes / era.nodes /
@@ -137,8 +147,11 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
     // so the per-type Kuźnia bonus applies at the moment power is computed (attack on a march,
     // home defence on a raid). With an empty forge map (no-Kuźnia run) every unit's multiplier
     // is ×1.0, so the resolutions stay BYTE-IDENTICAL to pre-M15.
+    // M16: `state` is threaded LAST into advanceMarches so a WON attack can feed the paladin XP at
+    // resolution (gated on paladinUnlocked inside). With no Pałac paladyna the gate is false, so
+    // the main run never mutates state.paladin → byte-identical to pre-M16.
     conquests.push(
-      ...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats, rng, state.forge),
+      ...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats, rng, state.forge, state),
     )
     advanceRaids(v, state.battleLog, dt, mods, state.stats, rng, state.forge)
   }
@@ -179,6 +192,16 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // sub-step's re-aggregation signal below so simulate refreshes the threaded `mods` before the next
   // sub-step (online == offline across a buff expiry).
   const buffExpired = advanceEvents(state, dt)
+  // Paladin (M16) advances here on the fixed grid, ONCE per sub-step in this FIXED position (right
+  // after advanceEvents, before automation). It draws NO rng and reads NO clock, so its order
+  // relative to the rng draws above is irrelevant — pinned for determinism like advanceEvents. With
+  // no Pałac paladyna it early-returns (no timer move), so a run without one is BYTE-IDENTICAL to
+  // pre-M16 — online == offline == sim. Its active ABILITY is fired only by the player
+  // (activateAbility), never in the tick. Like an M14 buff expiry, advancePaladin RETURNS whether
+  // the active ability EXPIRED this sub-step — that flips the effectiveMods ledger mid-span (the
+  // surge's in-flight attackMult falls back to the bare aura), so we OR it into the re-aggregation
+  // signal below so simulate refreshes the threaded `mods` before the next sub-step.
+  const abilityExpired = advancePaladin(state, dt)
   // Automation (M5.1) runs LAST, after the world has fully settled this sub-step
   // (captures applied + barbarians removed by applyConquest, loyalty regenerated): so
   // auto-attack never targets a camp that was floored-and-removed this very step, and
@@ -221,11 +244,20 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // invariant to the `dt` split.
   state.rngState = rng.getState()
   // Signal a mid-span ledger change so simulate re-aggregates the threaded `mods` before the next
-  // sub-step. TWO sources OR together: a challenge completion (constraint/reward folded in/out) and
-  // an M14 buff EXPIRY (the buff's in-flight multipliers fall back to the unbuffed bag). Both change
-  // what effectiveMods returns for the REMAINING sub-steps of a big-dt span, so either one must
-  // trigger the refresh — keeping online (one big step) == offline (many TICK_RATE steps).
-  return challengeCompleted || buffExpired
+  // sub-step. FOUR sources OR together: a challenge completion (constraint/reward folded in/out),
+  // an M14 buff EXPIRY (the buff's in-flight multipliers fall back to the unbuffed bag), an M16
+  // paladin ABILITY EXPIRY (the surge's in-flight attackMult falls back to the bare aura), and an
+  // M16 paladin PROMOTION (a WON attack levelled the paladin mid-loop, raising the aura's
+  // attack/defenseMult for the rest of the span). Each changes what effectiveMods returns for the
+  // REMAINING sub-steps of a big-dt span, so any one must trigger the refresh — keeping online (one
+  // big step) == offline (many TICK_RATE steps). The promotion check stays false in the main run
+  // (level pinned at 0), so it never perturbs main-run identity.
+  return (
+    challengeCompleted ||
+    buffExpired ||
+    abilityExpired ||
+    state.paladin.level !== paladinLevelBefore
+  )
 }
 
 /**

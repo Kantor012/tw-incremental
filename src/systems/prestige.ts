@@ -44,6 +44,14 @@ import { aggregateChallengeMods } from './challenges'
 // is no cycle to keep benign. The buff bag is IDENTITY whenever no buff is in force (or no
 // watchtower), so a buff-free run folds to exactly the pre-M14 value — byte-identical.
 import { aggregateEventBuffMods } from './events'
+// VALUE import of the M16 paladin roll-up — the SEVENTH and final source folded into
+// effectiveMods. Used ONLY inside the body of `effectiveMods` below (never at module top level),
+// so it is safe from an initialisation cycle. The edge is SINGLE-direction: systems/paladin.ts
+// imports types/values from state.ts and the pure content/paladin data leaf but NOTHING from this
+// module, so there is no cycle to keep benign. The paladin bag is IDENTITY whenever no Palace
+// stands (or the paladin is at level 0 with no active ability), so a no-paladin run folds to
+// exactly the pre-M16 value — byte-identical.
+import { paladinMods } from './paladin'
 
 /**
  * Prestige (ascension) engine (M4.1) — the PERMANENT meta-layer on top of tech.
@@ -236,15 +244,25 @@ export function effectiveMods(state: GameState): TechModifiers {
   // read off the WHOLE state (the buff off events.buff, which is null without a watchtower), not a
   // node sub-map like the others. The buff is the only TEMPORARY source — it appears/vanishes on
   // the tick grid, and the tick re-aggregates `mods` on its expiry signal (see tick.ts).
+  // M16: the paladin bag is COMBINED as the OUTERMOST (7th) source — `paladinMods(state)` is the
+  // identity bag when no Palace stands (or level 0 with no active ability), so `combine(x, identity)
+  // === x` byte-for-byte and a no-paladin save folds to exactly the pre-M16 value. The aura is a
+  // GLOBAL attack/defence multiplier (not per-unit), so it rides effectiveMods like a tree bag and
+  // reaches every combat resolution + forecast already threaded through `mods`. Like the buff, the
+  // paladin's active ability is TEMPORARY — the tick re-aggregates `mods` on advancePaladin's
+  // expiry signal (see tick.ts).
   return combine(
     combine(
       combine(
-        combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
-        aggregateDynastyMods(dynastyNodes),
+        combine(
+          combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
+          aggregateDynastyMods(dynastyNodes),
+        ),
+        aggregateChallengeMods(state),
       ),
-      aggregateChallengeMods(state),
+      aggregateEventBuffMods(state),
     ),
-    aggregateEventBuffMods(state),
+    paladinMods(state),
   )
 }
 
@@ -434,6 +452,12 @@ export function ascend(state: GameState): number {
   // upgrade levels above effectiveMaxUpgrade = min(catalog, forgeLevel 0) = 0). So it resets like
   // tech. stats.unitsUpgraded is a LIFETIME trophy and is deliberately left untouched.
   state.forge = {}
+  // M16: reset the paladin alongside tech/forge. The paladin is PER-RUN progress (its level/aura/XP
+  // are earned by winning battles this run and gated by the per-run Pałac paladyna, which the fresh
+  // level-0 capital resets). Leaving it intact would hand the next run a permanent aura + level lead
+  // for free, with a level-0 Palace and zero battles won — a trivial power leak. stats.paladinLevelUps
+  // is a LIFETIME trophy (survives, like the rest of stats/achievements).
+  state.paladin = { xp: 0, level: 0, abilityRemaining: 0, cooldownRemaining: 0 }
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule too (M7.2): a fresh, defenceless capital must meet a
   // fresh horde clock — re-arm the timer AND reset the escalation level to 0, exactly as

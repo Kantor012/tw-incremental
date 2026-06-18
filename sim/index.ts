@@ -714,6 +714,43 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M16 paladin coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  // The level / XP / win tally rides the paladin-leveled detail string (mirrors how the upgrade tally rides
+  // forge-upgrades-applied). paladin-leveled / -aura-active / -ability-active prove the FIGHT→XP→LEVEL→AURA→
+  // ABILITY loop is reachable through the real tick; paladin-inert / -xp-gains / -aura-applies / -ability-applies
+  // / -determinism / -save-load / -resets-on-ascend are the deterministic identity + exact-multiplier + save +
+  // reset proofs.
+  console.log('--- M16 paladin: PALADYN — bohater rosnący w walce (coverage) ---')
+  const m16Names = [
+    'paladin-leveled',
+    'paladin-aura-active',
+    'paladin-ability-active',
+    'paladin-inert',
+    'paladin-xp-gains',
+    'paladin-aura-applies',
+    'paladin-ability-applies',
+    'paladin-determinism',
+    'paladin-big-vs-chunked',
+    'paladin-save-load',
+    'paladin-resets-on-ascend',
+  ]
+  for (const r of results) {
+    const line = m16Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing level tally + inertness / aura / ability / determinism / save / reset is visible.
+    for (const name of m16Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Automation per seed (M5.1 idle routines; SEPARATE coverage run, automation ON) ---
   console.log('--- Automation (idle routines, separate coverage run) ---')
   console.log('seed     | auto-built (levels) | auto-recruited (units) | auto-attacked (resolved)')

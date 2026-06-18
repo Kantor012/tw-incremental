@@ -9,6 +9,7 @@ import {
   type World,
   type TechModifiers,
   type Stats,
+  type GameState,
 } from '../engine/state'
 import { UNIT_IDS, UNITS, type UnitId } from '../content/units'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
@@ -26,6 +27,8 @@ import { RNG } from '../engine/rng'
 import { barracksUnlocked } from './recruitment'
 import { distance, barbarianById, fortressById } from './world'
 import { nobleCount, LOYALTY_NOBLE_HIT, type ConquestEvent } from './conquest'
+import { paladinUnlocked, gainPaladinXp } from './paladin'
+import { xpFromBattle } from '../content/paladin'
 
 /**
  * March engine — the GENERIC, deterministic mover for PvE attacks (M1.3, spatial
@@ -507,6 +510,12 @@ export function advanceMarches(
   // calculation at RESOLUTION. OPTIONAL and last so every existing call stays identical;
   // undefined → unitUpgradeMult(0) = ×1.0 per unit → byte-identical to pre-M15.
   forge?: Partial<Record<UnitId, number>>,
+  // M16: the whole GameState, threaded in ONLY so a WON attack can feed the paladin XP at
+  // RESOLUTION (gainPaladinXp, gated on paladinUnlocked). OPTIONAL and last so every existing
+  // call (tests, the campaign/forecast mirrors) stays identical: when undefined the XP branch is
+  // skipped entirely. Even when threaded, with no Pałac paladyna paladinUnlocked is false, so the
+  // main run never mutates state.paladin — byte-identical to pre-M16.
+  gameState?: GameState,
 ): ConquestEvent[] {
   const events: ConquestEvent[] = []
   if (!(dtSeconds > 0)) return events
@@ -606,6 +615,15 @@ export function advanceMarches(
       const survivors = applyLosses(sent, outcome.attackerLossFrac)
       const losses = applyCasualties(v, sent, survivors)
       if (stats !== undefined) stats.attacksWon += 1 // M5.4: lifetime counter
+
+      // M16: a WON attack (camp OR fortress — this is the shared win point) feeds the paladin XP
+      // proportional to the DEFEATED target's defence (xpFromBattle(target.defensePower)). GATED on
+      // paladinUnlocked: with no Pałac paladyna the paladin never unlocks, so the main run takes no
+      // branch here and state.paladin is never mutated → serialize byte-identical to pre-M16. When
+      // gameState is undefined (tests / forecast mirrors) the accrual is skipped outright.
+      if (gameState !== undefined && paladinUnlocked(gameState)) {
+        gainPaladinXp(gameState, xpFromBattle(target.defensePower))
+      }
 
       if (isFortress) {
         // FORTRESS WIN (M7): raze the boss PERMANENTLY (one-time — a razed fortress is

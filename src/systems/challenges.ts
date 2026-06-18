@@ -227,6 +227,11 @@ export function startChallenge(state: GameState, id: string): boolean {
   // capital resets; carrying state.forge into a challenge would grant free permanent ×mult upgrades
   // (combat applies them regardless of the rebuilt forgeLevel 0) and break the clean-slate contract.
   state.forge = {}
+  // M16: reset the paladin too (mirrors ascend — startChallenge resets the run). The paladin is
+  // PER-RUN progress gated by the per-run Pałac paladyna, which the fresh level-0 capital resets;
+  // carrying it into a challenge would grant a free permanent aura + level lead and break the
+  // clean-slate contract. stats.paladinLevelUps is a LIFETIME trophy (PRESERVED, like the rest).
+  state.paladin = { xp: 0, level: 0, abilityRemaining: 0, cooldownRemaining: 0 }
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule, exactly as createInitialState / ascend seed it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation 0).

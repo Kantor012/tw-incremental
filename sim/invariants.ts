@@ -59,6 +59,21 @@ import {
   upgradeUnit,
 } from '../src/systems/forge'
 import { unitUpgradeMult } from '../src/content/forge'
+import {
+  paladinUnlocked,
+  paladinMods,
+  gainPaladinXp,
+  canActivateAbility,
+  activateAbility,
+  advancePaladin,
+} from '../src/systems/paladin'
+import {
+  MAX_PALADIN_LEVEL,
+  PALADIN_ABILITY,
+  paladinAuraMult,
+  xpForLevel,
+  xpFromBattle,
+} from '../src/content/paladin'
 import { autoAttackOnce } from '../src/systems/automation'
 import { advanceRaids } from '../src/systems/raids'
 import { advanceHorde } from '../src/systems/hordes'
@@ -4781,15 +4796,31 @@ export function checkForgeInert(state: GameState, seed: string): InvariantResult
     villageOrder: string[]
     villages: Record<string, { buildings: Record<string, number> }>
     forge?: unknown
+    paladin?: unknown
     stats: Record<string, unknown>
   }
   obj.version = 24
-  for (const vid of obj.villageOrder) delete obj.villages[vid].buildings.forge
+  for (const vid of obj.villageOrder) {
+    delete obj.villages[vid].buildings.forge
+    // M16: also strip the paladin BUILDING key so this is a GENUINE pre-M15 (v24) save. A real v24
+    // save predates BOTH the forge AND the paladin; the migration then re-adds forge (v24→v25) then
+    // paladin (v25→v26) in createInitialState order. Leaving paladin in would make the v24→v25 step
+    // re-append `forge` AFTER the already-present paladin and break the byte-identical key order.
+    delete obj.villages[vid].buildings.paladin
+  }
   delete obj.forge
   delete obj.stats.unitsUpgraded
+  // M16: strip the paladin state + its lifetime counter too (a v24 save carries neither), so the
+  // v25→v26 step re-adds them at the end, matching the live v26 serialization byte-for-byte.
+  delete obj.paladin
+  delete obj.stats.paladinLevelUps
   const preM15 = JSON.stringify(obj)
   const migrated = serialize(migrate(JSON.parse(preM15)))
-  const strippedClean = !preM15.includes('"forge"') && !preM15.includes('"unitsUpgraded"')
+  const strippedClean =
+    !preM15.includes('"forge"') &&
+    !preM15.includes('"unitsUpgraded"') &&
+    !preM15.includes('"paladin"') &&
+    !preM15.includes('"paladinLevelUps"')
   const roundTripOk = migrated === full
 
   void seed // kept for signature symmetry with checkEventsInert / checkBuffInert (no per-seed state read here)
@@ -5036,6 +5067,488 @@ export function checkForgeResetsOnAscend(seed: string): InvariantResult {
     ok,
     detail: ok
       ? 'ascend, newEra, newDynasty and startChallenge all wipe the Kuźnia upgrade map (no free permanent upgrades survive any meta reset; ×1.0 combat identity restored)'
+      : fails.join('; '),
+  }
+}
+
+// --- M16 paladin (PALADYN — the hero that grows DIRECTLY from the PvE loop) coverage ------------
+//
+// The paladin is the game's FIRST progress driver fed by the BATTLE loop itself: a WON attack grants
+// XP (xpFromBattle, proportional to the defeated wall), the paladin promotes up a FINITE ladder
+// (MAX_PALADIN_LEVEL = 10), and each level radiates a scaling AURA — a GLOBAL attack+defence multiplier
+// folded into effectiveMods via paladinMods (the SEVENTH combine source, NOT a per-unit mod). It also
+// carries the game's FIRST player-activated, cooldown-gated ABILITY (a brief strong attack surge,
+// overlaid MULTIPLICATIVELY onto the aura while it runs, reverted on its tick-grid expiry).
+//
+// It is gated by the MANUALLY-built Pałac paladyna (content/buildings.paladin, autoBuildable:false), and
+// that gate is the IDENTITY guarantee — TWO interlocking parts. (1) paladinMods returns the IDENTITY bag
+// with no Palace (or level 0 + no active ability), so the combine no-op leaves effectiveMods byte-
+// identical to pre-M16. (2) the battle-XP accrual in advanceMarches is GATED on paladinUnlocked, so the
+// main run (which never builds an autoBuildable:false building) never mutates state.paladin. Together
+// they keep the main + meta runs BYTE-IDENTICAL to pre-M16 (paladin-inert). These deterministic proof-of-
+// mechanic checks (no bot, no RNG — the paladin is purely deterministic) mirror the M15 forge-* coverage.
+
+/**
+ * The paladin is INERT in a no-Palace run (M16 — the byte-identity guarantee): after a normal MAIN run
+ * the bot never builds the autoBuildable:false Pałac paladyna, so {@link paladinUnlocked} stayed false,
+ * state.paladin is still the pristine zero record, the lifetime `stats.paladinLevelUps` counter is 0, no
+ * village raised a Pałac, and {@link paladinMods} returns the IDENTITY bag (so the 7th combine source is a
+ * byte-for-byte no-op in effectiveMods). Finally, the STRONGEST identity proof (mirrors {@link checkForgeInert}):
+ * strip the paladin BUILDING key, the paladin state and the paladinLevelUps stat, stamp the save back to
+ * v25, and require the v25→v26 migration to reproduce a BYTE-IDENTICAL v26 serialization — proof a
+ * no-Palace run never left pre-M16 ground. Reads the PRIMARY run's final `state` (mirrors
+ * {@link checkEventsInert} / {@link checkForgeInert}). Pure, no clock.
+ */
+export function checkPaladinInert(state: GameState, seed: string): InvariantResult {
+  const issues: string[] = []
+  // The gate must have stayed shut for the whole run, else inertness would be vacuous.
+  if (paladinUnlocked(state)) issues.push('a village built the Pałac paladyna (gate opened) — paladin-inert is not meaningful')
+  // INERTNESS: the paladin record is pristine, the counter is 0, no village raised a Pałac.
+  const p = state.paladin
+  if (p.xp !== 0) issues.push(`paladin.xp=${p.xp} (expected 0)`)
+  if (p.level !== 0) issues.push(`paladin.level=${p.level} (expected 0)`)
+  if (p.abilityRemaining !== 0) issues.push(`paladin.abilityRemaining=${p.abilityRemaining} (expected 0)`)
+  if (p.cooldownRemaining !== 0) issues.push(`paladin.cooldownRemaining=${p.cooldownRemaining} (expected 0)`)
+  if (state.stats.paladinLevelUps !== 0) issues.push(`stats.paladinLevelUps=${state.stats.paladinLevelUps} (expected 0)`)
+  for (const vid of state.villageOrder) {
+    const pl = state.villages[vid].buildings.paladin
+    if (pl !== 0) issues.push(`${vid}.buildings.paladin=${pl}`)
+  }
+
+  // MODS IDENTITY: with no Palace paladinMods must be field-for-field NO_TECH_MODS (the combine no-op
+  // basis), so effectiveMods is byte-identical to the six-source pre-M16 chain. Reuses the shared
+  // identity comparator (buffBagIsIdentity — the same neutral-element test the M14 buff check uses).
+  if (!buffBagIsIdentity(paladinMods(state))) {
+    issues.push('paladinMods returned a non-identity bag with no Palace (would perturb effectiveMods)')
+  }
+
+  // ROUND-TRIP EQUALITY: build the pre-M16 save shape (strip the paladin building key, the paladin state
+  // and the paladinLevelUps stat, stamp v25), migrate it (the v25→v26 empty/zero backfill) and require the
+  // re-serialization to be byte-identical to the M16 form. The 25→26 step backfills only PLAIN values
+  // (paladin:{xp:0,…}, paladinLevelUps:0 — no Decimal), and createInitialState places `paladin` LAST at the
+  // top level and `paladinLevelUps` LAST in stats, exactly where the spread-then-assign migration re-adds
+  // them, so the key order matches byte-for-byte (mirrors checkForgeInert's v24→v25 round-trip).
+  const full = serialize(state)
+  const obj = JSON.parse(full) as {
+    version: number
+    villageOrder: string[]
+    villages: Record<string, { buildings: Record<string, number> }>
+    paladin?: unknown
+    stats: Record<string, unknown>
+  }
+  obj.version = 25
+  for (const vid of obj.villageOrder) delete obj.villages[vid].buildings.paladin
+  delete obj.paladin
+  delete obj.stats.paladinLevelUps
+  const preM16 = JSON.stringify(obj)
+  const migrated = serialize(migrate(JSON.parse(preM16)))
+  const strippedClean = !preM16.includes('"paladin"') && !preM16.includes('"paladinLevelUps"')
+  const roundTripOk = migrated === full
+
+  void seed // kept for signature symmetry with checkEventsInert / checkForgeInert (no per-seed state read here)
+  const ok = issues.length === 0 && strippedClean && roundTripOk
+  return {
+    name: 'paladin-inert',
+    ok,
+    detail: ok
+      ? 'no-Palace run kept the paladin pristine (paladinMods identity — byte-identical effectiveMods); the pre-M16-stripped save migrates back byte-identically'
+      : issues.length > 0
+        ? `paladin not inert: ${issues.join('; ')}`
+        : !strippedClean
+          ? 'stripped pre-M16 save still references the paladin keys'
+          : 'pre-M16-stripped save did NOT migrate back to a byte-identical M16 state',
+  }
+}
+
+/**
+ * WON battles feed the paladin XP and PROMOTE it deterministically (M16, paladin-xp-gains). Each won
+ * attack calls `gainPaladinXp(state, xpFromBattle(target.defence))` at resolution (see
+ * systems/marches.advanceMarches); this check exercises that EXACT accretion call repeatedly from a
+ * Pałac-built capital and asserts: XP rises on EVERY win, the paladin promotes up the cumulative
+ * {@link xpForLevel} ladder (>= 1 level-up observed), the lifetime `stats.paladinLevelUps` tracks the level
+ * exactly, and the level CAPS at {@link MAX_PALADIN_LEVEL} (one more win past the top raises neither the
+ * level nor the trophy). Also proves the GATING half of the identity guarantee: the SAME call on a
+ * no-Palace state is a pure no-op (the main run never mutates state.paladin). Pure / deterministic — the
+ * paladin draws no rng / clock.
+ */
+export function checkXpGains(seed: string): InvariantResult {
+  const fails: string[] = []
+  const campLevel = 8 // a moderate camp: ~116 XP per win (sublinear sqrt reward), so multiple distinct level-ups show.
+  const xpPerWin = xpFromBattle(barbarianTarget(campLevel).defensePower)
+
+  // GATING: with no Pałac paladyna, a won-battle XP grant must be a pure no-op (state.paladin untouched).
+  const gated = createInitialState(seed, 0)
+  gainPaladinXp(gated, xpPerWin)
+  if (paladinUnlocked(gated)) fails.push('a fresh state unexpectedly has a Pałac paladyna')
+  if (gated.paladin.xp !== 0 || gated.paladin.level !== 0 || gated.stats.paladinLevelUps !== 0) {
+    fails.push(`no-Palace gainPaladinXp mutated the paladin (xp=${gated.paladin.xp}, level=${gated.paladin.level}, levelUps=${gated.stats.paladinLevelUps})`)
+  }
+
+  // WITH a Palace: drive repeated wins until the paladin is maxed (bounded), proving per-level promotion.
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.paladin = BUILDINGS.paladin.maxLevel
+  recomputeDerived(state)
+  if (!paladinUnlocked(state)) fails.push('building the Pałac paladyna did not unlock the paladin')
+
+  let wins = 0
+  let levelUps = 0
+  let prevXp = state.paladin.xp
+  let prevLevel = state.paladin.level
+  let xpAlwaysRose = true
+  const MAX_WINS = 1000 // generous ceiling: at ~xpForLevel(10)=12000 total / ~116 XP-per-win (~104 wins) this is plenty.
+  while (state.paladin.level < MAX_PALADIN_LEVEL && wins < MAX_WINS) {
+    gainPaladinXp(state, xpPerWin) // EXACTLY the call advanceMarches makes on a won attack
+    wins += 1
+    if (!(state.paladin.xp > prevXp)) xpAlwaysRose = false
+    prevXp = state.paladin.xp
+    if (state.paladin.level > prevLevel) {
+      levelUps += state.paladin.level - prevLevel
+      prevLevel = state.paladin.level
+    }
+  }
+  if (!xpAlwaysRose) fails.push('XP did not rise on every won battle')
+  if (state.paladin.level !== MAX_PALADIN_LEVEL) fails.push(`paladin did not reach max in ${MAX_WINS} wins (level ${state.paladin.level})`)
+  if (levelUps < 1) fails.push('no level-up observed across the won battles')
+  if (state.stats.paladinLevelUps !== state.paladin.level) fails.push(`paladinLevelUps=${state.stats.paladinLevelUps} != level ${state.paladin.level}`)
+
+  // CAP: one more win at the top must not raise the level or the lifetime trophy.
+  const levelAtMax = state.paladin.level
+  const trophyAtMax = state.stats.paladinLevelUps
+  gainPaladinXp(state, xpPerWin)
+  if (state.paladin.level !== levelAtMax) fails.push(`level exceeded MAX (${state.paladin.level} > ${levelAtMax})`)
+  if (state.stats.paladinLevelUps !== trophyAtMax) fails.push('paladinLevelUps bumped past MAX')
+
+  const ok = fails.length === 0
+  return {
+    name: 'paladin-xp-gains',
+    ok,
+    detail: ok
+      ? `${wins} won battles (×${xpPerWin} XP) promoted the paladin 0→${MAX_PALADIN_LEVEL} (levelUps=${state.stats.paladinLevelUps}); XP rose every win, capped at MAX, and the no-Palace grant was a no-op`
+      : fails.join('; '),
+  }
+}
+
+/**
+ * The AURA scales attack AND defence by EXACTLY {@link paladinAuraMult} (M16, paladin-aura-applies). From a
+ * Pałac-built capital with every building + tech maxed (so the baseline mods are non-trivial — the aura
+ * must scale THOSE, not a bare 1.0), this check sets the paladin to several levels DIRECTLY and asserts the
+ * 7th combine source lifts effectiveMods.attackMult AND defenseMult to EXACTLY `baseline × paladinAuraMult(level)`,
+ * touches NO other axis, and at level 0 contributes nothing (paladinMods identity). Pure / deterministic.
+ */
+export function checkAuraApplies(seed: string): InvariantResult {
+  const fails: string[] = []
+  const make = (level: number): GameState => {
+    const s = createInitialState(seed, 0)
+    const v = firstVillage(s)
+    for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+    for (const nodeId of TECH_NODE_IDS) s.tech[nodeId] = TECH_NODES[nodeId].maxLevel
+    s.paladin.level = level // set DIRECTLY — the aura reads only the level (no battle machinery needed)
+    recomputeDerived(s)
+    return s
+  }
+
+  // Baseline: the same maxed economy with the paladin at level 0 (aura = 1.0 = identity).
+  const base = make(0)
+  const baseMods = effectiveMods(base)
+  if (!buffBagIsIdentity(paladinMods(base))) fails.push('paladinMods not identity at level 0 (aura should be 1.0)')
+
+  for (const level of [1, 3, 5, MAX_PALADIN_LEVEL]) {
+    const s = make(level)
+    const mods = effectiveMods(s)
+    const aura = paladinAuraMult(level)
+    if (Math.abs(mods.attackMult - baseMods.attackMult * aura) > 1e-9) {
+      fails.push(`L${level} attackMult ${mods.attackMult} != base ${baseMods.attackMult} × ${aura}`)
+    }
+    if (Math.abs(mods.defenseMult - baseMods.defenseMult * aura) > 1e-9) {
+      fails.push(`L${level} defenseMult ${mods.defenseMult} != base ${baseMods.defenseMult} × ${aura}`)
+    }
+    if (!(mods.attackMult > baseMods.attackMult)) fails.push(`L${level} aura did not raise the attack multiplier`)
+    // The aura is PURELY attack+defence — every other axis must be byte-equal to the baseline.
+    if (
+      mods.lootMult !== baseMods.lootMult ||
+      mods.popMult !== baseMods.popMult ||
+      mods.storageMult !== baseMods.storageMult ||
+      mods.costReduction !== baseMods.costReduction ||
+      mods.recruitSpeedFrac !== baseMods.recruitSpeedFrac ||
+      mods.marchSpeedFrac !== baseMods.marchSpeedFrac
+    ) {
+      fails.push(`L${level} aura perturbed a non-combat axis`)
+    }
+  }
+
+  const ok = fails.length === 0
+  return {
+    name: 'paladin-aura-applies',
+    ok,
+    detail: ok
+      ? `aura scales attack AND defence by exactly paladinAuraMult at L1/3/5/${MAX_PALADIN_LEVEL} (no other axis touched; identity at L0)`
+      : fails.join('; '),
+  }
+}
+
+/**
+ * The ACTIVE ability overlays its mods onto the aura, then EXPIRES back to the bare aura (M16,
+ * paladin-ability-applies). From a Pałac-built, levelled capital: pre-activation paladinMods is the bare
+ * aura; {@link activateAbility} arms the buff + cooldown and (while active) MULTIPLIES the ability's
+ * attackMult onto the aura (defence stays the bare aura — v1 touches only attack); {@link advancePaladin}
+ * past the duration reports the expiry signal and reverts paladinMods to the aura byte-identically. Also
+ * asserts {@link canActivateAbility} flips correctly. Pure / deterministic — no rng / clock.
+ */
+export function checkAbilityApplies(seed: string): InvariantResult {
+  const fails: string[] = []
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.paladin = BUILDINGS.paladin.maxLevel
+  state.paladin.level = Math.max(PALADIN_ABILITY.minLevel, 3) // a real level so the aura is non-trivial
+  recomputeDerived(state)
+  const level = state.paladin.level
+  const aura = paladinAuraMult(level)
+  const abilityMult = PALADIN_ABILITY.mods.attackMult ?? 1
+
+  // PRE-ACTIVATION: paladinMods is the bare aura, and the ability is ready.
+  if (Math.abs(paladinMods(state).attackMult - aura) > 1e-9) fails.push(`pre-activation attackMult != aura ${aura}`)
+  if (!canActivateAbility(state)) fails.push('canActivateAbility false on a levelled, off-cooldown paladin')
+
+  // ACTIVATE: arms the timers and overlays the ability mult MULTIPLICATIVELY onto the aura.
+  if (!activateAbility(state)) fails.push('activateAbility refused a valid activation')
+  if (state.paladin.abilityRemaining !== PALADIN_ABILITY.durationSecs) {
+    fails.push(`abilityRemaining=${state.paladin.abilityRemaining} (expected ${PALADIN_ABILITY.durationSecs})`)
+  }
+  if (state.paladin.cooldownRemaining !== PALADIN_ABILITY.cooldownSecs) {
+    fails.push(`cooldownRemaining=${state.paladin.cooldownRemaining} (expected ${PALADIN_ABILITY.cooldownSecs})`)
+  }
+  if (canActivateAbility(state)) fails.push('canActivateAbility still true while the ability is active')
+  if (Math.abs(paladinMods(state).attackMult - aura * abilityMult) > 1e-9) {
+    fails.push(`active attackMult ${paladinMods(state).attackMult} != aura ${aura} × ability ${abilityMult}`)
+  }
+  if (Math.abs(paladinMods(state).defenseMult - aura) > 1e-9) fails.push('active defenseMult moved off the aura (v1 ability is attack-only)')
+
+  // EXPIRE: advancePaladin past the duration clears the ability (reports the expiry signal) and reverts.
+  const expired = advancePaladin(state, PALADIN_ABILITY.durationSecs)
+  if (!expired) fails.push('advancePaladin did not report the ability expiry')
+  if (state.paladin.abilityRemaining !== 0) fails.push(`abilityRemaining=${state.paladin.abilityRemaining} after expiry (expected 0)`)
+  if (Math.abs(paladinMods(state).attackMult - aura) > 1e-9) fails.push(`post-expiry attackMult != aura ${aura}`)
+
+  const ok = fails.length === 0
+  return {
+    name: 'paladin-ability-applies',
+    ok,
+    detail: ok
+      ? `Szarża overlays ×${abilityMult} attack onto the L${level} aura (×${aura}), arms a ${PALADIN_ABILITY.cooldownSecs}s cooldown, then expires back to the aura`
+      : fails.join('; '),
+  }
+}
+
+/**
+ * The paladin is DETERMINISTIC (M16, paladin-determinism): it draws NO rng and reads NO clock, so two
+ * identical Pałac-built capitals driven through the SAME action sequence (a fixed run of won-battle XP
+ * grants + an ability activation + a tick advance) must produce a byte-identical {@link serialize}.
+ * Asserts NON-VACUITY (the paladin actually levelled AND a cooldown is ticking) so "identical" can never
+ * pass by doing nothing. Pure function of the seed.
+ */
+export function checkPaladinDeterminism(seed: string): InvariantResult {
+  const make = (): GameState => {
+    const s = createInitialState(seed, 0)
+    const v = firstVillage(s)
+    v.buildings.paladin = BUILDINGS.paladin.maxLevel
+    recomputeDerived(s)
+    const xpPerWin = xpFromBattle(barbarianTarget(8).defensePower)
+    for (let i = 0; i < 12; i++) gainPaladinXp(s, xpPerWin) // a fixed sequence of won battles
+    activateAbility(s)
+    advancePaladin(s, 5) // partially burn the buff + cooldown on the tick grid
+    return s
+  }
+  const a = make()
+  const b = make()
+  const equal = serialize(a) === serialize(b)
+  const nonVacuous = a.paladin.level >= 1 && a.paladin.cooldownRemaining > 0
+  const ok = equal && nonVacuous
+  return {
+    name: 'paladin-determinism',
+    ok,
+    detail: ok
+      ? `two identical paladin action sequences of seed "${seed}" produced byte-identical state (level ${a.paladin.level}, cooldown ${a.paladin.cooldownRemaining})`
+      : !nonVacuous
+        ? 'the paladin did not level / arm a cooldown (vacuous determinism check)'
+        : 'two identical paladin sequences of the same seed diverged',
+  }
+}
+
+/**
+ * The paladin keeps `simulate(big) === N × simulate(TICK_RATE)` even when it LEVELS UP mid-span (M16,
+ * paladin-big-vs-chunked). This is the regression guard for the subtlest M16 hazard: a WON attack feeds XP
+ * inside a sub-step, the promotion raises the aura (paladinMods → effectiveMods.attack/defenseMult), and any
+ * combat in the REMAINING sub-steps of the same big `simulate` must see the NEW aura — exactly like an M8
+ * challenge flip / M14 buff expiry. subStep signals that promotion (tick.ts) so `simulate` re-aggregates
+ * `mods`; without that signal the big-step path keeps the STALE aura while the chunked offline path re-reads
+ * it each call, and the two diverge. The other paladin checks can't catch this: checkPaladinDeterminism is
+ * REPLAY determinism (same step grid) and the offline checks run with NO Pałac (no promotion). So this one
+ * pins a Pałac, queues TWO relay marches staggered inside one span — a trivial win that PROMOTES the paladin,
+ * then a CLOSE fight whose integer losses depend on the aura — and asserts the one-big-step state equals the
+ * many-small-steps state byte-for-byte. NON-VACUOUS: the paladin must have levelled AND both marches resolved.
+ */
+export function checkPaladinBigVsChunked(seed: string): InvariantResult {
+  const SPAN = 10
+  const setup = (): GameState => {
+    const s = createInitialState(seed, 0)
+    const v = firstVillage(s)
+    // Endgame economy so a large axeman army stands at once (mirrors runPaladin); BUILDS the Pałac (the gate
+    // the main run never opens) so the paladin can level. Freeze raids + the horde so the ONLY combat is the
+    // two marches we queue — keeping the scenario tight and deterministic.
+    for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+    for (const n of TECH_NODE_IDS) s.tech[n] = TECH_NODES[n].maxLevel
+    recomputeDerived(s)
+    v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+    v.raidTimer = 1e9
+    s.horde.timer = 1e9
+    v.units.axeman = 4_000_000
+    // One win away from level 1, so the FIRST resolved march promotes the paladin mid-span (aura 1.0 → up).
+    s.paladin.xp = xpForLevel(1) - 1
+    const mods = effectiveMods(s)
+    const axe = (n: number): Record<UnitId, number> => {
+      const r = {} as Record<UnitId, number>
+      for (const id of UNIT_IDS) r[id] = 0
+      r.axeman = n
+      return r
+    }
+    const weak = s.world.barbarians[0] // trivial win → promotes the paladin
+    const strong = s.world.barbarians[s.world.barbarians.length - 1] // strongest camp → a CLOSE fight
+    sendAttack(v, s.world, s.battleLog, weak.id, axe(1_000_000), mods)
+    sendAttack(v, s.world, s.battleLog, strong.id, axe(1500), mods)
+    // Stagger arrivals inside the one span: the weak strike lands first (promotion), the close fight later, so
+    // its loss-fraction rides the post-promotion aura — the thing the stale-aura bug would get wrong.
+    v.marches[0].remaining = 2
+    v.marches[1].remaining = 6
+    return s
+  }
+
+  const big = setup()
+  simulate(big, SPAN)
+  const chunked = setup()
+  for (let i = 0; i < SPAN; i++) simulate(chunked, 1)
+
+  const equal = serialize(big) === serialize(chunked)
+  const attacks = big.battleLog.filter((r) => r.kind === 'attack').length
+  const leveled = big.paladin.level >= 1
+  const nonVacuous = leveled && attacks >= 2
+  const ok = equal && nonVacuous
+  return {
+    name: 'paladin-big-vs-chunked',
+    ok,
+    detail: ok
+      ? `one big simulate(${SPAN}) == ${SPAN}× simulate(1) with a mid-span paladin promotion (level ${big.paladin.level}, ${attacks} battles)`
+      : !nonVacuous
+        ? `vacuous: paladin level ${big.paladin.level}, ${attacks} attack(s) — scenario did not promote + fight`
+        : 'big-step diverged from chunked: a mid-span paladin promotion left a STALE aura (missing re-aggregation signal)',
+  }
+}
+
+/**
+ * The paladin state SURVIVES save/load (M16, CLAUDE.md hard rule #3): a distinctive, valid
+ * {@link GameState.paladin} record (a real level, accumulated xp, partial ability + cooldown timers) plus
+ * the lifetime `paladinLevelUps` counter must ride the real export/import (base64, validating) path
+ * byte-for-byte. The whole-state {@link checkRoundTrip} proves serialize/deserialize is loss-free; this is
+ * the targeted proof that the v26 save carries `state.paladin` specifically. Mirrors
+ * {@link checkUpgradeSaveLoad} / {@link checkEventsSaveLoad}.
+ */
+export function checkPaladinSaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.paladin = BUILDINGS.paladin.maxLevel
+  recomputeDerived(state)
+  // Distinctive, VALID values (level in [0,MAX], xp finite >= 0, timers finite >= 0) so the round-trip must
+  // carry the whole record, not the zero defaults.
+  state.paladin.level = 4
+  state.paladin.xp = xpForLevel(4) + 37
+  state.paladin.abilityRemaining = 12.5
+  state.paladin.cooldownRemaining = 321.5
+  state.stats.paladinLevelUps = 4
+
+  const restored = importSave(exportSave(state))
+  const a = serialize(state)
+  const b = serialize(restored)
+  const p = restored.paladin
+  const paladinSurvived =
+    p.level === 4 &&
+    p.xp === xpForLevel(4) + 37 &&
+    p.abilityRemaining === 12.5 &&
+    p.cooldownRemaining === 321.5
+  const statSurvived = restored.stats.paladinLevelUps === 4
+  const ok = a === b && paladinSurvived && statSurvived
+  return {
+    name: 'paladin-save-load',
+    ok,
+    detail: ok
+      ? `paladin { level 4, xp ${xpForLevel(4) + 37}, ability 12.5s, cooldown 321.5s } (paladinLevelUps=4) survived export/import byte-identically`
+      : a !== b
+        ? 'state with a paladin record changed across export/import'
+        : !paladinSurvived
+          ? 'the paladin record did not survive export/import intact'
+          : 'the paladinLevelUps counter did not survive export/import',
+  }
+}
+
+/**
+ * The paladin RESETS on every meta reset (M16, paladin-resets-on-ascend): the paladin is PER-RUN progress
+ * (gated per-run by the Pałac, which every reset rebuilds at level 0 in a fresh createVillage capital), so
+ * its { xp, level, abilityRemaining, cooldownRemaining } record must be wiped back to zero by
+ * {@link ascend}, {@link newEra}, {@link newDynasty} AND {@link startChallenge} — exactly like state.tech /
+ * state.forge. Otherwise the next run would keep a free permanent aura with a level-0 Pałac and zero
+ * battles won. Drives the REAL resets from a Pałac-built, levelled-and-buffed capital and asserts the
+ * record is pristine afterwards, that the bank fired (non-vacuous). The lifetime `paladinLevelUps` trophy
+ * is deliberately NOT checked here (it survives, like unitsUpgraded). Pure / deterministic.
+ */
+export function checkPaladinResetsOnAscend(seed: string): InvariantResult {
+  const fails: string[] = []
+
+  const buildAndLevel = (s: GameState): void => {
+    const v = firstVillage(s)
+    v.buildings.paladin = BUILDINGS.paladin.maxLevel
+    recomputeDerived(s)
+    const xpPerWin = xpFromBattle(barbarianTarget(8).defensePower)
+    for (let i = 0; i < 20; i++) gainPaladinXp(s, xpPerWin) // level it up well
+    activateAbility(s) // arm the ability + cooldown so the reset has real timers to wipe
+  }
+  const pristine = (p: GameState['paladin']): boolean =>
+    p.xp === 0 && p.level === 0 && p.abilityRemaining === 0 && p.cooldownRemaining === 0
+
+  // ASCEND: a levelled paladin must be wiped (the reset rebuilds the Pałac at level 0).
+  const a = createInitialState(seed, 0)
+  buildAndLevel(a)
+  if (a.paladin.level === 0) fails.push('setup: paladin not levelled before ascend')
+  const pp = ascend(a)
+  if (pp <= 0) fails.push('ascend banked no PP (cannot test the reset)')
+  if (!pristine(a.paladin)) fails.push(`paladin not reset by ascend: ${JSON.stringify(a.paladin)}`)
+
+  // NOWA ERA (the great reset): must wipe the paladin too. Seed a positive era score first.
+  const e = createInitialState(seed, 0)
+  buildAndLevel(e)
+  e.prestige = { points: 0, totalEarned: 300, ascensions: 5, nodes: {} }
+  const ep = newEra(e)
+  if (ep <= 0) fails.push('newEra banked no EP (cannot test the reset)')
+  if (!pristine(e.paladin)) fails.push(`paladin not reset by newEra: ${JSON.stringify(e.paladin)}`)
+
+  // NOWA DYNASTIA (the great-great reset): must wipe the paladin too. Seed a positive era account.
+  const d = createInitialState(seed, 0)
+  buildAndLevel(d)
+  d.era = { points: 0, totalEarned: 1000, eras: 1, nodes: {} }
+  const dp = newDynasty(d)
+  if (dp <= 0) fails.push('newDynasty banked no DP (cannot test the reset)')
+  if (!pristine(d.paladin)) fails.push(`paladin not reset by newDynasty: ${JSON.stringify(d.paladin)}`)
+
+  // START WYZWANIA (resets the run mirroring ascend): must wipe the paladin too.
+  const c = createInitialState(seed, 0)
+  buildAndLevel(c)
+  if (!startChallenge(c, CHALLENGE_IDS[0])) fails.push('startChallenge refused a valid id (cannot test the reset)')
+  if (!pristine(c.paladin)) fails.push(`paladin not reset by startChallenge: ${JSON.stringify(c.paladin)}`)
+
+  const ok = fails.length === 0
+  return {
+    name: 'paladin-resets-on-ascend',
+    ok,
+    detail: ok
+      ? 'ascend, newEra, newDynasty and startChallenge all wipe the paladin back to zero (no free permanent aura survives any meta reset)'
       : fails.join('; '),
   }
 }

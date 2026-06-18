@@ -12,6 +12,7 @@ import { createMapPanel } from './panels/map'
 import { createMarketPanel } from './panels/market'
 import { createArmyPanel } from './panels/army'
 import { createForgePanel } from './panels/forge'
+import { createPaladinPanel } from './panels/paladin'
 import { createCampaignPanel } from './panels/campaign'
 import { createEventsPanel } from './panels/events'
 import { createReportsPanel } from './panels/reports'
@@ -44,6 +45,7 @@ const TABS: TabSpec[] = [
   { id: 'map', label: 'Mapa', create: createMapPanel },
   { id: 'army', label: 'Wojsko', create: createArmyPanel },
   { id: 'forge', label: 'Kuźnia', create: createForgePanel },
+  { id: 'paladin', label: 'Paladyn', create: createPaladinPanel },
   { id: 'raids', label: 'Wyprawy', create: createCampaignPanel },
   { id: 'events', label: 'Wydarzenia', create: createEventsPanel },
   { id: 'reports', label: 'Raporty', create: createReportsPanel },

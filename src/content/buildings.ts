@@ -29,10 +29,11 @@ export type BuildingId =
   | 'stable'
   | 'watchtower'
   | 'forge'
+  | 'paladin'
 
 /**
  * Stable iteration order for derived-stat recompute and UI listing. New buildings are
- * APPENDED (here `forge`, after `watchtower`) so older saves' building key order is never
+ * APPENDED (here `paladin`, after `forge`) so older saves' building key order is never
  * disturbed, keeping migration and round-trip deterministic.
  */
 export const BUILDING_IDS: readonly BuildingId[] = [
@@ -49,6 +50,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'stable',
   'watchtower',
   'forge',
+  'paladin',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -351,6 +353,32 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     // Player-managed: auto-build must NOT spend on the Kuźnia. Keeping it off the auto-build /
     // MAIN-run path is what keeps a no-Kuźnia run BYTE-IDENTICAL to pre-M15 — the upgrades it
     // gates never unlock (state.forge stays empty), so the bot/auto-build never builds it.
+    // See autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
+    autoBuildable: false,
+  },
+  paladin: {
+    id: 'paladin',
+    name: 'Pałac paladyna',
+    desc: 'Siedziba paladyna — bohatera rosnącego w walce. Odblokowuje paladyna, który zdobywa doświadczenie z wygranych bitew, awansuje i daje aurę wzmacniającą atak i obronę. Każdy poziom nieco zwiększa siłę obrony osady.',
+    category: 'military',
+    // Finite ceiling like every other building; the Palace's own effect is a minor
+    // defensive bonus — the real value is the paladin it unlocks (a per-run hero whose
+    // level/aura live on state.paladin, gated by this building).
+    maxLevel: 10,
+    // ~forge/watchtower-tier baseCost (a later military build). provisional — Balance tunes it.
+    baseCost: { wood: 2200, clay: 1600, iron: 1400 },
+    costFactor: 1.25,
+    // +2% village defence per level (M16). REUSES the existing defense_bonus kind (no new
+    // effect kind, so ZERO engine change — villageDefenseMult already sums it). Building it to
+    // level 1 is what UNLOCKS the paladin (systems/paladin gates on a built Palace); its own
+    // defensive effect is deliberately minor (thematically: the paladin guards the walls).
+    effect: { kind: 'defense_bonus', perLevel: 0.02 },
+    // Starts at 0: an optional, PLAYER-managed build that opens the paladin mechanic.
+    initialLevel: 0,
+    // Player-managed: auto-build must NOT spend on the Pałac paladyna. Keeping it off the
+    // auto-build / MAIN-run path is what keeps a no-Palace run BYTE-IDENTICAL to pre-M16 — the
+    // paladin it gates never unlocks (state.paladin stays at its pristine zero state, paladinMods
+    // returns identity and XP accrual is gated off), so the bot/auto-build never builds it.
     // See autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
     autoBuildable: false,
   },

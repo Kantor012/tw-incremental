@@ -705,6 +705,32 @@ export interface Stats {
   villagesConquered: number
   /** Unit-type upgrades bought at the Kuźnia across the run's life (M15; bumped once per upgradeUnit). */
   unitsUpgraded: number
+  /** Paladin level-ups earned across the run's life (M16; bumped once per promotion in gainPaladinXp). */
+  paladinLevelUps: number
+}
+
+/**
+ * The PER-RUN paladin state (M16 PALADYN) — the hero that grows DIRECTLY from the PvE loop.
+ * Unlike the meta accounts (prestige/era/dynasty), the paladin is RUN-LOCAL progress (like
+ * tech / forge): every meta reset wipes it back to the pristine zero state below. Gated by
+ * the manually-built PALAC PALADYNA (the `paladin` building, autoBuildable:false): with no
+ * Palace the paladin never unlocks, so this stays `{ xp:0, level:0, abilityRemaining:0,
+ * cooldownRemaining:0 }`, paladinMods returns the identity bag and XP accrual is gated off —
+ * a no-Palace run is BYTE-IDENTICAL to pre-M16.
+ *
+ * All four fields are plain numbers (not Decimal): xp/level are bounded by the finite
+ * MAX_PALADIN_LEVEL curve, and the two timers are seconds counted down on the tick grid (like
+ * a march/raid timer). Purely DETERMINISTIC — no RNG, no clock.
+ */
+export interface PaladinState {
+  /** Accumulated battle XP toward the next level. Finite, >= 0. */
+  xp: number
+  /** Current paladin level in [0, MAX_PALADIN_LEVEL] (0 = not yet promoted). */
+  level: number
+  /** Seconds left on the ACTIVE ability buff (0 = not active). Counted down on the tick. */
+  abilityRemaining: number
+  /** Seconds left until the ability can be used again (0 = ready). Counted down on the tick. */
+  cooldownRemaining: number
 }
 
 export interface GameState {
@@ -833,6 +859,14 @@ export interface GameState {
    * content/forge.FORGE_UPGRADES).
    */
   forge: Partial<Record<UnitId, number>>
+  /**
+   * PER-RUN paladin state (M16 PALADYN) — the hero that grows in battle. Gated by the manually
+   * built Pałac paladyna; with no Palace it stays at the pristine zero state ({ xp:0, level:0,
+   * abilityRemaining:0, cooldownRemaining:0 }), so paladinMods folds to identity and a no-Palace
+   * run is BYTE-IDENTICAL to pre-M16. Reset by every meta path (run-local progress, like tech /
+   * forge). Always present (like {@link EventState}, never Partial). See {@link PaladinState}.
+   */
+  paladin: PaladinState
 }
 
 /**
@@ -1065,6 +1099,7 @@ export function createInitialStats(): Stats {
     villagesFounded: 0,
     villagesConquered: 0,
     unitsUpgraded: 0,
+    paladinLevelUps: 0,
   }
 }
 
@@ -1106,6 +1141,9 @@ export function createInitialState(seed: string, now: number): GameState {
     // M15: no unit upgrades at run start (and none until a Kuźnia is built). An empty map
     // means the optional `forge` combat param is undefined → ×1.0 → byte-identical to pre-M15.
     forge: {},
+    // M16: the paladin starts at the pristine zero state and stays there until a Pałac paladyna
+    // is built (paladinMods folds to identity, XP accrual gated off) — byte-identical to pre-M16.
+    paladin: { xp: 0, level: 0, abilityRemaining: 0, cooldownRemaining: 0 },
   }
 }
 

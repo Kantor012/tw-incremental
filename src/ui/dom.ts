@@ -609,11 +609,41 @@ export function buildingIcon(id: BuildingId): SVGSVGElement {
         spark('20', '11'),
       ])
     }
+    case 'paladin': {
+      // Pałac paladyna = hełm garnczkowy rycerza (great helm) ze stali, z krzyżową szczeliną
+      // wzierną i złotym pióropuszem na szczycie. Zaokrąglony hełm z krzyżem czyta się od razu
+      // jako „rycerz/paladyn" — odróżnia od kowadła Kuźni, smukłej Wieży i krępego donżonu
+      // Ratusza. Świadomie hełm bohatera, nie kolejna broń/budowla.
+      const plume = svg('path', { d: 'M11 5 Q12 1 15 1 Q13 3 13 6 Z', fill: '#d9a441' })
+      const helm = svg('path', { d: 'M7 8 Q12 3.5 17 8 L17 17 Q12 21 7 17 Z', fill: '#9aa3ad' })
+      const rim = svg('rect', { x: '6.4', y: '16', width: '11.2', height: '2.2', rx: '0.8', fill: '#6b7682' })
+      const slitV = svg('rect', { x: '11.2', y: '9', width: '1.6', height: '7', rx: '0.4', fill: '#3a4048' })
+      const slitH = svg('rect', { x: '8', y: '10.6', width: '8', height: '1.6', rx: '0.4', fill: '#3a4048' })
+      return svgIcon('0 0 24 24', BUILDINGS[id].name, 'building-icon', [plume, helm, rim, slitV, slitH])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla budynku: ' + String(_exhaustive))
     }
   }
+}
+
+/**
+ * Proceduralna ikona PALADYNA (M16) — godło bohatera dla panelu „Paladyn": hełm
+ * garnczkowy rycerza (great helm) ze stali z krzyżową szczeliną wzierną i złotym
+ * pióropuszem. Rysowana WYŁĄCZNIE w SVG (twarda zasada #2, ZERO emoji — emoji bez
+ * fontu renderują się jako „tofu", lekcja M11.9). Te same kształty co gałąź
+ * `paladin` w {@link buildingIcon}, ale jako samodzielna, ETYKIETOWANA ikona
+ * ({@link svgIcon} z role=img + aria-label), bo w nagłówku panelu hełm jest godłem
+ * bohatera, nie ikoną budynku. Domyślna etykieta „Paladyn"; wołający może nadpisać.
+ */
+export function paladinIcon(label = 'Paladyn'): SVGSVGElement {
+  const plume = svg('path', { d: 'M11 5 Q12 1 15 1 Q13 3 13 6 Z', fill: '#d9a441' })
+  const helm = svg('path', { d: 'M7 8 Q12 3.5 17 8 L17 17 Q12 21 7 17 Z', fill: '#9aa3ad' })
+  const rim = svg('rect', { x: '6.4', y: '16', width: '11.2', height: '2.2', rx: '0.8', fill: '#6b7682' })
+  const slitV = svg('rect', { x: '11.2', y: '9', width: '1.6', height: '7', rx: '0.4', fill: '#3a4048' })
+  const slitH = svg('rect', { x: '8', y: '10.6', width: '8', height: '1.6', rx: '0.4', fill: '#3a4048' })
+  return svgIcon('0 0 24 24', label, 'building-icon', [plume, helm, rim, slitV, slitH])
 }
 
 /**

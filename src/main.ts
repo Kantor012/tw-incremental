@@ -30,6 +30,7 @@ import { foundVillage } from './systems/villages'
 import { sendShipment, canExchange, exchangeResources } from './systems/market'
 import { claimEvent } from './systems/events'
 import { upgradeUnit } from './systems/forge'
+import { activateAbility } from './systems/paladin'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
@@ -248,6 +249,20 @@ const ctx: UiCtx = {
     }
     return ok
   },
+  onActivatePaladin: () => {
+    // Activate (M16 PALADYN) the paladin's cooldown-gated ability — the game's FIRST player-
+    // triggered buff. activateAbility re-validates via canActivateAbility and no-ops (returns
+    // false) when it cannot fire (no Pałac paladyna / too low level / on cooldown / already
+    // active). No recompute: the buff's combat effect is read on demand at resolution (via
+    // paladinMods → effectiveMods), not folded into derived stats — so we only commit + persist
+    // on a successful activation. Player-initiated like onClaimEvent / onUpgradeUnit; never the tick.
+    const ok = activateAbility(store.state)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onPurchaseTech: (nodeId: string) => {
     // purchaseTech spends from the GLOBAL resource pool and recomputes derived
     // multipliers internally; we only persist + commit on success.
@@ -373,7 +388,7 @@ const ctx: UiCtx = {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.46.0',
+  version: '0.47.0',
   offlineSeconds,
 }
 

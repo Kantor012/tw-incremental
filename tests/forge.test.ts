@@ -352,7 +352,7 @@ describe('forge save — v24 -> v25 migration backfill (M15)', () => {
     expect('forge' in raw.villages.v0.buildings).toBe(false)
 
     const m = migrate(raw)
-    expect(m.version).toBe(25)
+    expect(m.version).toBe(26)
     expect(m.version).toBe(SAVE_VERSION)
 
     expect(m.forge).toEqual({}) // empty upgrade map

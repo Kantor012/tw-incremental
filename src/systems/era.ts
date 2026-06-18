@@ -378,6 +378,10 @@ export function newEra(state: GameState): number {
   // would carry permanent free upgrades across the wipe — clearly unintended for a GREAT RESET.
   // stats.unitsUpgraded is a LIFETIME trophy (survives, like the rest of stats/achievements).
   state.forge = {}
+  // M16: reset the paladin too (same reasoning as ascend) — PER-RUN progress wiped by the great
+  // reset, so the new run earns its hero from scratch. stats.paladinLevelUps is a LIFETIME trophy
+  // (survives, like the rest of stats/achievements).
+  state.paladin = { xp: 0, level: 0, abilityRemaining: 0, cooldownRemaining: 0 }
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule too (M7.2), exactly as createInitialState seeds it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation

@@ -394,6 +394,10 @@ export function newDynasty(state: GameState): number {
   // intact would hand the new dynasty permanent ×mult upgrades for free, with a level-0 Kuźnia
   // (combat reads state.forge regardless of forgeLevel, so the stale levels would still apply).
   state.forge = {}
+  // M16: reset the paladin too (same discipline as ascend / newEra) — PER-RUN progress wiped by the
+  // great-great reset, so the new dynasty earns its hero from scratch. stats.paladinLevelUps is a
+  // LIFETIME trophy (survives, like the rest of stats/achievements).
+  state.paladin = { xp: 0, level: 0, abilityRemaining: 0, cooldownRemaining: 0 }
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule too (M7.2), exactly as createInitialState seeds it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation

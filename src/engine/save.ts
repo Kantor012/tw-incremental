@@ -14,6 +14,7 @@ import { WORLD_EVENTS_BY_ID } from '../content/events'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
 import { UNIT_IDS, type UnitId } from '../content/units'
 import { catalogMaxUpgrade } from '../content/forge'
+import { MAX_PALADIN_LEVEL } from '../content/paladin'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
@@ -58,7 +59,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 25
+export const SAVE_VERSION = 26
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -840,6 +841,57 @@ export function migrate(raw: any): any {
         version: 25,
       }
     },
+    // v25 -> v26: paladin / hero (M16 — PALADYN). A v25 save predates the new 'paladin' BUILDING
+    // key (appended to BUILDING_IDS after 'forge'), the per-run `paladin` state and the lifetime
+    // `stats.paladinLevelUps` counter. All three are backfilled WITHOUT disturbing the player's
+    // progress (the building key MUST be backfilled so validateVillage, which iterates the
+    // now-longer BUILDING_IDS, accepts the save — exactly like the v24->v25 forge backfill):
+    //  - every village's `buildings` gains paladin:0 by spreading INITIAL_BUILDINGS *first*, so the
+    //    save's own levels win over the seed and existing progress is preserved;
+    //  - `paladin` — the { xp, level, abilityRemaining, cooldownRemaining } record — seeded the
+    //    pristine zero state (an old save has no paladin history; it is written only once a Pałac
+    //    paladyna is built AND a battle won). A forward-compat save that already carries an object
+    //    `paladin` keeps it verbatim; any non-object (corrupt/missing) is reset to the zero state;
+    //  - `stats.paladinLevelUps` — the lifetime trophy counter — seeded to 0 (an event tally with no
+    //    recoverable trace), mirroring the v16->v17 fortressesRazed / v24->v25 unitsUpgraded backfills.
+    // The Pałac's defense_bonus effect touches NO production/storage/pop stat and is
+    // autoBuildable:false; with no Palace the paladin stays at the zero state (paladinMods identity,
+    // XP accrual gated off), so a migrated run is BYTE-IDENTICAL to pre-M16 until the player builds a
+    // Pałac paladyna. Malformed entries are left as-is so validateState rejects them loudly. Nothing
+    // is recomputed here; importSave's recomputeDerived pass runs afterwards exactly as for every
+    // other migration (the Pałac's defense_bonus is a no-op for derived stats, like the wall/tower).
+    25: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+        }
+      }
+      return {
+        ...s,
+        villages,
+        paladin: isObject(s.paladin)
+          ? s.paladin
+          : { xp: 0, level: 0, abilityRemaining: 0, cooldownRemaining: 0 },
+        stats: isObject(s.stats)
+          ? {
+              ...s.stats,
+              paladinLevelUps:
+                typeof s.stats.paladinLevelUps === 'number' ? s.stats.paladinLevelUps : 0,
+            }
+          : s.stats,
+        version: 26,
+      }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -1566,6 +1618,7 @@ export function validateState(s: unknown): GameState {
     'villagesFounded',
     'villagesConquered',
     'unitsUpgraded',
+    'paladinLevelUps',
   ] as const) {
     const n = stats[key]
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
@@ -1632,6 +1685,33 @@ export function validateState(s: unknown): GameState {
     const max = catalogMaxUpgrade(key as UnitId)
     if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > max) {
       throw new Error(`save: invalid forge level ${key}`)
+    }
+  }
+
+  // PER-RUN paladin state (M16 PALADYN) — the hero that grows in battle. Plain numbers (NOT
+  // Decimal — xp/level are bounded by the finite MAX_PALADIN_LEVEL curve, the timers are seconds):
+  // `xp` finite >= 0; `level` an integer in [0, MAX_PALADIN_LEVEL] (an out-of-band level would
+  // over-scale the aura and then get autosaved — CLAUDE.md hard rule #3); `abilityRemaining` /
+  // `cooldownRemaining` finite, non-negative seconds (a NaN/Infinity/negative would mis-drive the
+  // tick countdown). The v25->v26 migration backfills the zero state, so a migrated save always
+  // passes; with no Pałac paladyna the paladin stays at that zero state (byte-identical to pre-M16).
+  const { paladin } = s
+  if (!isObject(paladin)) throw new Error('save: missing paladin')
+  if (typeof paladin.xp !== 'number' || !Number.isFinite(paladin.xp) || paladin.xp < 0) {
+    throw new Error('save: invalid paladin xp')
+  }
+  if (
+    typeof paladin.level !== 'number' ||
+    !Number.isInteger(paladin.level) ||
+    paladin.level < 0 ||
+    paladin.level > MAX_PALADIN_LEVEL
+  ) {
+    throw new Error('save: invalid paladin level')
+  }
+  for (const key of ['abilityRemaining', 'cooldownRemaining'] as const) {
+    const n = paladin[key]
+    if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+      throw new Error(`save: invalid paladin ${key}`)
     }
   }
 
