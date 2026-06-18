@@ -29,6 +29,7 @@ import { sendAttack, sendScout } from './systems/marches'
 import { foundVillage } from './systems/villages'
 import { sendShipment, canExchange, exchangeResources } from './systems/market'
 import { claimEvent } from './systems/events'
+import { upgradeUnit } from './systems/forge'
 import { purchaseTech } from './systems/tech'
 import { ascend, effectiveMods, purchasePrestige } from './systems/prestige'
 import { newEra, purchaseEra } from './systems/era'
@@ -234,6 +235,19 @@ const ctx: UiCtx = {
     }
     return ok
   },
+  onUpgradeUnit: (unitId: UnitId) => {
+    // Upgrade (M15 KUŹNIA) one permanent, account-wide level of `unitId`, paid from the CAPITAL.
+    // upgradeUnit re-validates via canUpgrade and no-ops (returns false) when not upgradeable (no
+    // Kuźnia / at cap / unaffordable). No recompute: the upgrade multiplier is read on demand at
+    // combat resolution (armyAttackPower/armyDefensePower), not folded into derived stats — so we
+    // only commit + persist on a successful upgrade. Player-initiated like onExchange; never the tick.
+    const ok = upgradeUnit(store.state, unitId)
+    if (ok) {
+      store.commit()
+      saveToLocal(store.state)
+    }
+    return ok
+  },
   onPurchaseTech: (nodeId: string) => {
     // purchaseTech spends from the GLOBAL resource pool and recomputes derived
     // multipliers internally; we only persist + commit on success.
@@ -359,7 +373,7 @@ const ctx: UiCtx = {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.45.0',
+  version: '0.46.0',
   offlineSeconds,
 }
 

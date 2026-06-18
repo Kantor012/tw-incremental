@@ -683,6 +683,37 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M15 forge coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  // The upgrade TALLY (levels upgraded + the attack/defense uplift) rides the forge-upgrades-applied detail
+  // string (mirrors how the spawn/claim tally rides events-spawned/claimed). forge-upgrades-applied proves
+  // the OPEN→UPGRADE→stronger-army pipeline is reachable; forge-inert / upgrade-applies / upgrade-determinism
+  // / upgrade-save-load are the deterministic identity + exact-multiplier + save proofs.
+  console.log('--- M15 forge: KUŹNIA — ulepszenia jednostek (coverage) ---')
+  const m15Names = [
+    'forge-upgrades-applied',
+    'forge-inert',
+    'upgrade-applies',
+    'upgrade-determinism',
+    'upgrade-save-load',
+    'forge-resets-on-ascend',
+  ]
+  for (const r of results) {
+    const line = m15Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing upgrade tally + inertness / exact-multiplier / determinism / save is visible.
+    for (const name of m15Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Automation per seed (M5.1 idle routines; SEPARATE coverage run, automation ON) ---
   console.log('--- Automation (idle routines, separate coverage run) ---')
   console.log('seed     | auto-built (levels) | auto-recruited (units) | auto-attacked (resolved)')

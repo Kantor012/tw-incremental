@@ -42,6 +42,7 @@ import { freePopulation, recruit, canRecruit, unitUnlocked } from '../src/system
 import { sendAttack, sendScout } from '../src/systems/marches'
 import {
   armyAttackPower,
+  armyDefensePower,
   battleOutcome,
   ramDefenseFactor,
   catapultLevelDamage,
@@ -50,6 +51,14 @@ import {
   WORST_LUCK,
   BEST_LUCK,
 } from '../src/systems/combat'
+import {
+  forgeBuilt,
+  effectiveMaxUpgrade,
+  unitUpgradeLevel,
+  canUpgrade,
+  upgradeUnit,
+} from '../src/systems/forge'
+import { unitUpgradeMult } from '../src/content/forge'
 import { autoAttackOnce } from '../src/systems/automation'
 import { advanceRaids } from '../src/systems/raids'
 import { advanceHorde } from '../src/systems/hordes'
@@ -4703,5 +4712,330 @@ export function checkBuffInert(state: GameState, seed: string): InvariantResult 
     detail: ok
       ? 'no-watchtower run kept events.buff null with an identity buff bag — effectiveMods byte-identical to pre-M14'
       : issues.join('; '),
+  }
+}
+
+// --- M15 forge (KUŹNIA — permanent account-wide per-unit upgrades) coverage ---------------------
+//
+// The Kuźnia is the game's FIRST per-unit-type modifier (the tech/prestige trees only ever grant
+// GLOBAL attack/defense multipliers). It is an ADDITIVE, OPT-IN mechanic gated by the MANUALLY-built
+// Kuźnia (content/buildings.forge, autoBuildable:false). The gate is the IDENTITY guarantee: with no
+// Kuźnia the upgrade map {@link GameState.forge} stays EMPTY, so the OPTIONAL `forge` param threaded
+// into armyAttackPower / armyDefensePower is undefined → unitUpgradeMult(0) = ×1.0 → every combat
+// resolution is BYTE-IDENTICAL to pre-M15. The sim bot / auto-build never raise an autoBuildable:false
+// building (MAIN_BUILD_IDS), so the main run never opens the gate (no change to bot.ts). These
+// deterministic proof-of-mechanic checks (no bot, no RNG — upgrades are a pure player action) mirror
+// the M13 events-* / M10 cavalry coverage: a no-Kuźnia run leaves the forge map inert AND migrates
+// back to a byte-identical pre-M15 save (forge-inert), each upgrade scales attack AND defense by exactly
+// unitUpgradeMult (upgrade-applies), the same upgrades replay byte-identically (upgrade-determinism),
+// and a state carrying a forge map survives the v25 save/load path (upgrade-save-load).
+
+/**
+ * Unit upgrades are INERT in a no-Kuźnia run (M15 — the byte-identity guarantee): after a normal MAIN
+ * run the bot never builds the autoBuildable:false Kuźnia, so the upgrade map {@link GameState.forge}
+ * was never written ({@link upgradeUnit} no-ops without one — {@link canUpgrade} gates on a built
+ * Kuźnia), the lifetime `stats.unitsUpgraded` counter is still 0, and no village raised a Kuźnia. With
+ * an EMPTY forge map the optional `forge` combat param is a pure ×1.0 no-op, so the with-forge and
+ * without-forge powers are byte-equal for EVERY village roster — exactly what keeps the run identical to
+ * pre-M15. Finally, the STRONGEST identity proof (mirrors {@link checkCavalryInert}): strip the forge
+ * BUILDING key, the forge map and the unitsUpgraded counter, stamp the save back to v24, and require the
+ * v24→v25 migration to reproduce a BYTE-IDENTICAL v25 serialization — proof a no-Kuźnia run never left
+ * pre-M15 ground. Reads the PRIMARY run's final `state` (mirrors {@link checkEventsInert}). Pure, no clock.
+ */
+export function checkForgeInert(state: GameState, seed: string): InvariantResult {
+  const issues: string[] = []
+  // The gate must have stayed shut for the whole run, else inertness would be vacuous.
+  if (forgeBuilt(state)) issues.push('a village built the Kuźnia (gate opened) — forge-inert is not meaningful')
+  // INERTNESS: the forge map is empty, the counter is 0, no village raised a Kuźnia.
+  const keys = Object.keys(state.forge)
+  if (keys.length !== 0) issues.push(`state.forge not empty: ${keys.join(', ')}`)
+  if (state.stats.unitsUpgraded !== 0) issues.push(`stats.unitsUpgraded=${state.stats.unitsUpgraded} (expected 0)`)
+  for (const vid of state.villageOrder) {
+    const fl = state.villages[vid].buildings.forge
+    if (fl !== 0) issues.push(`${vid}.buildings.forge=${fl}`)
+  }
+
+  // POWER IDENTITY: with an empty forge map the optional `forge` param is a pure ×1.0 no-op — the
+  // with-forge and without-forge powers must be byte-equal for every roster (the combat-identity guarantee).
+  const mods = effectiveMods(state)
+  for (const vid of state.villageOrder) {
+    const u = state.villages[vid].units
+    if (armyAttackPower(u, mods) !== armyAttackPower(u, mods, state.forge)) {
+      issues.push(`${vid} attack power differs with the empty forge map`)
+    }
+    if (armyDefensePower(u, mods) !== armyDefensePower(u, mods, state.forge)) {
+      issues.push(`${vid} defense power differs with the empty forge map`)
+    }
+  }
+
+  // ROUND-TRIP EQUALITY: build the pre-M15 save shape (strip the forge building key, the forge map and the
+  // unitsUpgraded counter, stamp v24), migrate it (the v24→v25 empty/zero backfill) and require the re-
+  // serialization to be byte-identical to the M15 form. The 24→25 step backfills only PLAIN values
+  // (forge:{}, unitsUpgraded:0 — no Decimal), and createInitialState places `forge` LAST at the top level
+  // and `unitsUpgraded` LAST in stats, exactly where the spread-then-assign migration re-adds them, so the
+  // key order matches byte-for-byte. Re-serialize through the SAME Decimal-tagging serializer (mirrors
+  // checkCavalryInert) for consistency.
+  const full = serialize(state)
+  const obj = JSON.parse(full) as {
+    version: number
+    villageOrder: string[]
+    villages: Record<string, { buildings: Record<string, number> }>
+    forge?: unknown
+    stats: Record<string, unknown>
+  }
+  obj.version = 24
+  for (const vid of obj.villageOrder) delete obj.villages[vid].buildings.forge
+  delete obj.forge
+  delete obj.stats.unitsUpgraded
+  const preM15 = JSON.stringify(obj)
+  const migrated = serialize(migrate(JSON.parse(preM15)))
+  const strippedClean = !preM15.includes('"forge"') && !preM15.includes('"unitsUpgraded"')
+  const roundTripOk = migrated === full
+
+  void seed // kept for signature symmetry with checkEventsInert / checkBuffInert (no per-seed state read here)
+  const ok = issues.length === 0 && strippedClean && roundTripOk
+  return {
+    name: 'forge-inert',
+    ok,
+    detail: ok
+      ? 'no-Kuźnia run kept the forge map empty (×1.0 combat identity); the pre-M15-stripped save migrates back byte-identically'
+      : issues.length > 0
+        ? `forge not inert: ${issues.join('; ')}`
+        : !strippedClean
+          ? 'stripped pre-M15 save still references the forge keys'
+          : 'pre-M15-stripped save did NOT migrate back to a byte-identical M15 state',
+  }
+}
+
+/**
+ * An upgrade SCALES a unit type's attack AND defense by EXACTLY {@link unitUpgradeMult} (M15,
+ * upgrade-applies): from a Kuźnia-built capital (gate open, full depth cap), upgrading a SINGLE type
+ * step-by-step toward its effective cap must lift a single-type army's attack and defense to EXACTLY
+ * `base × unitUpgradeMult(level)` at every level — the one shared multiplier the smith grants to both
+ * weapon and armour. Drives the REAL {@link upgradeUnit} (a player action), refilling the capital so the
+ * rising sink is always affordable, and asserts the exact ratio after each level (so the proof is the
+ * precise per-level scaling, not just "went up"). Pure / deterministic — upgrades draw no rng / clock.
+ */
+export function checkUpgradeApplies(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  // Max every building (builds the Kuźnia to its depth cap + a maxed warehouse so the rising sink fits
+  // under the storage cap), then refill — exactly the dedicated-run economy (mirrors checkCavalrySaveLoad).
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  const mods = effectiveMods(state)
+
+  // A single-type army so the per-type multiplier is isolated (no other type contributes).
+  const unitId: UnitId = 'axeman'
+  const army = zeroArmy()
+  army[unitId] = 100
+  const base = armyAttackPower(army, mods) // level 0, no forge param = ×1.0 baseline
+  const defBase = armyDefensePower(army, mods)
+
+  const cap = effectiveMaxUpgrade(state, unitId)
+  const fails: string[] = []
+  let levels = 0
+  for (let target = 1; target <= cap; target++) {
+    v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap } // refill the rising sink
+    if (!upgradeUnit(state, unitId)) {
+      fails.push(`upgrade to L${target} refused`)
+      break
+    }
+    levels += 1
+    const lvl = unitUpgradeLevel(state, unitId)
+    const m = unitUpgradeMult(lvl)
+    const att = armyAttackPower(army, mods, state.forge)
+    const def = armyDefensePower(army, mods, state.forge)
+    if (Math.abs(att - base * m) > 1e-6) fails.push(`L${lvl} attack ${att} != base ${base} × ${m}`)
+    if (Math.abs(def - defBase * m) > 1e-6) fails.push(`L${lvl} defense ${def} != base ${defBase} × ${m}`)
+  }
+
+  const finalAtt = armyAttackPower(army, mods, state.forge)
+  const ok =
+    levels >= 1 &&
+    fails.length === 0 &&
+    finalAtt > base &&
+    state.stats.unitsUpgraded === levels
+  return {
+    name: 'upgrade-applies',
+    ok,
+    detail: ok
+      ? `upgrading ${unitId} L1..L${levels} scaled attack ${base.toFixed(0)} -> ${finalAtt.toFixed(0)} and defense by exactly unitUpgradeMult at every level`
+      : levels < 1
+        ? 'upgradeUnit refused the first valid upgrade (gate / cost / cap)'
+        : fails.join('; '),
+  }
+}
+
+/**
+ * Unit upgrades are DETERMINISTIC (M15, upgrade-determinism): {@link upgradeUnit} draws NO rng and reads
+ * NO clock, so two identical Kuźnia-built capitals driven through the SAME upgrade sequence must produce a
+ * byte-identical {@link serialize}. Upgrades every upgradeable type to its effective cap on both (refilling
+ * so the rising sink is affordable), then compares the serializations. Asserts NON-VACUITY (>= 1 upgrade
+ * actually happened) so "identical" can never pass by doing nothing. Pure function of the seed.
+ */
+export function checkUpgradeDeterminism(seed: string): InvariantResult {
+  const make = (): GameState => {
+    const s = createInitialState(seed, 0)
+    const v = firstVillage(s)
+    for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+    recomputeDerived(s)
+    for (const id of UNIT_IDS) {
+      const cap = effectiveMaxUpgrade(s, id)
+      for (let t = 0; t < cap; t++) {
+        v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+        if (!upgradeUnit(s, id)) break
+      }
+    }
+    return s
+  }
+  const a = make()
+  const b = make()
+  const equal = serialize(a) === serialize(b)
+  const upgraded = a.stats.unitsUpgraded
+  const ok = equal && upgraded >= 1
+  return {
+    name: 'upgrade-determinism',
+    ok,
+    detail: ok
+      ? `two identical upgrade runs of seed "${seed}" produced byte-identical state (${upgraded} upgrades each)`
+      : !(upgraded >= 1)
+        ? 'no upgrade happened (vacuous determinism check)'
+        : 'two identical upgrade sequences of the same seed diverged',
+  }
+}
+
+/**
+ * A forge map SURVIVES save/load (M15, CLAUDE.md hard rule #3): from a Kuźnia-built capital, upgrading
+ * several DISTINCT types to DISTINCT levels (so the {@link GameState.forge} map carries real, varied data —
+ * not the empty default), the real export/import (base64, validating) path must reproduce a byte-identical
+ * state with every upgrade level AND the lifetime `unitsUpgraded` counter intact. The whole-state
+ * {@link checkRoundTrip} proves serialize/deserialize is loss-free; this is the targeted proof that the v25
+ * save carries `state.forge` specifically. Mirrors {@link checkCavalrySaveLoad} / {@link checkEventsSaveLoad}.
+ */
+export function checkUpgradeSaveLoad(seed: string): InvariantResult {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+
+  // Upgrade three distinct types to three distinct levels (each <= the effective cap), refilling so each
+  // rising-cost level is affordable. Distinct levels make the round-trip carry real per-type data.
+  const plan: Array<{ id: UnitId; to: number }> = [
+    { id: 'axeman', to: 3 },
+    { id: 'spearman', to: 2 },
+    { id: 'light_cavalry', to: 1 },
+  ]
+  for (const { id, to } of plan) {
+    for (let t = 0; t < to; t++) {
+      v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+      if (!upgradeUnit(state, id)) break
+    }
+  }
+
+  const restored = importSave(exportSave(state))
+  const a = serialize(state)
+  const b = serialize(restored)
+  const forgeSurvived = plan.every(({ id }) => (restored.forge[id] ?? 0) === (state.forge[id] ?? 0))
+  const someUpgraded = plan.some(({ id }) => (restored.forge[id] ?? 0) >= 1)
+  const statSurvived = restored.stats.unitsUpgraded === state.stats.unitsUpgraded
+  const ok = a === b && forgeSurvived && someUpgraded && statSurvived
+  return {
+    name: 'upgrade-save-load',
+    ok,
+    detail: ok
+      ? `forge map {${plan.map(({ id }) => `${id}:${state.forge[id] ?? 0}`).join(', ')}} (unitsUpgraded=${state.stats.unitsUpgraded}) survived export/import byte-identically`
+      : a !== b
+        ? 'state with a forge map changed across export/import'
+        : !someUpgraded
+          ? 'no upgrade was recorded (setup issue — nothing to round-trip)'
+          : 'the forge map / unitsUpgraded did not survive export/import intact',
+  }
+}
+
+/**
+ * Kuźnia upgrades RESET on prestige/era (M15, forge-resets-on-ascend): unit upgrades are a per-RUN sink
+ * (bought with the capital's wood/clay/iron in {@link upgradeUnit}) gated per-run by the Kuźnia building,
+ * which BOTH resets rebuild at level 0 (fresh createVillage capital). So the {@link GameState.forge} map must
+ * be wiped by {@link ascend}, {@link newEra}, {@link newDynasty} AND {@link startChallenge} exactly like
+ * state.tech (EVERY meta reset rebuilds a level-0 capital) — otherwise the next run keeps
+ * permanent ×mult upgrades for free, with a level-0 Kuźnia and zero resources spent, and combat would apply
+ * upgrade levels above effectiveMaxUpgrade (= min(catalog, forgeLevel 0) = 0). Drives the REAL resets from a
+ * Kuźnia-built, upgraded capital and asserts the map is empty afterwards, that the bank fired (non-vacuous),
+ * and that the ×1.0 combat identity is restored. Pure / deterministic — resets take no clock and the only
+ * RNG is the seeded stream. The lifetime `unitsUpgraded` trophy is deliberately NOT checked here (it survives).
+ */
+export function checkForgeResetsOnAscend(seed: string): InvariantResult {
+  const fails: string[] = []
+
+  // A Kuźnia-built capital with a few types upgraded, so state.forge carries real (non-empty) data.
+  const buildAndUpgrade = (s: GameState): void => {
+    const v = firstVillage(s)
+    for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+    recomputeDerived(s)
+    for (const id of ['axeman', 'spearman'] as UnitId[]) {
+      const cap = effectiveMaxUpgrade(s, id)
+      for (let t = 0; t < cap; t++) {
+        v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+        if (!upgradeUnit(s, id)) break
+      }
+    }
+  }
+
+  // A non-trivial army so the ×1.0 combat-identity assertion is meaningful (a zero army would pass vacuously).
+  const army = zeroArmy()
+  army.axeman = 100
+  army.spearman = 50
+
+  // ASCEND: a non-empty forge map must be wiped (the reset rebuilds the Kuźnia at level 0).
+  const a = createInitialState(seed, 0)
+  buildAndUpgrade(a)
+  if (Object.keys(a.forge).length === 0) fails.push('setup: forge map empty before ascend')
+  const pp = ascend(a)
+  if (pp <= 0) fails.push('ascend banked no PP (cannot test the reset)')
+  if (Object.keys(a.forge).length !== 0) fails.push(`forge not cleared by ascend: ${Object.keys(a.forge).join(', ')}`)
+  const modsA = effectiveMods(a)
+  if (armyAttackPower(army, modsA) !== armyAttackPower(army, modsA, a.forge)) {
+    fails.push('ascend: attack ×1.0 identity broken (forge map not empty)')
+  }
+  if (armyDefensePower(army, modsA) !== armyDefensePower(army, modsA, a.forge)) {
+    fails.push('ascend: defense ×1.0 identity broken (forge map not empty)')
+  }
+
+  // NOWA ERA (the great reset): must wipe the forge map too. Seed a positive era score first.
+  const e = createInitialState(seed, 0)
+  buildAndUpgrade(e)
+  e.prestige = { points: 0, totalEarned: 300, ascensions: 5, nodes: {} }
+  if (Object.keys(e.forge).length === 0) fails.push('setup: forge map empty before newEra')
+  const ep = newEra(e)
+  if (ep <= 0) fails.push('newEra banked no EP (cannot test the reset)')
+  if (Object.keys(e.forge).length !== 0) fails.push(`forge not cleared by newEra: ${Object.keys(e.forge).join(', ')}`)
+
+  // NOWA DYNASTIA (the great-great reset): must wipe the forge map too. Seed a positive era account
+  // so pendingDynastyPoints fires (DP is measured from era progress — dynastyScore >= totalEarned).
+  const d = createInitialState(seed, 0)
+  buildAndUpgrade(d)
+  d.era = { points: 0, totalEarned: 1000, eras: 1, nodes: {} }
+  if (Object.keys(d.forge).length === 0) fails.push('setup: forge map empty before newDynasty')
+  const dp = newDynasty(d)
+  if (dp <= 0) fails.push('newDynasty banked no DP (cannot test the reset)')
+  if (Object.keys(d.forge).length !== 0) fails.push(`forge not cleared by newDynasty: ${Object.keys(d.forge).join(', ')}`)
+
+  // START WYZWANIA (resets the run mirroring ascend): must wipe the forge map too — a challenge is a
+  // clean-slate run, so carried-over upgrades would grant free power AND break the run's determinism.
+  const c = createInitialState(seed, 0)
+  buildAndUpgrade(c)
+  if (Object.keys(c.forge).length === 0) fails.push('setup: forge map empty before startChallenge')
+  if (!startChallenge(c, CHALLENGE_IDS[0])) fails.push('startChallenge refused a valid id (cannot test the reset)')
+  if (Object.keys(c.forge).length !== 0) fails.push(`forge not cleared by startChallenge: ${Object.keys(c.forge).join(', ')}`)
+
+  const ok = fails.length === 0
+  return {
+    name: 'forge-resets-on-ascend',
+    ok,
+    detail: ok
+      ? 'ascend, newEra, newDynasty and startChallenge all wipe the Kuźnia upgrade map (no free permanent upgrades survive any meta reset; ×1.0 combat identity restored)'
+      : fails.join('; '),
   }
 }

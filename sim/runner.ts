@@ -25,12 +25,15 @@ import { barbarianTarget } from '../src/content/barbarians'
 import { UNIT_IDS, UNITS } from '../src/content/units'
 import {
   armyAttackPower,
+  armyDefensePower,
   ramDefenseFactor,
   battleOutcome,
   applyLosses,
   armyCarry,
   WORST_LUCK,
 } from '../src/systems/combat'
+import { canUpgrade, upgradeUnit } from '../src/systems/forge'
+import { isUpgradeable } from '../src/content/forge'
 import {
   effectiveMods,
   ascend,
@@ -130,6 +133,11 @@ import {
   checkBuffExpiresReverts,
   checkBuffDeterminism,
   checkBuffInert,
+  checkForgeInert,
+  checkUpgradeApplies,
+  checkUpgradeDeterminism,
+  checkUpgradeSaveLoad,
+  checkForgeResetsOnAscend,
   type InvariantResult,
 } from './invariants'
 import {
@@ -2042,6 +2050,118 @@ export function runEvents(seed: string, ticks: number = EVENTS_TICKS): EventsRun
   return { invariants, spawned, claimed, buffsClaimed, buffExpiries }
 }
 
+// --- M15 forge (KUŹNIA — permanent account-wide per-unit upgrades) dedicated run -----------------
+//
+// A SEPARATE run, the ONLY one that ever builds the Kuźnia (content/buildings.forge, autoBuildable:false)
+// and so the ONLY one that opens the unit-upgrade gate. The Kuźnia is the game's FIRST per-unit-type
+// modifier (the tech/prestige trees only ever grant GLOBAL attack/defense multipliers). The main + meta
+// runs never build it (the bot / auto-build skip autoBuildable:false buildings — MAIN_BUILD_IDS), so the
+// upgrade map state.forge stays EMPTY and a no-Kuźnia run is BYTE-IDENTICAL to pre-M15 (the forge identity,
+// proven by forge-inert on the PRIMARY run's final state). This run builds the Kuźnia DIRECTLY to its data
+// max (the dedicated-run helper pattern, mirroring runCavalry's Stajnia / runEvents' Wieża), which UNLOCKS
+// upgrades to the full catalogue depth, then UPGRADES every upgradeable line unit (upgradeUnit — a PLAYER
+// action, never the tick) and proves the upgraded army hits harder AND defends harder than the same roster
+// un-upgraded. Pure + deterministic (upgrades draw NO rng).
+
+/**
+ * Step budget for the SEPARATE M15 forge run. Tiny on purpose: upgrades are INSTANT player actions, so the
+ * run only needs enough passes to push every upgradeable type (one level per type per pass) to its
+ * effective cap (≤ 5) — it breaks the moment a pass buys nothing. The generous ceiling bounds the worst case.
+ */
+const FORGE_TICKS = 50
+
+/** What a forge run yields: sampled invariants + the upgrade / power-uplift tally. */
+interface ForgeRun {
+  invariants: InvariantResult[]
+  upgrades: number
+  attackBefore: number
+  attackAfter: number
+  defenseBefore: number
+  defenseAfter: number
+}
+
+/**
+ * Drive a fresh seeded capital through the M15 upgrade loop and prove the OPEN→UPGRADE→stronger-army
+ * pipeline is reachable. Hands the capital the PROVEN endgame economy (every building maxed — which BUILDS
+ * the Kuźnia to its depth cap AND a maxed warehouse so each rising-cost upgrade fits under the storage cap),
+ * refills the coffers, then each pass refills + pushes every still-upgradeable line unit one level via the
+ * real {@link upgradeUnit} (a player action), advancing the clock and stopping once every type is at its
+ * cap. Freezes raids + the global horde so nothing perturbs the capital (isolate the mechanic — exactly as
+ * runFortress/runEvents freeze them). Finally compares a fixed line-unit roster's attack AND defense WITH
+ * the earned forge map vs WITHOUT it: with-forge must be strictly greater (the upgrades genuinely lift both
+ * weapon and armour). Samples the hard invariants at the end + a bare 'forge-upgrades-applied' proof.
+ * Deterministic — upgrades draw no rng / clock.
+ */
+export function runForge(seed: string, ticks: number = FORGE_TICKS): ForgeRun {
+  const dt = TARGETS.tickSeconds
+  const state = createInitialState(seed, 0)
+  const invariants: InvariantResult[] = []
+  const v = state.villages[state.villageOrder[0]]
+
+  // Proven economy (mirrors runFortress/runMarket): every building at its data max — which raises the
+  // Kuźnia to its depth cap (the main bot never builds it — autoBuildable:false) and the warehouse to its
+  // max so the rising upgrade sink stays affordable WITHIN the storage cap (no resources-over-cap).
+  for (const id of BUILDING_IDS) v.buildings[id] = BUILDINGS[id].maxLevel
+  recomputeDerived(state)
+  v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+  // Freeze raids + the global horde so the ONLY thing exercised is the upgrade loop (isolate it).
+  v.raidTimer = ticks * dt + 1e9
+  state.horde.timer = ticks * dt + 1e9
+
+  const mods = effectiveMods(state)
+
+  // UPGRADE every upgradeable line unit toward its live cap. One pass per tick: refill the capital from the
+  // (maxed) warehouse, push each still-upgradeable type one level, then advance the clock. Bounded by the
+  // per-type catalogue cap × types, so it settles well inside the budget (breaks once a pass buys nothing).
+  let upgrades = 0
+  for (let i = 0; i < ticks; i++) {
+    let actedThisStep = 0
+    for (const id of UNIT_IDS) {
+      v.resources = { wood: v.storageCap, clay: v.storageCap, iron: v.storageCap }
+      if (canUpgrade(state, id) && upgradeUnit(state, id)) {
+        upgrades += 1
+        actedThisStep += 1
+      }
+    }
+    simulate(state, dt)
+    if (actedThisStep === 0) break // every upgradeable type is at its cap — done
+  }
+
+  // POWER UPLIFT: a fixed roster of every upgradeable line unit. armyAttackPower(army, mods) takes NO forge
+  // param (×1.0 — the pre-upgrade baseline); armyAttackPower(army, mods, state.forge) applies the earned
+  // per-type multipliers. With ≥ 1 upgrade the with-forge figure must be strictly greater (attack AND
+  // defense — one smith improves both weapon and armour).
+  const army = zeroRoster()
+  for (const id of UNIT_IDS) if (isUpgradeable(id)) army[id] = 50
+  const attackBefore = armyAttackPower(army, mods)
+  const attackAfter = armyAttackPower(army, mods, state.forge)
+  const defenseBefore = armyDefensePower(army, mods)
+  const defenseAfter = armyDefensePower(army, mods, state.forge)
+
+  // Final invariants pass (mirrors the other dedicated runs): the post-upgrade state stays valid + playable,
+  // round-trips, and never softlocks (it made progress iff it upgraded at least once).
+  invariants.push(...tag(runInvariants(state), 'forgefinal'))
+  invariants.push(...tag([checkArmyConsistency(state)], 'forgefinal'))
+  invariants.push(...tag([checkRoundTrip(state)], 'forgefinal'))
+  invariants.push(...tag([checkNoSoftlock(state, totalResources(state), upgrades > 0)], 'forgefinal'))
+
+  // Bare-named HARD invariant (mirrors runEvents' 'events-spawned' / runCavalry's 'cavalry-recruited'): the
+  // dedicated run must UPGRADE at least one unit level AND the upgraded roster must out-fight + out-defend
+  // the same roster un-upgraded — proof the M15 upgrade pipeline completes and threads into combat power.
+  const applied = upgrades >= 1 && attackAfter > attackBefore && defenseAfter > defenseBefore
+  invariants.push({
+    name: 'forge-upgrades-applied',
+    ok: applied,
+    detail: applied
+      ? `upgraded ${upgrades} unit level(s) (Kuźnia L${v.buildings.forge}); roster attack ${attackBefore.toFixed(0)} -> ${attackAfter.toFixed(0)}, defense ${defenseBefore.toFixed(0)} -> ${defenseAfter.toFixed(0)} (×${(attackAfter / attackBefore).toFixed(3)})`
+      : upgrades < 1
+        ? `dedicated run did not upgrade any unit within ${ticks} ticks (gate / cost / cap issue)`
+        : `upgrades (${upgrades}) did not raise army power: attack ${attackBefore} -> ${attackAfter}, defense ${defenseBefore} -> ${defenseAfter}`,
+  })
+
+  return { invariants, upgrades, attackBefore, attackAfter, defenseBefore, defenseAfter }
+}
+
 export function runOne(seed: string, ticks: number): RunResult {
   const dt = TARGETS.tickSeconds
   const invariants: InvariantResult[] = []
@@ -2454,6 +2574,29 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkBuffExpiresReverts(seed))
   invariants.push(checkBuffDeterminism(seed, OFFLINE_CHECK_SECONDS))
   invariants.push(checkBuffInert(primary.state, seed))
+
+  // M15 forge (KUŹNIA — permanent account-wide per-unit upgrades) — a SEPARATE dedicated run, the ONLY one
+  // that ever builds the Kuźnia (autoBuildable:false) and so the ONLY one that opens the unit-upgrade gate.
+  // The main + meta runs never build it, so state.forge stays EMPTY and the optional `forge` combat param is
+  // undefined → ×1.0 → a no-Kuźnia run is BYTE-IDENTICAL to pre-M15 — proven directly by forge-inert on the
+  // PRIMARY run's final state below. The dedicated run drives the upgrade pipeline and folds in its bare
+  // 'forge-upgrades-applied' reachability proof (the upgraded roster out-fights + out-defends itself).
+  const forge = runForge(seed, FORGE_TICKS)
+  invariants.push(...forge.invariants)
+
+  // M15 proof-of-mechanic checks (self-contained, deterministic — upgrades draw NO rng / clock): the MAIN
+  // run left the forge map empty + the ×1.0 combat identity intact, and the pre-M15-stripped save migrates
+  // back byte-identically (forge-inert, reading the PRIMARY run's final state — mirrors checkEventsInert);
+  // each upgrade scales attack AND defense by EXACTLY unitUpgradeMult at every level (upgrade-applies); the
+  // same upgrade sequence replays byte-identically (upgrade-determinism); and a state carrying a forge map
+  // survives the v25 save/load path (upgrade-save-load).
+  invariants.push(checkForgeInert(primary.state, seed))
+  invariants.push(checkUpgradeApplies(seed))
+  invariants.push(checkUpgradeDeterminism(seed))
+  invariants.push(checkUpgradeSaveLoad(seed))
+  // M15 ↔ meta interaction: the per-run upgrade map must clear on prestige (ascend) AND on the great reset
+  // (newEra), exactly like state.tech — otherwise a fresh run keeps free permanent upgrades with a level-0 Kuźnia.
+  invariants.push(checkForgeResetsOnAscend(seed))
 
   const metrics = collect(
     seed,

@@ -10,7 +10,7 @@ import {
   type Stats,
 } from '../engine/state'
 import { BUILDING_IDS } from '../content/buildings'
-import { UNIT_IDS } from '../content/units'
+import { UNIT_IDS, type UnitId } from '../content/units'
 import {
   hordePower as hordePowerCurve,
   HORDE_BREACH_RESOURCE_FRAC,
@@ -80,9 +80,16 @@ export function hordePower(state: GameState): number {
   return hordePowerCurve(state.horde.level, buildingLevelSum(capital), armyDefensePower(capital.units))
 }
 
-/** The capital's effective defence against a horde: garrison (× tech) × the wall shield. */
-function capitalDefense(capital: Village, mods: TechModifiers): number {
-  return armyDefensePower(capital.units, mods) * villageDefenseMult(capital)
+/**
+ * The capital's effective defence against a horde: garrison (× tech, × Kuźnia unit upgrades)
+ * × the wall shield. `forge` (M15) is OPTIONAL/last — undefined → ×1.0 per unit → byte-identical.
+ */
+function capitalDefense(
+  capital: Village,
+  mods: TechModifiers,
+  forge?: Partial<Record<UnitId, number>>,
+): number {
+  return armyDefensePower(capital.units, mods, forge) * villageDefenseMult(capital)
 }
 
 /**
@@ -95,7 +102,8 @@ function capitalDefense(capital: Village, mods: TechModifiers): number {
  *  - `doomed`   (pewna porażka) — breaches even against the weakest roll: def < incoming·WORST_LUCK.
  * The verdict is carried in WORDS (+ a glyph), never colour alone (WCAG 1.4.1) — `cls` is
  * only a supplementary tint. `mods` default to NO_TECH_MODS; the UI threads the real
- * effective mods so the forecast matches the defence the tick resolves with. Pure read.
+ * effective mods AND (M15) the capital defends with `state.forge`, so the forecast matches
+ * the defence the tick resolves with (resolveHorde) — no Kuźnia → forge {} → ×1.0. Pure read.
  */
 export type HordeForecastKind = 'defended' | 'risky' | 'doomed'
 
@@ -110,7 +118,9 @@ export interface HordeForecast {
 export function hordeForecast(state: GameState, mods: TechModifiers = NO_TECH_MODS): HordeForecast {
   const capital = capitalOf(state)
   const incoming = hordePower(state)
-  const defence = capitalDefense(capital, mods)
+  // M15: thread state.forge so the forecast defends with the SAME per-type Kuźnia upgrades
+  // resolveHorde resolves with (capitalDefense(..., forge)); no Kuźnia → forge {} → ×1.0.
+  const defence = capitalDefense(capital, mods, state.forge)
   // Holds even against the strongest (lucky) horde → a guaranteed defence.
   if (defence >= incoming * BEST_LUCK) {
     return { kind: 'defended', text: '✓︎ pewna obrona', cls: 'forecast-win' }
@@ -141,12 +151,15 @@ function resolveHorde(
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
   rng?: RNG,
+  // M15: account-wide unit upgrades (state.forge), threaded into the CAPITAL defence at
+  // resolution. OPTIONAL/last; undefined → ×1.0 per unit → byte-identical to pre-M15.
+  forge?: Partial<Record<UnitId, number>>,
 ): void {
   const capital = capitalOf(state)
   // One luck draw per resolved horde (see docstring). Absent rng → no draw, luck = 1.
   const luck = rng !== undefined ? luckFactor(rng) : undefined
   const incoming = hordePower(state) * (luck ?? 1)
-  const defence = capitalDefense(capital, mods)
+  const defence = capitalDefense(capital, mods, forge)
 
   if (defence >= incoming) {
     // Repelled: the capital holds, nothing lost (high-stakes reward = the lifetime trophy).
@@ -221,6 +234,9 @@ export function advanceHorde(
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
   rng?: RNG,
+  // M15: account-wide unit upgrades (state.forge), passed straight to resolveHorde so the
+  // capital defence enjoys the per-type Kuźnia bonus. OPTIONAL/last → byte-identical when omitted.
+  forge?: Partial<Record<UnitId, number>>,
 ): void {
   if (!(dtSeconds > 0)) return
   let dt = dtSeconds
@@ -231,7 +247,7 @@ export function advanceHorde(
     }
     dt -= state.horde.timer
     state.horde.timer = 0
-    resolveHorde(state, log, mods, stats, rng)
+    resolveHorde(state, log, mods, stats, rng, forge)
     state.horde.timer = HORDE_INTERVAL
   }
 }

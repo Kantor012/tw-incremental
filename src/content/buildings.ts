@@ -28,10 +28,11 @@ export type BuildingId =
   | 'market'
   | 'stable'
   | 'watchtower'
+  | 'forge'
 
 /**
  * Stable iteration order for derived-stat recompute and UI listing. New buildings are
- * APPENDED (here `watchtower`, after `stable`) so older saves' building key order is never
+ * APPENDED (here `forge`, after `watchtower`) so older saves' building key order is never
  * disturbed, keeping migration and round-trip deterministic.
  */
 export const BUILDING_IDS: readonly BuildingId[] = [
@@ -47,6 +48,7 @@ export const BUILDING_IDS: readonly BuildingId[] = [
   'market',
   'stable',
   'watchtower',
+  'forge',
 ]
 
 /** A cost expressed per base resource, on Decimal so it scales past 2^53. */
@@ -324,6 +326,31 @@ export const BUILDINGS: Record<BuildingId, BuildingDef> = {
     // Player-managed: auto-build must NOT spend on the Wieża. Keeping it off the auto-build /
     // MAIN-run path is what keeps a no-watchtower run BYTE-IDENTICAL to pre-M13 — the events it
     // gates never spawn, so the bot/auto-build never builds it and advanceEvents stays a no-op.
+    // See autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
+    autoBuildable: false,
+  },
+  forge: {
+    id: 'forge',
+    name: 'Kuźnia',
+    desc: 'Ulepsza wyposażenie wojsk. Odblokowuje i pogłębia trwałe ulepszenia jednostek; każdy poziom nieco skraca czas szkolenia.',
+    category: 'military',
+    // Finite ceiling like every other building; the Kuźnia level doubles as the DEPTH CAP
+    // on unit upgrades (systems/forge.forgeLevel → effectiveMaxUpgrade), so a maxed Kuźnia
+    // unlocks the full per-type upgrade track.
+    maxLevel: 10,
+    // ~stable/watchtower-tier baseCost (a later military build). provisional — Balance tunes it.
+    baseCost: { wood: 2000, clay: 1800, iron: 1500 },
+    costFactor: 1.25,
+    // +2% training time cut per level (M15). REUSES the existing recruit_speed kind (no new
+    // effect kind, so ZERO engine change — recruitSpeedMult already folds it). Building it to
+    // level 1 is what UNLOCKS unit upgrades (systems/forge gates on a built Kuźnia); its own
+    // training-speed effect is deliberately minor (thematically: a smithy speeds outfitting).
+    effect: { kind: 'recruit_speed', perLevel: 0.02 },
+    // Starts at 0: an optional, PLAYER-managed build that opens the unit-upgrade mechanic.
+    initialLevel: 0,
+    // Player-managed: auto-build must NOT spend on the Kuźnia. Keeping it off the auto-build /
+    // MAIN-run path is what keeps a no-Kuźnia run BYTE-IDENTICAL to pre-M15 — the upgrades it
+    // gates never unlock (state.forge stays empty), so the bot/auto-build never builds it.
     // See autoBuildOnce + MAIN_BUILD_IDS (the sim's build filter on autoBuildable).
     autoBuildable: false,
   },

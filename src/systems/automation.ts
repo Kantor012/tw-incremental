@@ -185,6 +185,10 @@ export function autoAttackOnce(
   world: World,
   log: BattleReport[],
   mods: TechModifiers = NO_TECH_MODS,
+  // M15: account-wide unit upgrades (state.forge). Threaded into the PLANNING power below so
+  // auto-attack's win/survival check matches the upgraded power advanceMarches resolves with.
+  // OPTIONAL/last; undefined → ×1.0 per unit → byte-identical to pre-M15 (no-Kuźnia run).
+  forge?: Partial<Record<UnitId, number>>,
 ): boolean {
   // Idle combat army = units at home (roster − marches), with nobles, scouts AND
   // siege zeroed out: nobles stay manual (conquest), scouts are recon-only (attack 0,
@@ -206,7 +210,7 @@ export function autoAttackOnce(
   // miss the win or attrit to zero — at WORST_LUCK. Vetting every gate with this floored
   // power means the auto-attack NEVER loses the army to bad luck; an average/best roll
   // only ever does better.
-  const power = armyAttackPower(idle, mods)
+  const power = armyAttackPower(idle, mods, forge)
   const worstPower = power * WORST_LUCK
   for (const b of targetsByDistance(v, world)) {
     if (hasMarchTo(v, b.id)) continue
@@ -255,7 +259,7 @@ export function runAutomation(state: GameState, mods: TechModifiers, _dt: number
       autoRecruitOnce(v, state.automation, mods)
     }
     if (mods.automations.attack && state.automation.attack) {
-      autoAttackOnce(v, state.world, state.battleLog, mods)
+      autoAttackOnce(v, state.world, state.battleLog, mods, state.forge)
     }
   }
 }

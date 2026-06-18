@@ -426,6 +426,14 @@ export function ascend(state: GameState): number {
   state.world = generateWorld(ascSeed)
   state.rngState = RNG.fromString(ascSeed).getState()
   state.tech = {}
+  // M15: clear the Kuźnia upgrade map alongside tech. Unit upgrades are bought with the RUN's
+  // resources (wood/clay/iron from the capital in upgradeUnit) and gated per-run by the Kuźnia
+  // building — which IS reset here (the fresh createVillage capital has forge level 0). Leaving
+  // state.forge intact would hand the next run permanent ×mult upgrades for free, with a level-0
+  // Kuźnia and zero resources spent, and leave the state self-inconsistent (combat would apply
+  // upgrade levels above effectiveMaxUpgrade = min(catalog, forgeLevel 0) = 0). So it resets like
+  // tech. stats.unitsUpgraded is a LIFETIME trophy and is deliberately left untouched.
+  state.forge = {}
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule too (M7.2): a fresh, defenceless capital must meet a
   // fresh horde clock — re-arm the timer AND reset the escalation level to 0, exactly as

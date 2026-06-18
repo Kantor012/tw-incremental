@@ -155,6 +155,8 @@ function dirtyState(seed: string): GameState {
     { kind: 'raid', villageId: 'v0', won: true, looted: '0', losses: 0 },
   ] as GameState['battleLog']
   s.horde = { timer: 5, level: 9 }
+  // M15: a non-empty Kuźnia upgrade map that the reset must WIPE (a challenge is a clean-slate run).
+  s.forge = { axeman: 2, spearman: 1 }
   s.villages.v1 = createVillage('v1', 'Wioska', WORLD_CENTER.x + 5, WORLD_CENTER.y + 5)
   s.villageOrder.push('v1')
   recomputeDerived(s)
@@ -176,6 +178,7 @@ describe('startChallenge (RESET mirroring ascend, meta preserved, deterministic)
 
     // Transient run state cleared; horde clock re-armed exactly like a fresh state.
     expect(s.tech).toEqual({})
+    expect(s.forge).toEqual({}) // M15: the per-run Kuźnia upgrade map is cleared like tech
     expect(s.battleLog).toEqual([])
     expect(s.horde).toEqual({ timer: HORDE_INTERVAL, level: 0 })
 

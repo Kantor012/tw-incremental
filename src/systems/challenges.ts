@@ -222,6 +222,11 @@ export function startChallenge(state: GameState, id: string): boolean {
   state.world = generateWorld(chalSeed)
   state.rngState = RNG.fromString(chalSeed).getState()
   state.tech = {}
+  // M15: clear the Kuźnia upgrade map too (mirrors ascend — startChallenge resets the run). Unit
+  // upgrades are a per-run sink gated by the per-run Kuźnia building, which the fresh level-0
+  // capital resets; carrying state.forge into a challenge would grant free permanent ×mult upgrades
+  // (combat applies them regardless of the rebuilt forgeLevel 0) and break the clean-slate contract.
+  state.forge = {}
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule, exactly as createInitialState / ascend seed it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation 0).

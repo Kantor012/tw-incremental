@@ -158,6 +158,12 @@ export function tabVisible(id: string, state: GameState): boolean {
     // --- Wojna: the military layer reveals once the player can fight or has fought.
     case 'army':
       return someVillageHasBuilding(s, 'barracks') || hasFought(s)
+    case 'forge':
+      // Revealed by the manually-built Kuźnia (the mechanic's gate, autoBuildable:false); the
+      // lifetime `unitsUpgraded` clause keeps it visible across a reset that rebuilds a fresh
+      // capital (monotonic — the counter only ever grows), so a player who has upgraded a unit
+      // never loses the tab. Mirrors `events` (watchtower + eventsResolved).
+      return someVillageHasBuilding(s, 'forge') || s.stats.unitsUpgraded > 0
     case 'map':
       return (
         s.villageOrder.length > 1 ||

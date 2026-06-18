@@ -75,13 +75,15 @@ describe('cavalry catalogue (append-only ids)', () => {
     expect(UNIT_IDS[UNIT_IDS.length - 1]).toBe('heavy_cavalry')
   })
 
-  it('appends stable directly after market (M13 later appended the watchtower last)', () => {
+  it('appends stable directly after market (M13/M15 later appended the watchtower then the forge)', () => {
     const mkt = BUILDING_IDS.indexOf('market')
     expect(mkt).toBeGreaterThanOrEqual(0)
     expect(BUILDING_IDS[mkt + 1]).toBe('stable')
-    // Stable was the last building at M10; M13 appended the watchtower after it (append-only).
-    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('stable')
-    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('watchtower')
+    // Stable was the last building at M10; M13 appended the watchtower after it and M15 the forge
+    // last (append-only), so the stable now sits third-to-last.
+    expect(BUILDING_IDS[BUILDING_IDS.length - 3]).toBe('stable')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 2]).toBe('watchtower')
+    expect(BUILDING_IDS[BUILDING_IDS.length - 1]).toBe('forge')
   })
 
   it('the cavalry require the Stajnia, which is excluded from auto-build (MAIN-run identity)', () => {

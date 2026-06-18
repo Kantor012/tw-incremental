@@ -295,7 +295,7 @@ describe('events save — v22 -> v23 migration backfill (M13)', () => {
     expect(m.version).toBe(SAVE_VERSION)
     // migrate() always runs to the CURRENT version; a v22 save now chains v22->v23 (this M13
     // backfill) and v23->v24 (the M14 buff backfill). The M13 fields below are unchanged by v24.
-    expect(m.version).toBe(24)
+    expect(m.version).toBe(25)
 
     // The events clock starts idle, a full interval out, on the SEPARATE seeded stream.
     expect(m.events.active).toBeNull()

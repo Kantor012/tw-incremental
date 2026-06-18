@@ -372,6 +372,12 @@ export function newEra(state: GameState): number {
   state.world = generateWorld(eraSeed)
   state.rngState = RNG.fromString(eraSeed).getState()
   state.tech = {}
+  // M15: clear the Kuźnia upgrade map alongside tech (same reasoning as prestige.ascend). Unit
+  // upgrades are bought with the run's resources and gated per-run by the Kuźnia building, which
+  // the great reset rebuilds at level 0 (fresh createVillage capital). Leaving state.forge intact
+  // would carry permanent free upgrades across the wipe — clearly unintended for a GREAT RESET.
+  // stats.unitsUpgraded is a LIFETIME trophy (survives, like the rest of stats/achievements).
+  state.forge = {}
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule too (M7.2), exactly as createInitialState seeds it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation

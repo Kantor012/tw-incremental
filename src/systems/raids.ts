@@ -10,7 +10,7 @@ import {
   type Stats,
 } from '../engine/state'
 import { BUILDING_IDS } from '../content/buildings'
-import { UNIT_IDS } from '../content/units'
+import { UNIT_IDS, type UnitId } from '../content/units'
 import { battleOutcome, armyDefensePower, applyLosses, luckFactor } from './combat'
 import { villageDefenseMult } from './buildings'
 import { stationedUnits, pushBattleReport } from './marches'
@@ -136,14 +136,17 @@ function resolveRaid(
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
   rng?: RNG,
+  // M15: account-wide unit upgrades (state.forge), threaded into the HOME defence at
+  // resolution. OPTIONAL/last; undefined → ×1.0 per unit → byte-identical to pre-M15.
+  forge?: Partial<Record<UnitId, number>>,
 ): void {
   // One luck draw per resolved raid (see docstring). Absent rng → no draw, luck = 1.
   const luck = rng !== undefined ? luckFactor(rng) : undefined
   const power = raidPower(v) * (luck ?? 1)
   const home = stationedUnits(v)
   // attacker = the raid (luck-scaled); defender = the home garrison hardened by tech
-  // (defenseMult) AND the village wall (villageDefenseMult).
-  const outcome = battleOutcome(power, armyDefensePower(home, mods) * villageDefenseMult(v))
+  // (defenseMult) AND the village wall (villageDefenseMult), and by Kuźnia unit upgrades (M15).
+  const outcome = battleOutcome(power, armyDefensePower(home, mods, forge) * villageDefenseMult(v))
 
   if (!outcome.attackerWins) {
     // Repelled: no losses, nothing stolen (the raiders break on the wall).
@@ -224,6 +227,9 @@ export function advanceRaids(
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
   rng?: RNG,
+  // M15: account-wide unit upgrades (state.forge), passed straight to resolveRaid so the
+  // home defence enjoys the per-type Kuźnia bonus. OPTIONAL/last → byte-identical when omitted.
+  forge?: Partial<Record<UnitId, number>>,
 ): void {
   if (!(dtSeconds > 0)) return
   if (!raidsActive(v)) return
@@ -235,7 +241,7 @@ export function advanceRaids(
     }
     dt -= v.raidTimer
     v.raidTimer = 0
-    resolveRaid(v, log, mods, stats, rng)
+    resolveRaid(v, log, mods, stats, rng, forge)
     v.raidTimer = RAID_BASE_INTERVAL
   }
 }

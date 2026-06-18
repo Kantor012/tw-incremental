@@ -133,8 +133,14 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
     // counters on this exact deterministic path — identical online/offline/sim, never
     // from the UI. They mutate it in place (attacks won/lost, loot hauled, camps razed,
     // scouts returned / raids repelled-lost); see advanceMarches / advanceRaids.
-    conquests.push(...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats, rng))
-    advanceRaids(v, state.battleLog, dt, mods, state.stats, rng)
+    // M15: state.forge (account-wide unit upgrades) is threaded into the combat resolutions
+    // so the per-type Kuźnia bonus applies at the moment power is computed (attack on a march,
+    // home defence on a raid). With an empty forge map (no-Kuźnia run) every unit's multiplier
+    // is ×1.0, so the resolutions stay BYTE-IDENTICAL to pre-M15.
+    conquests.push(
+      ...advanceMarches(v, state.world, state.battleLog, dt, mods, state.stats, rng, state.forge),
+    )
+    advanceRaids(v, state.battleLog, dt, mods, state.stats, rng, state.forge)
   }
   // Apply captures once, in deterministic collection order. applyConquest no-ops on a
   // barbId already removed this sub-step (two armies both flooring the same target), so
@@ -153,7 +159,7 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // the draw count tracks resolved hordes and online / offline / sim stay byte-identical.
   // runAutomation below never draws (it plans against WORST_LUCK, a constant), so this is the
   // last RNG consumer before the writeback.
-  advanceHorde(state, state.battleLog, dt, mods, state.stats, rng)
+  advanceHorde(state, state.battleLog, dt, mods, state.stats, rng, state.forge)
   // Merchant transports (M9 rynek) resolve here on the fixed grid, ONCE per sub-step in this
   // FIXED position next to advanceHorde, AFTER the per-village loop. It draws NO rng (so its
   // order vs the rng draws above is irrelevant — pinned for determinism) and does NOT fold into

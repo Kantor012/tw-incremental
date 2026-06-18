@@ -1,4 +1,5 @@
 import { UNITS, UNIT_IDS, type UnitId } from '../content/units'
+import { unitUpgradeMult } from '../content/forge'
 import { NO_TECH_MODS, type TechModifiers } from '../engine/state'
 import { RNG } from '../engine/rng'
 
@@ -100,9 +101,15 @@ export function luckFactor(rng: RNG): number {
 export function armyAttackPower(
   units: Record<UnitId, number>,
   mods: TechModifiers = NO_TECH_MODS,
+  forge?: Partial<Record<UnitId, number>>,
 ): number {
   let power = 0
-  for (const id of UNIT_IDS) power += (units[id] ?? 0) * UNITS[id].attack
+  // M15: each type's contribution is scaled by its Kuźnia upgrade multiplier. When `forge`
+  // is undefined (every pre-M15 / no-Kuźnia call site) `forge?.[id] ?? 0` is 0 and
+  // unitUpgradeMult(0) is EXACTLY 1.0, so `× 1.0` is a no-op and the result is BYTE-IDENTICAL.
+  for (const id of UNIT_IDS) {
+    power += (units[id] ?? 0) * UNITS[id].attack * unitUpgradeMult(forge?.[id] ?? 0)
+  }
   return power * mods.attackMult
 }
 
@@ -119,9 +126,14 @@ export function armyAttackPower(
 export function armyDefensePower(
   units: Record<UnitId, number>,
   mods: TechModifiers = NO_TECH_MODS,
+  forge?: Partial<Record<UnitId, number>>,
 ): number {
   let power = 0
-  for (const id of UNIT_IDS) power += (units[id] ?? 0) * UNITS[id].defInfantry
+  // M15: the SAME per-type Kuźnia multiplier lifts defence (one smith improves both weapon
+  // and armour). Undefined `forge` → unitUpgradeMult(0) = 1.0 → BYTE-IDENTICAL to pre-M15.
+  for (const id of UNIT_IDS) {
+    power += (units[id] ?? 0) * UNITS[id].defInfantry * unitUpgradeMult(forge?.[id] ?? 0)
+  }
   return power * mods.defenseMult
 }
 

@@ -509,7 +509,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
           // this pre-send check can never disagree with the real outcome.
           const mods = effectiveMods(ctx.store.state)
           const effDef = barbarianTarget(barb.level).defensePower * ramDefenseFactor(army)
-          const fc = attackForecast(armyAttackPower(army, mods), effDef)
+          // M15: feed state.forge so the pre-send forecast uses the SAME per-type Kuźnia
+          // upgrades the tick resolves with (advanceMarches) — no Kuźnia → forge {} → ×1.0.
+          const fc = attackForecast(armyAttackPower(army, mods, ctx.store.state.forge), effDef)
           // Combat luck (M5.5): warn on anything that is NOT a CERTAIN win — even a probable
           // win can be flipped to a wipe by a bad ±25% roll, so the player accepts that risk
           // explicitly. The message wording adapts to the tier (probable / risky / loss).
@@ -565,7 +567,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     mods: TechModifiers,
   ): void => {
     const carry = armyCarry(army)
-    const atkPow = armyAttackPower(army, mods)
+    // M15: include state.forge so the per-card forecast reflects the Kuźnia upgrades the
+    // tick attacks with (advanceMarches); no Kuźnia → forge {} → ×1.0 → unchanged.
+    const atkPow = armyAttackPower(army, mods, ctx.store.state.forge)
     // Siege (M5.3), mirrored from marches.advanceMarches so the forecast can't disagree
     // with the engine: rams scale the camp's defence DOWN for the fight (ramDefenseFactor;
     // ramless = ×1), and catapults raze the camp's tier on a WIN (catapultLevelDamage
@@ -778,7 +782,8 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
         // a bad ±25% luck roll can flip a probable win to a wipe — exactly like a scouted camp.
         const mods = effectiveMods(ctx.store.state)
         const effDef = fortressTarget(fortress.level).defensePower * ramDefenseFactor(army)
-        const fc = attackForecast(armyAttackPower(army, mods), effDef)
+        // M15: same Kuźnia upgrades the assault resolves with (advanceMarches) → forge {} → ×1.0.
+        const fc = attackForecast(armyAttackPower(army, mods, ctx.store.state.forge), effDef)
         if (!fc.certainWin && !window.confirm(attackConfirmMessage(fc))) {
           return
         }
@@ -819,7 +824,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     mods: TechModifiers,
   ): void => {
     const carry = armyCarry(army)
-    const atkPow = armyAttackPower(army, mods)
+    // M15: include state.forge so the fortress forecast matches the upgraded power the
+    // assault resolves with; no Kuźnia → forge {} → ×1.0 → unchanged.
+    const atkPow = armyAttackPower(army, mods, ctx.store.state.forge)
     // Rams scale the fortress wall DOWN for the fight (ramDefenseFactor; ramless = ×1),
     // mirrored from marches.advanceMarches so the forecast can't disagree with the engine.
     const ramFactor = ramDefenseFactor(army)
@@ -940,7 +947,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     // and in the per-target cards (pokeTargets), so the display (attack power, march time,
     // the battle forecast, home defence) matches what a dispatch actually does.
     const mods = effectiveMods(ctx.store.state)
-    const atkPow = armyAttackPower(army, mods)
+    // M15: the composer's „atak" summary uses state.forge too, so the headline power matches
+    // what a dispatch resolves with (advanceMarches); no Kuźnia → forge {} → ×1.0 → unchanged.
+    const atkPow = armyAttackPower(army, mods, ctx.store.state.forge)
 
     // "W domu" counts EVERY unit at home (scouts included); the send-all gate below uses
     // only the attack-eligible total (scouts are dispatched via „Zwiad", not attacks).
@@ -1131,7 +1140,9 @@ export function createCampaignPanel(ctx: UiCtx): Panel {
     // outcome (a village the engine keeps safe being reported as zagrożona). The threat
     // (raidPower) stays on NO_TECH_MODS, mirroring raids.ts.
     const wallMult = villageDefenseMult(v)
-    const homeDef = armyDefensePower(home, mods) * wallMult
+    // M15: defend with state.forge so „Obrona domowa", the threat bar and the verdict match
+    // what advanceRaids/advanceHorde resolve with; no Kuźnia → forge {} → ×1.0 → unchanged.
+    const homeDef = armyDefensePower(home, mods, ctx.store.state.forge) * wallMult
     const threat = raidPower(v)
     homeDefVal.textContent = formatInt(homeDef)
     // Attribute the wall's contribution so the player connects the boost to the Mur.

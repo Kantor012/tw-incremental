@@ -388,6 +388,12 @@ export function newDynasty(state: GameState): number {
   state.world = generateWorld(dynSeed)
   state.rngState = RNG.fromString(dynSeed).getState()
   state.tech = {}
+  // M15: clear the Kuźnia upgrade map alongside tech (same discipline as ascend / newEra). Unit
+  // upgrades are a per-run sink bought with the capital's wood/clay/iron and gated by the per-run
+  // Kuźnia building, which this fresh level-0 createVillage capital resets — leaving state.forge
+  // intact would hand the new dynasty permanent ×mult upgrades for free, with a level-0 Kuźnia
+  // (combat reads state.forge regardless of forgeLevel, so the stale levels would still apply).
+  state.forge = {}
   state.battleLog = []
   // Re-arm the GLOBAL horde schedule too (M7.2), exactly as createInitialState seeds it: a
   // fresh, defenceless capital must meet a fresh horde clock (timer re-armed, escalation

@@ -27,6 +27,7 @@ import {
   PP_SCALE,
 } from '../src/systems/prestige'
 import { aggregateTechMods } from '../src/systems/tech'
+import { armyAttackPower } from '../src/systems/combat'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS, PRESTIGE_ROOTS } from '../src/content/prestige'
 import { layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { generateWorld } from '../src/systems/world'
@@ -505,6 +506,9 @@ describe('ascend', () => {
     expect(Object.keys(s.villages)).toEqual(['v0'])
     expect(s.villages.v0.name).toBe('Stolica')
     expect(s.tech).toEqual({})
+    // M15: Kuźnia unit upgrades are a per-run sink (bought with run resources, gated by the
+    // Kuźnia building that the reset rebuilds at level 0), so they clear alongside tech.
+    expect(s.forge).toEqual({})
     expect(s.battleLog).toEqual([])
     expect(s.world.barbarians.length).toBeGreaterThan(0)
 
@@ -586,6 +590,23 @@ describe('ascend', () => {
     }
     // Lifetime total is the running sum; never less than the current balance.
     expect(s.prestige.totalEarned).toBeGreaterThanOrEqual(s.prestige.points)
+  })
+
+  it('clears the Kuźnia upgrade map (M15 — no free permanent upgrades survive the reset)', () => {
+    const s = createInitialState('ascend-forge', 0)
+    // Simulate a run that built the Kuźnia and upgraded several types: the per-unit upgrade map
+    // carries real, varied levels that MUST NOT leak across the reset (the Kuźnia building itself
+    // is reset to level 0, so surviving levels would be free, gated by nothing, and self-inconsistent).
+    s.forge = { axeman: 3, spearman: 2, light_cavalry: 1 }
+
+    ascend(s)
+
+    // The upgrade map is wiped to empty (like tech), so the fresh run starts at forge level 0.
+    expect(s.forge).toEqual({})
+    // Combat identity after the reset: with an empty forge map the optional `forge` combat param
+    // is a pure ×1.0 no-op, so power with and without it is byte-equal again.
+    const units = s.villages.v0.units
+    expect(armyAttackPower(units, NO_TECH_MODS)).toBe(armyAttackPower(units, NO_TECH_MODS, s.forge))
   })
 
   it('re-seeds the world-events schedule from the per-ascension seed (M13 — no stale offer survives)', () => {

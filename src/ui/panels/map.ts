@@ -1109,7 +1109,9 @@ export function createMapPanel(ctx: UiCtx): Panel {
     // (the ±25% luck can still flip a probable assault into a wipe).
     const mods = effectiveMods(ctx.store.state)
     const effDef = fortressTarget(fort.level).defensePower * ramDefenseFactor(army)
-    const fc = attackForecast(armyAttackPower(army, mods), effDef)
+    // M15: feed state.forge so the pre-send forecast uses the SAME per-type Kuźnia upgrades
+    // the tick resolves with (advanceMarches) — no Kuźnia → forge {} → ×1.0 → unchanged.
+    const fc = attackForecast(armyAttackPower(army, mods, ctx.store.state.forge), effDef)
     if (!fc.certainWin && !window.confirm(attackConfirmMessage(fc))) return
     const ok = ctx.onAssaultFortress(ctx.activeVillageId.value, fort.id, army)
     if (ok) {
@@ -1168,7 +1170,9 @@ export function createMapPanel(ctx: UiCtx): Panel {
       setFortForecast('Forteca zrównana z ziemią — nie można jej ponownie zaatakować.')
       fortForecast.classList.remove('forecast-win', 'forecast-lose')
     } else if (composed > 0) {
-      const fc = attackForecast(armyAttackPower(army, mods), base * ramFactor)
+      // M15: state.forge mirrors the per-type Kuźnia upgrades advanceMarches resolves the
+      // assault with, so the verdict matches the real fight; no Kuźnia → forge {} → ×1.0.
+      const fc = attackForecast(armyAttackPower(army, mods, ctx.store.state.forge), base * ramFactor)
       setFortForecast(fc.text)
       applyForecastClass(fortForecast, fc.cls)
     } else {
@@ -1271,7 +1275,9 @@ export function createMapPanel(ctx: UiCtx): Panel {
       // pre-send check can never disagree with the real outcome (or with the „Wyprawy" tab).
       const mods = effectiveMods(ctx.store.state)
       const effDef = barbarianTarget(barb.level).defensePower * ramDefenseFactor(army)
-      const fc = attackForecast(armyAttackPower(army, mods), effDef)
+      // M15: feed state.forge so the pre-send forecast uses the SAME per-type Kuźnia upgrades
+      // the tick resolves with (advanceMarches) — no Kuźnia → forge {} → ×1.0 → unchanged.
+      const fc = attackForecast(armyAttackPower(army, mods, ctx.store.state.forge), effDef)
       // Combat luck (M5.5): warn on anything that is NOT a CERTAIN win — a probable win can
       // still be flipped to a wipe by a bad ±25% roll, so the player accepts that risk
       // explicitly. The message wording adapts to the tier (probable / risky / loss).
@@ -1893,7 +1899,12 @@ export function createMapPanel(ctx: UiCtx): Panel {
       // forecast (M5.5) accounts for the ±25% combat luck the tick rolls: PEWNA wygrana
       // (wins even at worst luck) / PRAWDOPODOBNA (wins on average) / RYZYKOWNA / PEWNA
       // porażka — carried in WORDS, with colour only as a supplementary tint.
-      const fc = attackForecast(armyAttackPower(army, mods), target.defensePower * ramFactor)
+      // M15: state.forge mirrors the per-type Kuźnia upgrades advanceMarches resolves the
+      // attack with, so the three-state verdict matches the real fight; no Kuźnia → ×1.0.
+      const fc = attackForecast(
+        armyAttackPower(army, mods, ctx.store.state.forge),
+        target.defensePower * ramFactor,
+      )
       setForecast(fc.text)
       applyForecastClass(forecast, fc.cls)
     } else {

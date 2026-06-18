@@ -503,6 +503,10 @@ export function advanceMarches(
   mods: TechModifiers = NO_TECH_MODS,
   stats?: Stats,
   rng?: RNG,
+  // M15: account-wide unit upgrades (state.forge), threaded into the attack-power
+  // calculation at RESOLUTION. OPTIONAL and last so every existing call stays identical;
+  // undefined → unitUpgradeMult(0) = ×1.0 per unit → byte-identical to pre-M15.
+  forge?: Partial<Record<UnitId, number>>,
 ): ConquestEvent[] {
   const events: ConquestEvent[] = []
   if (!(dtSeconds > 0)) return events
@@ -577,7 +581,7 @@ export function advanceMarches(
       // undefined → power is taken straight (×1) and the report omits `luck`,
       // reproducing the pre-M5.5 resolution byte-for-byte.
       const luck = rng !== undefined ? luckFactor(rng) : undefined
-      const effAtk = armyAttackPower(m.units, mods) * (luck ?? 1)
+      const effAtk = armyAttackPower(m.units, mods, forge) * (luck ?? 1)
       const outcome = battleOutcome(effAtk, effDef)
       const sent = m.units
 

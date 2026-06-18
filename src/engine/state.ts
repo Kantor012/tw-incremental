@@ -703,6 +703,8 @@ export interface Stats {
   villagesFounded: number
   /** Barbarian villages CONQUERED into the empire. */
   villagesConquered: number
+  /** Unit-type upgrades bought at the Kuźnia across the run's life (M15; bumped once per upgradeUnit). */
+  unitsUpgraded: number
 }
 
 export interface GameState {
@@ -818,6 +820,19 @@ export interface GameState {
    * (content/achievements.ts).
    */
   achievements: Record<string, number>
+  /**
+   * PERMANENT, ACCOUNT-WIDE unit upgrades (M15 KUŹNIA): the purchased upgrade LEVEL per
+   * unit type (absent key = level 0). The FIRST per-unit-type modifier in the game — the
+   * trees only grant GLOBAL attack/defence multipliers. Read at COMBAT RESOLUTION (threaded
+   * into armyAttackPower / armyDefensePower via the optional `forge` param) to lift a type's
+   * attack AND defence by {@link import('../content/forge').unitUpgradeMult}. A sparse map,
+   * written ONLY by systems/forge.upgradeUnit (a player action, never the tick) for the
+   * upgradeable line units; its multipliers are derived on demand and never stored. With no
+   * Kuźnia it stays EMPTY ({}), so the optional forge param is undefined → ×1.0 → the run is
+   * BYTE-IDENTICAL to pre-M15. Keys are drawn from the upgradeable subset of UNIT_IDS (see
+   * content/forge.FORGE_UPGRADES).
+   */
+  forge: Partial<Record<UnitId, number>>
 }
 
 /**
@@ -1049,6 +1064,7 @@ export function createInitialStats(): Stats {
     scoutsReturned: 0,
     villagesFounded: 0,
     villagesConquered: 0,
+    unitsUpgraded: 0,
   }
 }
 
@@ -1087,6 +1103,9 @@ export function createInitialState(seed: string, now: number): GameState {
     automation: { build: false, recruit: false, attack: false, recruitUnit: null, recruitTarget: 0 },
     stats: createInitialStats(),
     achievements: {},
+    // M15: no unit upgrades at run start (and none until a Kuźnia is built). An empty map
+    // means the optional `forge` combat param is undefined → ×1.0 → byte-identical to pre-M15.
+    forge: {},
   }
 }
 

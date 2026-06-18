@@ -119,7 +119,7 @@ interface NavGroup {
  */
 const NAV_GROUPS: NavGroup[] = [
   { label: 'Osada', tabIds: ['buildings', 'villages', 'market', 'automation'] },
-  { label: 'Wojna', tabIds: ['army', 'map', 'raids', 'events', 'reports'] },
+  { label: 'Wojna', tabIds: ['army', 'forge', 'map', 'raids', 'events', 'reports'] },
   { label: 'Postęp', tabIds: ['tech', 'prestige', 'era', 'dynasty', 'challenges'] },
   { label: 'Archiwum', tabIds: ['achievements', 'codex', 'save'] },
 ]
@@ -223,6 +223,8 @@ function coarseVisibilitySig(s: GameState): string {
     st.scoutsReturned +
     ',' +
     st.eventsResolved +
+    ',' +
+    st.unitsUpgraded +
     '|' +
     (st.resourcesExchanged.gt(0) ? '1' : '0') +
     '|'

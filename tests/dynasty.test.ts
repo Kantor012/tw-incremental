@@ -463,6 +463,9 @@ describe('newDynasty (the great-great reset)', () => {
     s.prestige = { points: 12, totalEarned: 80, ascensions: 2, nodes: { [prestigeId]: 1 } }
     s.dynasty = { points: 3, totalEarned: 3, dynasties: 1, nodes: {} }
     s.stats.attacksWon = 9
+    // M15: a non-empty Kuźnia upgrade map that the great-great reset must WIPE (a per-run sink — a
+    // fresh dynasty must not keep free permanent ×mult upgrades behind a rebuilt level-0 Kuźnia).
+    s.forge = { axeman: 2, spearman: 1 }
     // The base seed + clock fields are part of the "what SURVIVES" contract: newDynasty takes
     // no clock and keeps the run reproducible, so these must be byte-identical afterwards.
     const seedBefore = s.seed
@@ -496,6 +499,7 @@ describe('newDynasty (the great-great reset)', () => {
     expect(Object.keys(s.villages)).toEqual(['v0'])
     expect(s.villages.v0.name).toBe('Stolica')
     expect(s.tech).toEqual({})
+    expect(s.forge).toEqual({}) // M15: the per-run Kuźnia upgrade map is cleared like tech
     expect(s.battleLog).toEqual([])
     expect(s.world.barbarians.length).toBeGreaterThan(0)
 

@@ -120,6 +120,16 @@ export interface UiCtx {
    */
   onClaimEvent: () => boolean
   /**
+   * Upgrade (M15 KUŹNIA) the unit type `unitId` by ONE permanent, account-wide level, paid from
+   * the CAPITAL (villageOrder[0]); returns true on success (cost spent, `state.forge[unitId]`
+   * incremented, lifetime `unitsUpgraded` bumped, committed + persisted). No recompute is needed
+   * — the upgrade multiplier is read on demand at combat resolution, not folded into derived
+   * stats. The forge panel reads `canUpgrade` (systems/forge) itself for the disabled/
+   * affordability cue — this callback is the commit, not the validation. Mirrors {@link onExchange}
+   * / {@link onClaimEvent} (a player-initiated, commit-on-success action; never runs in the tick).
+   */
+  onUpgradeUnit: (unitId: UnitId) => boolean
+  /**
    * Purchase the NEXT level of the global tech node `nodeId`, paid from the GLOBAL
    * resource pool (summed across all villages); returns true on success (cost spent,
    * `state.tech[nodeId]` incremented, derived multipliers recomputed, committed +

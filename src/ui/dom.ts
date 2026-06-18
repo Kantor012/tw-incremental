@@ -580,6 +580,35 @@ export function buildingIcon(id: BuildingId): SVGSVGElement {
         pennant,
       ])
     }
+    case 'forge': {
+      // Kuźnia = kowadło ze stali + złoty młot ułożony na ukos. Krępe kowadło z rogiem i
+      // stopą czyta się od razu jako warsztat płatnerza — odróżnia od skrzyżowanych mieczy
+      // Koszar (zbrojownia) i podkowy Stajni. Świadomie kowadło + młot, nie pojedyncza broń.
+      const anvilBody = svg('path', {
+        // Blat z rogiem po lewej, talia i szeroka stopa.
+        d: 'M4 11 H17 L15 14 H9 L8.5 17 H15 V19 H6 V17 H6.5 L7 14 H5 Z',
+        fill: '#6b7682',
+      })
+      const anvilFace = svg('rect', { x: '4', y: '10', width: '13', height: '1.4', fill: '#9aa3ad' })
+      const hammerHead = svg('rect', {
+        x: '13', y: '4', width: '6', height: '2.6', rx: '0.6',
+        fill: '#d9a441', transform: 'rotate(32 16 5.3)',
+      })
+      const hammerHandle = svg('line', {
+        x1: '13.5', y1: '7', x2: '8.5', y2: '11',
+        stroke: '#8a5a2b', 'stroke-width': '1.6', 'stroke-linecap': 'round',
+      })
+      const spark = (cx: string, cy: string): SVGElement =>
+        svg('circle', { cx, cy, r: '0.7', fill: '#e3b755' })
+      return svgIcon('0 0 24 24', BUILDINGS[id].name, 'building-icon', [
+        anvilBody,
+        anvilFace,
+        hammerHandle,
+        hammerHead,
+        spark('18', '9'),
+        spark('20', '11'),
+      ])
+    }
     default: {
       const _exhaustive: never = id
       throw new Error('Brak ikony dla budynku: ' + String(_exhaustive))

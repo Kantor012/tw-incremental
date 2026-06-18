@@ -12,7 +12,8 @@ import {
 } from './state'
 import { WORLD_EVENTS_BY_ID } from '../content/events'
 import { BUILDING_IDS, BUILDINGS } from '../content/buildings'
-import { UNIT_IDS } from '../content/units'
+import { UNIT_IDS, type UnitId } from '../content/units'
+import { catalogMaxUpgrade } from '../content/forge'
 import { barbarianTarget, MAX_TARGET_LEVEL } from '../content/barbarians'
 import { TECH_NODES, TECH_NODE_IDS } from '../content/tech'
 import { PRESTIGE_NODES, PRESTIGE_NODE_IDS } from '../content/prestige'
@@ -57,7 +58,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 24
+export const SAVE_VERSION = 25
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -788,6 +789,57 @@ export function migrate(raw: any): any {
         : s.events,
       version: 24,
     }),
+    // v24 -> v25: forge / unit upgrades (M15 — KUŹNIA). A v24 save predates the new 'forge'
+    // BUILDING key (appended to BUILDING_IDS after 'watchtower'), the account-wide `forge`
+    // upgrade map and the lifetime `stats.unitsUpgraded` counter. All three are backfilled
+    // WITHOUT disturbing the player's progress (the building key MUST be backfilled so
+    // validateVillage, which iterates the now-longer BUILDING_IDS, accepts the save — exactly
+    // like the v22->v23 watchtower backfill):
+    //  - every village's `buildings` gains forge:0 by spreading INITIAL_BUILDINGS *first*, so the
+    //    save's own levels win over the seed and existing progress is preserved;
+    //  - `forge` — the sparse `{ unitId: level }` upgrade map — seeded EMPTY ({}) (an old save has
+    //    no upgrade history; the map is written only by the player's upgradeUnit action). A
+    //    forward-compat save that already carries an object `forge` keeps it verbatim; any
+    //    non-object (corrupt/missing) is reset to {};
+    //  - `stats.unitsUpgraded` — the lifetime trophy counter — seeded to 0 (an event tally with no
+    //    recoverable trace), mirroring the v16->v17 fortressesRazed / v22->v23 eventsResolved backfills.
+    // The Kuźnia's recruit_speed effect is a MINOR training-speed bonus that touches NO
+    // production/storage/pop/combat stat, and is autoBuildable:false; with no Kuźnia the forge map
+    // stays empty (×1.0 per unit at resolution), so a migrated run is BYTE-IDENTICAL to pre-M15 until
+    // the player builds a Kuźnia AND upgrades a unit. Malformed entries are left as-is so validateState
+    // rejects them loudly. Nothing is recomputed here; importSave's recomputeDerived pass runs
+    // afterwards exactly as for every other migration (the Kuźnia's recruit_speed is a no-op for
+    // derived stats, like the barracks/stable).
+    24: (s) => {
+      const order: string[] = Array.isArray(s.villageOrder)
+        ? s.villageOrder
+        : Object.keys(s.villages ?? {})
+      const villages: Record<string, any> = {}
+      for (const id of order) {
+        const v = (s.villages ?? {})[id]
+        if (!isObject(v)) {
+          villages[id] = v
+          continue
+        }
+        villages[id] = {
+          ...v,
+          buildings: { ...INITIAL_BUILDINGS, ...(isObject(v.buildings) ? v.buildings : {}) },
+        }
+      }
+      return {
+        ...s,
+        villages,
+        forge: isObject(s.forge) ? s.forge : {},
+        stats: isObject(s.stats)
+          ? {
+              ...s.stats,
+              unitsUpgraded:
+                typeof s.stats.unitsUpgraded === 'number' ? s.stats.unitsUpgraded : 0,
+            }
+          : s.stats,
+        version: 25,
+      }
+    },
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -1513,6 +1565,7 @@ export function validateState(s: unknown): GameState {
     'scoutsReturned',
     'villagesFounded',
     'villagesConquered',
+    'unitsUpgraded',
   ] as const) {
     const n = stats[key]
     if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
@@ -1554,6 +1607,31 @@ export function validateState(s: unknown): GameState {
     const marker = achievements[id]
     if (typeof marker !== 'number' || !Number.isFinite(marker) || marker < 0) {
       throw new Error(`save: invalid achievement marker ${id}`)
+    }
+  }
+
+  // ACCOUNT-WIDE unit upgrades (M15 KUŹNIA) — a sparse `{ unitId: level }` map (absent key =
+  // level 0). It is the ONLY forge field that serializes; the combat multipliers it drives are
+  // TRANSIENT (read on demand at resolution via unitUpgradeMult), so there is nothing else to
+  // check. Every PRESENT key must be a KNOWN unit id, and its level an integer inside that
+  // unit's [0, catalogue maxUpgrade] band — an out-of-band level would over-scale a type's
+  // power and then get autosaved (CLAUDE.md hard rule #3). A NON-upgradeable unit has catalogue
+  // max 0, so it may carry only level 0 (effectively rejecting a stray upgrade on it). Unknown
+  // keys are REJECTED for the same reason as the tech/prestige maps — `forge` is written ONLY by
+  // upgradeUnit (known, upgradeable ids), so a key outside UNIT_IDS means a corrupt/tampered/
+  // forward-version save (downgrade is best-effort). An empty `{}` always passes, which the
+  // v24->v25 migration guarantees.
+  const { forge } = s
+  if (!isObject(forge)) throw new Error('save: missing forge')
+  const knownUnitIds = UNIT_IDS as readonly string[]
+  for (const key of Object.keys(forge)) {
+    if (!knownUnitIds.includes(key)) {
+      throw new Error(`save: unknown forge unit ${key}`)
+    }
+    const level = forge[key]
+    const max = catalogMaxUpgrade(key as UnitId)
+    if (typeof level !== 'number' || !Number.isInteger(level) || level < 0 || level > max) {
+      throw new Error(`save: invalid forge level ${key}`)
     }
   }
 

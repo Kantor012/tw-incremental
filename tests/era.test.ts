@@ -32,6 +32,7 @@ import {
   PP_SCALE,
 } from '../src/systems/prestige'
 import { aggregateTechMods } from '../src/systems/tech'
+import { armyAttackPower } from '../src/systems/combat'
 import { ERA_NODES, ERA_NODE_IDS, ERA_ROOTS } from '../src/content/era'
 import { PRESTIGE_NODE_IDS } from '../src/content/prestige'
 import { generateWorld } from '../src/systems/world'
@@ -407,11 +408,27 @@ describe('newEra (the great reset)', () => {
     expect(Object.keys(s.villages)).toEqual(['v0'])
     expect(s.villages.v0.name).toBe('Stolica')
     expect(s.tech).toEqual({})
+    // M15: the great reset also wipes the per-run Kuźnia upgrade map (see the dedicated test below).
+    expect(s.forge).toEqual({})
     expect(s.battleLog).toEqual([])
     expect(s.world.barbarians.length).toBeGreaterThan(0)
 
     // The reset state is fully valid and immediately playable (no softlock / corruption).
     expect(validateState(s)).toBe(s)
+  })
+
+  it('clears the Kuźnia upgrade map (M15 — no free permanent upgrades survive the great reset)', () => {
+    const s = readyForEra('era-forge')
+    // Simulate a run that built the Kuźnia and upgraded several types; the per-unit upgrade map
+    // must NOT leak across the great reset (the Kuźnia building is rebuilt at level 0).
+    s.forge = { axeman: 4, swordsman: 2 }
+
+    expect(newEra(s)).toBeGreaterThan(0)
+
+    expect(s.forge).toEqual({})
+    // Combat identity after the reset: an empty forge map makes the optional combat param a ×1.0 no-op.
+    const units = s.villages.v0.units
+    expect(armyAttackPower(units, NO_TECH_MODS)).toBe(armyAttackPower(units, NO_TECH_MODS, s.forge))
   })
 
   it('regenerates the world deterministically from the per-era seed (seed:eraN)', () => {
