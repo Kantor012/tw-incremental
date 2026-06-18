@@ -219,7 +219,7 @@ describe('startChallenge (RESET mirroring ascend, meta preserved, deterministic)
     const id = CHALLENGE_IDS[0]
     const s = dirtyState('chal-events')
     // A stale ACTIVE offer + advanced events stream that MUST NOT leak into the challenge run.
-    s.events = { rngState: 222333444, timer: 8, active: { defId: 'karawana', ttl: 30, roll: 0.9 } }
+    s.events = { rngState: 222333444, timer: 8, active: { defId: 'karawana', ttl: 30, roll: 0.9 }, buff: null }
 
     startChallenge(s, id)
 

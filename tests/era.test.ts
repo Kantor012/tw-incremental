@@ -465,7 +465,7 @@ describe('newEra (the great reset)', () => {
   it('re-seeds the world-events schedule from the per-era seed (M13 — no stale offer survives)', () => {
     const s = readyForEra('era-events')
     // A stale ACTIVE offer + advanced events stream that MUST NOT leak across the great reset.
-    s.events = { rngState: 987654321, timer: 11, active: { defId: 'zyla_zelaza', ttl: 99, roll: 0.7 } }
+    s.events = { rngState: 987654321, timer: 11, active: { defId: 'zyla_zelaza', ttl: 99, roll: 0.7 }, buff: null }
 
     newEra(s)
 

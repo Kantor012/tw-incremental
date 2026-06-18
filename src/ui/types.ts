@@ -232,8 +232,16 @@ export interface UiCtx {
  *            tab, and once immediately when the panel becomes active — never
  *            while it is hidden. It must NOT rebuild the DOM tree per frame; it
  *            only writes textContent / styles / attributes onto existing nodes.
+ * - `onShow` (optional) is called by the shell on (re)entry — right BEFORE the
+ *            first `update()` after the panel becomes the active tab (and on
+ *            mount). It exists so a panel can SILENTLY re-baseline any real-time
+ *            transition-detection state that went stale while it was hidden
+ *            (its `update()` does not run off-tab), and thus avoid announcing a
+ *            change that actually happened minutes ago off-tab as if it were
+ *            fresh. Steady per-frame updates do NOT call it.
  */
 export interface Panel {
   el: HTMLElement
   update(): void
+  onShow?(): void
 }

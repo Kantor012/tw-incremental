@@ -654,6 +654,38 @@ export function eventIcon(defId: string, label = 'Wydarzenie'): SVGSVGElement {
         ...logEnd('10.5', '9.5'),
       ])
     }
+    case 'piesn_wojenna': {
+      // Piesn wojenna (buff ataku) = chorągiew bojowa: drzewce + wypełniony złoty
+      // proporzec z heraldycznym paskiem. „Zagrzewa do boju" — odrębne od ikon windfalli.
+      const pole = svg('path', { d: 'M7 3 V21', stroke: '#6b431d', 'stroke-width': '1.8', 'stroke-linecap': 'round' })
+      const banner = svg('path', { d: 'M7 4 L20 6.5 L7 12 Z', fill: '#d9a441' })
+      const stripe = svg('path', { d: 'M7.5 7 L15 8.4', stroke: '#8a5a2b', 'stroke-width': '1', fill: 'none', 'stroke-linecap': 'round' })
+      const finial = svg('circle', { cx: '7', cy: '3', r: '1.2', fill: '#e3b755' })
+      return svgIcon('0 0 24 24', label, 'event-glyph', [pole, banner, stripe, finial])
+    }
+    case 'lowcy_lupow': {
+      // Lowcy lupow (buff lupu) = skrzynia skarbu: korpus + zaokrąglone wieko, stalowa
+      // obręcz i złoty zamek. Odrębne od sakwy karawany (też złoto, ale inna bryła).
+      const body = svg('rect', { x: '4', y: '11', width: '16', height: '9', rx: '1', fill: '#8a5a2b' })
+      const lid = svg('path', { d: 'M4 11 Q4 6.5 12 6.5 Q20 6.5 20 11 Z', fill: '#a96f3a' })
+      const band = svg('rect', { x: '4', y: '13.2', width: '16', height: '1.8', fill: '#6b7682' })
+      const lock = svg('rect', { x: '10.5', y: '12', width: '3', height: '3.2', rx: '0.4', fill: '#e3b755', stroke: '#6b431d', 'stroke-width': '0.6' })
+      return svgIcon('0 0 24 24', label, 'event-glyph', [body, lid, band, lock])
+    }
+    case 'forsowny_marsz': {
+      // Forsowny marsz (buff prędkości) = szewrony naprzód: trzy złote „>" jak linie
+      // pędu — czyta się „szybciej / w marszu", odrębne od pozostałych ikon.
+      const chev = (x: string, x2: string): SVGElement =>
+        svg('path', {
+          d: 'M' + x + ' 6 L' + x2 + ' 12 L' + x + ' 18',
+          fill: 'none',
+          stroke: '#d9a441',
+          'stroke-width': '2.4',
+          'stroke-linecap': 'round',
+          'stroke-linejoin': 'round',
+        })
+      return svgIcon('0 0 24 24', label, 'event-glyph', [chev('5', '11'), chev('12', '18')])
+    }
     default: {
       // Nieznane/przyszłe wydarzenie — neutralny złoty błysk „okazji" (czter'opromienna
       // gwiazda), zawsze SVG, nigdy tofu.

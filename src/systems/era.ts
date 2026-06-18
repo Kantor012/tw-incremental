@@ -387,6 +387,8 @@ export function newEra(state: GameState): number {
     rngState: RNG.fromString(eraSeed + '::events').getState(),
     timer: EVENT_INTERVAL,
     active: null,
+    // M14: a fresh era starts with no timed buff in force.
+    buff: null,
   }
 
   // Reconcile derived stats with the surviving era multipliers (prestige is now empty).

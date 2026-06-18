@@ -922,10 +922,11 @@ a:hover {
   gap: var(--space-1);
 }
 
-/* Ikona oferty — niech przylega do nazwy zamiast być rozrzucona na krawędzie
- * przez .target-head { justify-content: space-between }, które zakłada parę
- * nazwa↔poziom; tutaj para to ikona↔nazwa. */
-.event-offer-card .target-head {
+/* Ikona oferty / aktywnego buffa — niech przylega do nazwy zamiast być rozrzucona
+ * na krawędzie przez .target-head { justify-content: space-between }, które zakłada
+ * parę nazwa↔poziom; tutaj para to ikona↔nazwa. */
+.event-offer-card .target-head,
+.event-active-buff .target-head {
   justify-content: flex-start;
   gap: var(--space-2);
 }
@@ -940,6 +941,33 @@ a:hover {
 .event-glyph {
   width: 1.6rem;
   height: 1.6rem;
+}
+
+/* Podgląd oferty typu buff (M14): efekt + czas trwania zagnieżdżone w karcie oferty.
+ * Globalny reset zeruje marginesy akapitów, a gap karty (.target) nie sięga wnuków,
+ * więc rytm pionowy tego bloku niesie własny, drobny gap. */
+.event-buff-preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Wskaźnik aktywnego buffa (M14) współdzieli powierzchnię karty .target (spójny
+ * wygląd z kartą oferty), ale jest CZYSTO informacyjny — nie ma żadnej akcji.
+ * Znosimy więc mikro-interakcje .target, które sygnalizują klikalność: uniesienie
+ * na hover (layout.css) i docisk (scale) na active (motion.css). Zostawiamy
+ * powierzchnię/cień jak w spoczynku, więc karta nie „udaje" przycisku. Selektor z
+ * dwiema klasami (.event-active-buff.target) ma wyższą swoistość niż .target:hover/
+ * .target:active, więc wygrywa niezależnie od kolejności ładowania plików CSS. */
+.event-active-buff.target:hover {
+  transform: none;
+  background-color: var(--panel-2);
+  background-image: var(--grad-panel);
+  box-shadow: var(--shadow-1), var(--edge-highlight);
+  border-color: var(--border);
+}
+.event-active-buff.target:active {
+  transform: none;
 }
 
 .save-actions {

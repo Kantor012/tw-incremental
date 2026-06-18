@@ -10,6 +10,7 @@ import {
   NO_TECH_MODS,
   HORDE_INTERVAL,
   EVENT_INTERVAL,
+  EVENT_TTL,
   type GameState,
   type Stats,
   type Village,
@@ -88,8 +89,8 @@ import {
   exchangeRate,
 } from '../src/systems/market'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
-import { watchtowerBuilt } from '../src/systems/events'
-import { WORLD_EVENTS } from '../src/content/events'
+import { watchtowerBuilt, advanceEvents, claimEvent, aggregateEventBuffMods } from '../src/systems/events'
+import { WORLD_EVENTS, WORLD_EVENTS_BY_ID } from '../src/content/events'
 import { layoutTree, techEdges, layoutNodes, nodeEdges } from '../src/systems/techLayout'
 import { chooseAction } from './bot'
 
@@ -4515,5 +4516,192 @@ export function checkEventsSaveLoad(seed: string): InvariantResult {
         : !activeSurvived
           ? 'the active offer did not survive export/import intact'
           : 'the events stream (timer / rngState / eventsResolved) did not survive export/import',
+  }
+}
+
+// --- M14 timed event buffs (the first TEMPORARY modifier) coverage ------------------------------
+//
+// A timed buff is the game's FIRST temporary modifier: claiming a `kind: 'buff'` world event installs
+// a single {@link import('../src/engine/state').ActiveBuff} that, while it lasts, folds a small bag
+// onto the effective mods via aggregateEventBuffMods (systems/events.ts) — the SIXTH combine source,
+// layered after tech × prestige × era × dynasty × challenge. It is gated by the SAME watchtower as the
+// M13 offers, so the byte-identity guarantee is preserved: with no watchtower aggregateEventBuffMods
+// returns the IDENTITY bag and advanceEvents never counts a buff down, so the MAIN run + combat-luck
+// stream stay BYTE-IDENTICAL to pre-M14 (buff-inert). v1 buffs touch ONLY the in-flight axes
+// (attackMult / lootMult / marchSpeedFrac) read from the threaded bag at the moment of use, so a buff
+// needs NO recomputeDerived — it folds in on claim and reverts on expiry via the existing re-
+// aggregation signal (advanceEvents returns true on the expiry step; the tick re-threads `mods`).
+// These deterministic proof-of-mechanic checks mirror the M13 events-* coverage (no bot, no RNG).
+
+/** A fresh seeded state with the watchtower built (gate OPEN) and a chosen buff OFFER ready to claim. */
+function seedBuffOffer(seed: string, defId: string): GameState {
+  const state = createInitialState(seed, 0)
+  const v = firstVillage(state)
+  v.buildings.watchtower = 1 // OPEN the gate — a buff only folds in / counts down with a watchtower
+  recomputeDerived(state)
+  state.events.active = { defId, ttl: EVENT_TTL, roll: 0.5 } // a buff offer the player can claim
+  return state
+}
+
+/** True iff `bag` is field-for-field the identity {@link NO_TECH_MODS} (no temporary modifier). */
+function buffBagIsIdentity(bag: TechModifiers): boolean {
+  for (const r of RESOURCE_IDS) if (bag.productionMult[r] !== NO_TECH_MODS.productionMult[r]) return false
+  return (
+    bag.storageMult === NO_TECH_MODS.storageMult &&
+    bag.popMult === NO_TECH_MODS.popMult &&
+    bag.costReduction === NO_TECH_MODS.costReduction &&
+    bag.recruitSpeedFrac === NO_TECH_MODS.recruitSpeedFrac &&
+    bag.marchSpeedFrac === NO_TECH_MODS.marchSpeedFrac &&
+    bag.attackMult === NO_TECH_MODS.attackMult &&
+    bag.defenseMult === NO_TECH_MODS.defenseMult &&
+    bag.lootMult === NO_TECH_MODS.lootMult &&
+    bag.automations.build === NO_TECH_MODS.automations.build &&
+    bag.automations.recruit === NO_TECH_MODS.automations.recruit &&
+    bag.automations.attack === NO_TECH_MODS.automations.attack
+  )
+}
+
+/** The attack buff (`piesn_wojenna`, mods.attackMult 1.6) — the buff used by the apply/expiry/determinism proofs. */
+const BUFF_ATTACK_ID = 'piesn_wojenna'
+
+/**
+ * Claiming a buff FOLDS its mods into effectiveMods (M14, buff-applies): with the watchtower built and an
+ * attack-buff offer on the table, {@link claimEvent} installs `events.buff`, and the next
+ * {@link effectiveMods} must reflect the buff's `attackMult` as the sixth combine source — strictly above
+ * the pre-claim value, and EXACTLY `before × def.mods.attackMult` (the buff is authored as the final
+ * factor). Pure, no RNG, no clock. Deterministic for a given seed.
+ */
+export function checkBuffApplies(seed: string): InvariantResult {
+  const def = WORLD_EVENTS_BY_ID[BUFF_ATTACK_ID]
+  const factor = def && def.kind === 'buff' ? def.mods.attackMult ?? 1 : 1
+  const state = seedBuffOffer(seed, BUFF_ATTACK_ID)
+  const before = effectiveMods(state).attackMult // identity-from-buff (no buff installed yet)
+  const claimed = claimEvent(state) // installs events.buff via the real player-action path
+  const installed = state.events.buff !== null && state.events.buff.defId === BUFF_ATTACK_ID
+  const after = effectiveMods(state).attackMult // buff now folded into the combine chain
+  const ok =
+    claimed && installed && factor > 1 && after > before && Math.abs(after - before * factor) < 1e-9
+  return {
+    name: 'buff-applies',
+    ok,
+    detail: ok
+      ? `claiming "${BUFF_ATTACK_ID}" raised effectiveMods.attackMult ${before} -> ${after} (×${factor}, the 6th combine source)`
+      : !claimed
+        ? 'claimEvent did not install the buff (gate / offer issue)'
+        : !installed
+          ? 'events.buff was not set to the claimed buff'
+          : `attackMult did not reflect the buff: ${before} -> ${after} (expected ×${factor})`,
+  }
+}
+
+/**
+ * A buff COUNTS DOWN on the tick grid and REVERTS effectiveMods byte-identically on expiry (M14,
+ * buff-expires-reverts). After claiming the attack buff (effectiveMods.attackMult strictly up),
+ * stepping {@link advanceEvents} on the fixed grid past the buff's `duration` must clear `events.buff`,
+ * make advanceEvents RETURN the expiry signal (so the tick re-aggregates the threaded `mods`), and leave
+ * effectiveMods.attackMult EXACTLY back at the pre-buff baseline (`reverted === base` — the v1 in-flight
+ * axes need no recomputeDerived). The spawn clock, re-armed a full {@link EVENT_INTERVAL} out by the
+ * claim, cannot fire inside this short window, so the only buff change is its expiry. Pure, no RNG.
+ */
+export function checkBuffExpiresReverts(seed: string): InvariantResult {
+  const def = WORLD_EVENTS_BY_ID[BUFF_ATTACK_ID]
+  const duration = def && def.kind === 'buff' ? def.duration : 0
+  const state = seedBuffOffer(seed, BUFF_ATTACK_ID)
+  const base = effectiveMods(state).attackMult // pre-buff baseline (identity)
+  claimEvent(state)
+  const buffed = effectiveMods(state).attackMult
+  const dt = 1
+  const limit = Math.ceil(duration / dt) + 5
+  let signalled = false
+  for (let t = 0; t < limit && state.events.buff !== null; t++) {
+    if (advanceEvents(state, dt)) signalled = true // advanceEvents returns true on the expiry step
+  }
+  const expired = state.events.buff === null
+  const reverted = effectiveMods(state).attackMult
+  const ok = buffed > base && expired && signalled && reverted === base
+  return {
+    name: 'buff-expires-reverts',
+    ok,
+    detail: ok
+      ? `"${BUFF_ATTACK_ID}" attackMult ${base} ->(buff) ${buffed} ->(expiry after ${duration}s) ${reverted} — reverted byte-identically; advanceEvents signalled re-aggregation`
+      : !(buffed > base)
+        ? `buff never raised attackMult (base ${base}, buffed ${buffed})`
+        : !expired
+          ? `buff did not expire within ${limit} ticks`
+          : !signalled
+            ? 'advanceEvents never returned the expiry signal'
+            : `attackMult did not revert: base ${base}, after expiry ${reverted}`,
+  }
+}
+
+/**
+ * Buff countdown is DETERMINISTIC online vs chunked-offline (M14, buff-determinism). A watchtower'd state
+ * carrying a LIVE buff (remaining = its full duration) plus an armed spawn clock must produce a
+ * byte-identical {@link serialize} whether the span is credited as one big {@link simulate} (online
+ * catch-up) or chunked through {@link applyOffline}: the buff burns down on the SAME tick grid and the
+ * events RNG stream draws spawning offers in lock-step. Asserts NON-VACUITY — the buff was installed and
+ * actually expired in the window — so "identical" can never pass by doing nothing. `seconds` stays within
+ * the offline cap (the caller uses an hour). Mirrors {@link checkEventsDeterminism} with a buff added.
+ */
+export function checkBuffDeterminism(seed: string, seconds: number): InvariantResult {
+  const def = WORLD_EVENTS_BY_ID[BUFF_ATTACK_ID]
+  const duration = def && def.kind === 'buff' ? def.duration : 0
+  const make = (): GameState => {
+    const s = createInitialState(seed, 0)
+    const v = firstVillage(s)
+    v.buildings.watchtower = 1 // OPEN the gate (the main run never does — autoBuildable:false)
+    recomputeDerived(s)
+    // A live buff expiring WELL inside the window (both paths must count it down on the grid) + an armed
+    // spawn clock so offers also spawn-and-lapse — a combined buff + offer determinism proof.
+    s.events.buff = { defId: BUFF_ATTACK_ID, remaining: duration }
+    s.events.timer = 300
+    return s
+  }
+  const big = make()
+  const startedBuffed = big.events.buff !== null
+  simulate(big, seconds)
+  big.lastSeen = seconds * 1000 // mirror the bookkeeping applyOffline performs
+
+  const chunked = make()
+  applyOffline(chunked, seconds * 1000) // lastSeen starts at 0
+
+  const equal = serialize(big) === serialize(chunked)
+  const expired = big.events.buff === null // the buff actually counted down (non-vacuity)
+  const ok = equal && startedBuffed && expired
+  return {
+    name: 'buff-determinism',
+    ok,
+    detail: ok
+      ? `a live "${BUFF_ATTACK_ID}" buff (${duration}s) + spawning offers replayed identically online vs chunked-offline (buff expired on the grid)`
+      : !startedBuffed
+        ? 'buff was not installed (setup issue)'
+        : !expired
+          ? 'buff did not expire within the window (vacuous determinism check)'
+          : 'online single-step simulate diverged from chunked offline catch-up (buff.remaining / events stream split)',
+  }
+}
+
+/**
+ * Buffs are INERT in a no-watchtower run (M14 — the byte-identity guarantee, extends events-inert): after
+ * a normal MAIN run the bot never builds the autoBuildable:false Wieża, so a buff can NEVER be installed
+ * ({@link claimEvent} no-ops without one) — `events.buff` stays null — AND {@link aggregateEventBuffMods}
+ * returns the IDENTITY bag, so `combine(x, identity) === x` leaves effectiveMods byte-identical to the
+ * five-source pre-M14 chain. Reads the PRIMARY run's final state (mirrors {@link checkEventsInert}). Pure.
+ */
+export function checkBuffInert(state: GameState, seed: string): InvariantResult {
+  const issues: string[] = []
+  if (watchtowerBuilt(state)) issues.push('a village built the Wieża (gate opened) — buff-inert is not meaningful')
+  if (state.events.buff !== null)
+    issues.push(`events.buff=${JSON.stringify(state.events.buff)} (expected null) — a buff was installed without a watchtower`)
+  if (!buffBagIsIdentity(aggregateEventBuffMods(state)))
+    issues.push('aggregateEventBuffMods returned a non-identity bag with no watchtower (would perturb effectiveMods)')
+  const ok = issues.length === 0
+  void seed // kept for signature symmetry with checkEventsInert (no per-seed state to read here)
+  return {
+    name: 'buff-inert',
+    ok,
+    detail: ok
+      ? 'no-watchtower run kept events.buff null with an identity buff bag — effectiveMods byte-identical to pre-M14'
+      : issues.join('; '),
   }
 }

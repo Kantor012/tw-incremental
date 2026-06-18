@@ -554,7 +554,7 @@ describe('newDynasty (the great-great reset)', () => {
   it('re-seeds the world-events schedule from the per-dynasty seed (M13 — no stale offer survives)', () => {
     const s = readyForDynasty('dyn-events')
     // A stale ACTIVE offer + advanced events stream that MUST NOT leak across the great-great reset.
-    s.events = { rngState: 555111777, timer: 3, active: { defId: 'dary_lasu', ttl: 12, roll: 0.2 } }
+    s.events = { rngState: 555111777, timer: 3, active: { defId: 'dary_lasu', ttl: 12, roll: 0.2 }, buff: null }
 
     newDynasty(s)
 

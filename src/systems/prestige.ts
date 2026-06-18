@@ -37,6 +37,13 @@ import { aggregateDynastyMods, dynastyStartResourceBonus } from './dynasty'
 // dynasty bag — IDENTITY when no challenge is active and none completed, so a no-challenge
 // save folds to exactly the pre-M8 value (every earlier balance target stays byte-identical).
 import { aggregateChallengeMods } from './challenges'
+// VALUE import of the M14 event-buff roll-up — the SIXTH and final source folded into
+// effectiveMods. Used ONLY inside the body of `effectiveMods` below (never at module top level),
+// so this is safe from an initialisation cycle. The edge is SINGLE-direction: systems/events.ts
+// imports types/values from state.ts and content/events.ts but NOTHING from this module, so there
+// is no cycle to keep benign. The buff bag is IDENTITY whenever no buff is in force (or no
+// watchtower), so a buff-free run folds to exactly the pre-M14 value — byte-identical.
+import { aggregateEventBuffMods } from './events'
 
 /**
  * Prestige (ascension) engine (M4.1) — the PERMANENT meta-layer on top of tech.
@@ -218,20 +225,26 @@ export function effectiveMods(state: GameState): TechModifiers {
   const prestigeNodes = state.prestige ? state.prestige.nodes : {}
   const eraNodes = state.era ? state.era.nodes : {}
   const dynastyNodes = state.dynasty ? state.dynasty.nodes : {}
-  // Fold all FOUR trees plus the M8 challenge bag: (((tech × prestige) × era) × dynasty) ×
-  // challenge. `combine(x, identityBag) === x` byte-for-byte, and aggregateEraMods({}) /
-  // aggregateDynastyMods({}) / aggregateChallengeMods(no-challenge state) ARE the identity
-  // bag, so a no-era / no-dynasty / no-challenge save folds to exactly the pre-M6.x / pre-M8
-  // value — the earlier balance targets stay byte-identical. The dynasty bag is the ONLY one
-  // whose `automation_unlock` gateway can set the automation flags true (combine ORs them);
-  // the challenge bag's automations are always false. The challenge bag is read off the WHOLE
-  // state (its active constraint + completed-reward map), not a node sub-map like the others.
+  // Fold all FOUR trees plus the M8 challenge bag plus the M14 event-buff bag:
+  // ((((tech × prestige) × era) × dynasty) × challenge) × buff. `combine(x, identityBag) === x`
+  // byte-for-byte, and aggregateEraMods({}) / aggregateDynastyMods({}) / aggregateChallengeMods(
+  // no-challenge state) / aggregateEventBuffMods(no-buff state) ARE the identity bag, so a
+  // no-era / no-dynasty / no-challenge / no-buff save folds to exactly the pre-M6.x / pre-M8 /
+  // pre-M14 value — the earlier balance targets stay byte-identical. The dynasty bag is the ONLY
+  // one whose `automation_unlock` gateway can set the automation flags true (combine ORs them);
+  // the challenge and buff bags' automations are always false. The challenge and buff bags are
+  // read off the WHOLE state (the buff off events.buff, which is null without a watchtower), not a
+  // node sub-map like the others. The buff is the only TEMPORARY source — it appears/vanishes on
+  // the tick grid, and the tick re-aggregates `mods` on its expiry signal (see tick.ts).
   return combine(
     combine(
-      combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
-      aggregateDynastyMods(dynastyNodes),
+      combine(
+        combine(combine(techMods, aggregatePrestigeMods(prestigeNodes)), aggregateEraMods(eraNodes)),
+        aggregateDynastyMods(dynastyNodes),
+      ),
+      aggregateChallengeMods(state),
     ),
-    aggregateChallengeMods(state),
+    aggregateEventBuffMods(state),
   )
 }
 
@@ -430,6 +443,8 @@ export function ascend(state: GameState): number {
     rngState: RNG.fromString(ascSeed + '::events').getState(),
     timer: EVENT_INTERVAL,
     active: null,
+    // M14: a fresh ascension starts with no timed buff in force.
+    buff: null,
   }
 
   // Reconcile derived stats with the surviving prestige multipliers.

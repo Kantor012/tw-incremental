@@ -57,7 +57,7 @@ import { generateWorld, WORLD_CENTER, WORLD_SIZE, DISTANCE_PER_LEVEL } from '../
  */
 
 /** Current save schema version. Bump together with a migration entry. */
-export const SAVE_VERSION = 23
+export const SAVE_VERSION = 24
 
 /** localStorage key under which the encoded save is persisted. */
 export const LOCAL_KEY = 'tw-incremental:save'
@@ -765,6 +765,29 @@ export function migrate(raw: any): any {
         version: 23,
       }
     },
+    // v23 -> v24: timed event buffs (M14). A v23 save predates the single `events.buff` slot — the
+    // FIRST temporary modifier in the game (all tree/building mods are permanent) — so backfill it
+    // as null (no buff in force). An old save genuinely has no buff to recover; idle is the honest
+    // default, and with no watchtower a buff can never start anyway, so a migrated run is
+    // byte-identical to pre-M14 until the player builds a watchtower AND claims a buff offer. A
+    // forward-compat save that already carries an object `buff` keeps it verbatim, and ONLY a
+    // non-null / non-object `buff` (e.g. a stray string) is reset to null here; a malformed buff
+    // OBJECT (e.g. a windfall id, or a bad `remaining`) passes the migration and is then rejected
+    // by validateState — the semantic gate — exactly like the rest of the forward-compat path. A
+    // malformed `events` is left as-is so validateState rejects it loudly. Nothing is recomputed
+    // here; importSave's
+    // recomputeDerived pass runs afterwards exactly as for every other migration (the buff folds into
+    // effectiveMods via aggregateEventBuffMods, an identity bag while null — byte-identical).
+    23: (s) => ({
+      ...s,
+      events: isObject(s.events)
+        ? {
+            ...s.events,
+            buff: s.events.buff === null || isObject(s.events.buff) ? s.events.buff : null,
+          }
+        : s.events,
+      version: 24,
+    }),
   }
   let v = typeof raw?.version === 'number' ? raw.version : 0
   while (v < SAVE_VERSION) {
@@ -1237,6 +1260,28 @@ export function validateState(s: unknown): GameState {
       activeEvent.roll > 1
     ) {
       throw new Error('save: invalid events active roll')
+    }
+  }
+  // ACTIVE timed buff (M14) — the single `events.buff` slot. null (idle) OR a well-formed buff:
+  // a `defId` that indexes WORLD_EVENTS_BY_ID *and* names an actual `kind: 'buff'` def (a windfall
+  // id is NOT a valid buff — it would mis-resolve aggregateEventBuffMods and then get autosaved,
+  // CLAUDE.md hard rule #3), plus a finite, non-negative `remaining` (seconds to expiry; a
+  // NaN/Infinity/negative would mis-drive the countdown). The v23->v24 migration backfills null, so
+  // a migrated save always passes.
+  const activeBuff = events.buff
+  if (activeBuff !== null) {
+    if (!isObject(activeBuff)) throw new Error('save: invalid events buff')
+    const def =
+      typeof activeBuff.defId === 'string' ? WORLD_EVENTS_BY_ID[activeBuff.defId] : undefined
+    if (!def || def.kind !== 'buff') {
+      throw new Error('save: invalid events buff defId')
+    }
+    if (
+      typeof activeBuff.remaining !== 'number' ||
+      !Number.isFinite(activeBuff.remaining) ||
+      activeBuff.remaining < 0
+    ) {
+      throw new Error('save: invalid events buff remaining')
     }
   }
 

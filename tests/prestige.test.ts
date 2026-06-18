@@ -592,7 +592,7 @@ describe('ascend', () => {
     const s = createInitialState('ascend-events', 0)
     // Simulate a run that had a watchtower: a stale ACTIVE offer plus an advanced events
     // RNG stream and a mid-cycle timer that MUST NOT leak across the reset.
-    s.events = { rngState: 123456789, timer: 7, active: { defId: 'karawana', ttl: 42, roll: 0.5 } }
+    s.events = { rngState: 123456789, timer: 7, active: { defId: 'karawana', ttl: 42, roll: 0.5 }, buff: null }
 
     ascend(s)
 

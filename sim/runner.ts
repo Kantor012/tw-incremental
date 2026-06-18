@@ -3,6 +3,7 @@ import {
   recomputeDerived,
   INITIAL_UNITS,
   RESOURCE_IDS,
+  EVENT_TTL,
   type GameState,
   type BattleReport,
 } from '../src/engine/state'
@@ -16,6 +17,7 @@ import { sendAttack, stationedUnits } from '../src/systems/marches'
 import { foundVillage, findFoundingSpot } from '../src/systems/villages'
 import { sendShipment, exchangeResources } from '../src/systems/market'
 import { claimEvent } from '../src/systems/events'
+import { WORLD_EVENTS, WORLD_EVENTS_BY_ID, type BuffEvent } from '../src/content/events'
 import { purchaseTech } from '../src/systems/tech'
 import { TECH_NODES, TECH_NODE_IDS } from '../src/content/tech'
 import { fortressTarget } from '../src/content/fortresses'
@@ -124,6 +126,10 @@ import {
   checkEventsInert,
   checkEventsDeterminism,
   checkEventsSaveLoad,
+  checkBuffApplies,
+  checkBuffExpiresReverts,
+  checkBuffDeterminism,
+  checkBuffInert,
   type InvariantResult,
 } from './invariants'
 import {
@@ -1879,11 +1885,15 @@ export function runCavalry(seed: string, ticks: number = CAVALRY_TICKS): Cavalry
  */
 const EVENTS_TICKS = 5000
 
-/** What a world-events run yields: sampled invariants + the spawn / claim tally. */
+/** What a world-events run yields: sampled invariants + the spawn / claim + buff tally. */
 interface EventsRun {
   invariants: InvariantResult[]
   spawned: number
   claimed: number
+  /** Buff offers CLAIMED (M14) — installed a timed buff (natural RNG draws + the forced guarantee). */
+  buffsClaimed: number
+  /** Buffs that COUNTED DOWN to expiry through the real tick (non-null -> null across a simulate step). */
+  buffExpiries: number
 }
 
 /**
@@ -1917,12 +1927,18 @@ export function runEvents(seed: string, ticks: number = EVENTS_TICKS): EventsRun
 
   let spawned = 0
   let claimed = 0
+  let buffsClaimed = 0
+  let buffExpiries = 0
   let prevActive = state.events.active !== null
   let prevTotal = totalResources(state)
   let actedInWindow = 0
 
   for (let i = 0; i < ticks; i++) {
+    // A buff in force BEFORE this step that is gone AFTER it was counted down to expiry by
+    // advanceEvents inside the tick (M14) — observe the natural buff lifecycle riding the real tick.
+    const buffWasActive = state.events.buff !== null
     simulate(state, dt)
+    if (buffWasActive && state.events.buff === null) buffExpiries += 1
 
     // A fresh idle→active transition means the tick spawned exactly one new offer this step.
     const nowActive = state.events.active !== null
@@ -1932,10 +1948,15 @@ export function runEvents(seed: string, ticks: number = EVENTS_TICKS): EventsRun
     }
     // CLAIM the offer the instant it lands (a PLAYER action — never the tick). Claiming the same step
     // it spawns means an offer never lapses unclaimed, so claimed == spawned and each claim re-arms the
-    // spawn clock a full EVENT_INTERVAL out. The grant is clamped to the storage cap inside claimEvent,
-    // so the sampled resources-within-cap invariant is exactly the bounded-windfall constraint check.
+    // spawn clock a full EVENT_INTERVAL out. A windfall grant is clamped to the storage cap inside
+    // claimEvent (so the sampled resources-within-cap invariant is exactly the bounded-windfall check);
+    // a buff claim (M14) installs events.buff, tallied below — both kinds bump eventsResolved equally.
     if (state.events.active) {
-      if (claimEvent(state)) claimed += 1
+      const offered = WORLD_EVENTS_BY_ID[state.events.active.defId]
+      if (claimEvent(state)) {
+        claimed += 1
+        if (offered && offered.kind === 'buff') buffsClaimed += 1
+      }
       prevActive = false
     } else {
       prevActive = nowActive
@@ -1978,7 +1999,47 @@ export function runEvents(seed: string, ticks: number = EVENTS_TICKS): EventsRun
         : `claimed ${claimed} of ${spawned} spawned (eventsResolved=${state.stats.eventsResolved}) — offer→claim pipeline incomplete`,
   })
 
-  return { invariants, spawned, claimed }
+  // M14 — GUARANTEED buff lifecycle through the REAL claim + tick path. The natural loop above already
+  // installs buffs whenever the weighted spawn rolls one, but that draw is RNG-dependent, so the
+  // observation could be vacuous for an unlucky seed. Here we FORCE one buff offer, claim it through the
+  // real {@link claimEvent} (installs events.buff), then step the real {@link simulate} until
+  // advanceEvents counts the buff down to expiry on the tick grid — exercising offer→claim→buff→
+  // tick-countdown→expire end to end and making the 'buffs-observed' proof deterministic + non-vacuous.
+  // Placed AFTER events-claimed so the forced claim's eventsResolved bump can never perturb that tally.
+  const buffDef = WORLD_EVENTS.find((e): e is BuffEvent => e.kind === 'buff')
+  let forcedInstalled = false
+  let forcedExpired = false
+  if (buffDef) {
+    state.events.active = { defId: buffDef.id, ttl: EVENT_TTL, roll: 0.5 }
+    if (claimEvent(state)) buffsClaimed += 1
+    forcedInstalled = state.events.buff !== null && state.events.buff.defId === buffDef.id
+    // Step past the buff's duration (a little headroom); the spawn timer (re-armed to EVENT_INTERVAL by
+    // the claim) cannot fire a new offer in this short window, so the only buff change is its expiry.
+    const limit = Math.ceil(buffDef.duration / dt) + 5
+    for (let t = 0; t < limit && state.events.buff !== null; t++) {
+      const was = state.events.buff !== null
+      simulate(state, dt)
+      if (was && state.events.buff === null) {
+        forcedExpired = true
+        buffExpiries += 1
+      }
+    }
+  }
+
+  // Bare-named HARD invariant (mirrors events-spawned/claimed): the run must INSTALL a buff via the real
+  // claim path AND watch it COUNT DOWN to expiry through the real tick — proof the M14 buff lifecycle is
+  // reachable through the offer pipeline. Carries the full natural+forced tally in its detail (the buff
+  // metrics ride this string, mirroring how the spawn/claim tally rides events-spawned/claimed).
+  const buffsObserved = buffsClaimed >= 1 && buffExpiries >= 1 && forcedInstalled && forcedExpired
+  invariants.push({
+    name: 'buffs-observed',
+    ok: buffsObserved,
+    detail: buffsObserved
+      ? `claimed ${buffsClaimed} buff(s) and watched ${buffExpiries} expire on the tick grid (forced lifecycle install+expire ok)`
+      : `buff lifecycle incomplete (claimed=${buffsClaimed}, expiries=${buffExpiries}, forcedInstalled=${forcedInstalled}, forcedExpired=${forcedExpired})`,
+  })
+
+  return { invariants, spawned, claimed, buffsClaimed, buffExpiries }
 }
 
 export function runOne(seed: string, ticks: number): RunResult {
@@ -2382,6 +2443,17 @@ export function runOne(seed: string, ticks: number): RunResult {
   invariants.push(checkEventsInert(primary.state, seed))
   invariants.push(checkEventsDeterminism(seed, OFFLINE_CHECK_SECONDS))
   invariants.push(checkEventsSaveLoad(seed))
+
+  // M14 timed event buffs (the first TEMPORARY modifier) — deterministic proof-of-mechanic checks
+  // (no bot, no RNG): claiming a buff folds its mods into effectiveMods (buff-applies); the buff
+  // counts down on the tick grid and reverts effectiveMods byte-identically on expiry
+  // (buff-expires-reverts); a watchtower'd run with a live buff replays identically online vs chunked-
+  // offline (buff-determinism); and a no-watchtower run keeps events.buff null with an identity buff
+  // bag, so effectiveMods stays byte-identical to pre-M14 (buff-inert, reading the PRIMARY run's state).
+  invariants.push(checkBuffApplies(seed))
+  invariants.push(checkBuffExpiresReverts(seed))
+  invariants.push(checkBuffDeterminism(seed, OFFLINE_CHECK_SECONDS))
+  invariants.push(checkBuffInert(primary.state, seed))
 
   const metrics = collect(
     seed,

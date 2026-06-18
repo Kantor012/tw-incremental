@@ -220,11 +220,13 @@ const ctx: UiCtx = {
     return ok
   },
   onClaimEvent: () => {
-    // claimEvent (M13) grants the active world-event windfall to the capital (each resource
-    // clamped to the storage cap, overflow spilled), bumps the lifetime eventsResolved counter
-    // and clears the offer; it no-ops (returns false) when there is no live offer / no
-    // watchtower. A benign one-way gain, so — like onExchange — we commit + persist only on a
-    // successful claim. Player-initiated; never runs in the tick.
+    // claimEvent resolves the active offer BY KIND (M13 windfall / M14 buff): a windfall grants
+    // the bounded resource cache to the capital (each resource clamped to the storage cap,
+    // overflow spilled); a buff installs a single timed buff (a new buff replaces the running
+    // one). Both bump the lifetime eventsResolved counter, clear the offer and re-arm the timer;
+    // it no-ops (returns false) when there is no live offer / no watchtower. A benign one-way
+    // gain, so — like onExchange — we commit + persist only on a successful claim. Player-
+    // initiated; never runs in the tick.
     const ok = claimEvent(store.state)
     if (ok) {
       store.commit()
@@ -357,7 +359,7 @@ const ctx: UiCtx = {
     store.commit()
     saveToLocal(store.state)
   },
-  version: '0.44.0',
+  version: '0.45.0',
   offlineSeconds,
 }
 

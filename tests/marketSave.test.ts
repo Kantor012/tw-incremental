@@ -66,7 +66,7 @@ describe('market save — v19 -> v20 migration backfill (M9)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(23)
+    expect(m.version).toBe(24)
 
     for (const id of m.villageOrder) {
       expect(m.villages[id].buildings.market).toBe(0)
@@ -243,7 +243,7 @@ describe('market save — v21 -> v22 migration backfill (M9.2 exchange counter)'
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(23)
+    expect(m.version).toBe(24)
     // Backfilled as a REAL Decimal zero (round-trips via the `{ $d }` wire shape, like lootHauled).
     expect(m.stats.resourcesExchanged instanceof Decimal).toBe(true)
     expect(m.stats.resourcesExchanged.eq(0)).toBe(true)

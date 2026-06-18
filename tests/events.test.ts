@@ -61,8 +61,9 @@ describe('events catalogue — bounded, non-negative, deterministic grants', () 
   it('every grant is bounded: total <= 25% of cap, each pool <= cap, never negative/NaN', () => {
     const cap = D(10000)
     const ceiling = cap.mul(0.25)
-    // Sweep the roll range (0..just under 1) for every event.
+    // Sweep the roll range (0..just under 1) for every WINDFALL event (M14 buffs have no grant).
     for (const def of WORLD_EVENTS) {
+      if (def.kind !== 'windfall') continue
       for (const roll of [0, 0.1, 0.25, 0.5, 0.75, 0.9999]) {
         const grant = def.grant(roll, cap)
         for (const r of RESOURCE_IDS) {
@@ -80,6 +81,7 @@ describe('events catalogue — bounded, non-negative, deterministic grants', () 
   it('grant size scales monotonically with the roll (a luckier roll never grants less)', () => {
     const cap = D(10000)
     for (const def of WORLD_EVENTS) {
+      if (def.kind !== 'windfall') continue
       const low = grantTotal(def.grant(0, cap))
       const high = grantTotal(def.grant(0.9999, cap))
       expect(high.gte(low)).toBe(true)
@@ -90,6 +92,7 @@ describe('events catalogue — bounded, non-negative, deterministic grants', () 
   it('grant is deterministic: the same (roll, cap) yields byte-identical amounts', () => {
     const cap = D(7777)
     for (const def of WORLD_EVENTS) {
+      if (def.kind !== 'windfall') continue
       const a = def.grant(0.42, cap)
       const b = def.grant(0.42, cap)
       for (const r of RESOURCE_IDS) {
@@ -181,7 +184,9 @@ describe('claimEvent — bounded windfall to the capital', () => {
     const v = s.villages.v0
     v.resources = { wood: D(0), clay: D(0), iron: D(0) }
     s.events.active = { defId: 'karawana', ttl: EVENT_TTL, roll: 0.5 }
-    const expected = WORLD_EVENTS_BY_ID['karawana'].grant(0.5, v.storageCap)
+    const karawana = WORLD_EVENTS_BY_ID['karawana']
+    if (karawana.kind !== 'windfall') throw new Error('test fixture: karawana must be a windfall')
+    const expected = karawana.grant(0.5, v.storageCap)
 
     expect(claimEvent(s)).toBe(true)
 
@@ -288,7 +293,9 @@ describe('events save — v22 -> v23 migration backfill (M13)', () => {
 
     const m = migrate(raw)
     expect(m.version).toBe(SAVE_VERSION)
-    expect(m.version).toBe(23)
+    // migrate() always runs to the CURRENT version; a v22 save now chains v22->v23 (this M13
+    // backfill) and v23->v24 (the M14 buff backfill). The M13 fields below are unchanged by v24.
+    expect(m.version).toBe(24)
 
     // The events clock starts idle, a full interval out, on the SEPARATE seeded stream.
     expect(m.events.active).toBeNull()
@@ -311,7 +318,8 @@ describe('events save — v22 -> v23 migration backfill (M13)', () => {
     }
     raw.events = { ...carried, active: { ...carried.active } }
     const m = migrate(raw)
-    expect(m.events).toEqual(carried) // carried verbatim, not reset
+    // Carried fields verbatim, plus the v23->v24 buff backfill (null). Not reset.
+    expect(m.events).toEqual({ ...carried, buff: null })
     expect(validateState(m).version).toBe(SAVE_VERSION)
   })
 
@@ -336,6 +344,7 @@ function liveOfferState(seed = 'save-v23'): GameState {
   s.events = {
     rngState: 987654321,
     timer: EVENT_INTERVAL,
+    buff: null,
     active: { defId: 'zyla_zelaza', ttl: 123, roll: 0.42 },
   }
   s.stats.eventsResolved = 5

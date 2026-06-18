@@ -161,13 +161,18 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // on the same TICK_RATE sub-step grid as marches, so online == offline == sim stay
   // byte-identical; cargo is delivered to its destination (clamped to storage cap) on arrival.
   advanceShipments(state, dt)
-  // World events (M13) advance here on the fixed grid, ONCE per sub-step in this FIXED position
-  // (right after advanceShipments, before automation). It draws from its OWN events RNG stream
-  // (state.events.rngState), NEVER the per-subStep combat `rng`, so its order relative to the combat
-  // draws above is irrelevant — pinned for determinism like advanceShipments. With no watchtower it
-  // early-returns (no timer move, no draw), so a run without one is BYTE-IDENTICAL to pre-M13 —
-  // online == offline == sim. The offer is CLAIMED only by the player (claimEvent), never in the tick.
-  advanceEvents(state, dt)
+  // World events (M13 + M14) advance here on the fixed grid, ONCE per sub-step in this FIXED
+  // position (right after advanceShipments, before automation). It draws from its OWN events RNG
+  // stream (state.events.rngState), NEVER the per-subStep combat `rng`, so its order relative to the
+  // combat draws above is irrelevant — pinned for determinism like advanceShipments. With no
+  // watchtower it early-returns (no timer move, no draw, no buff), so a run without one is
+  // BYTE-IDENTICAL to pre-M13/M14 — online == offline == sim. The offer is CLAIMED only by the
+  // player (claimEvent), never in the tick. M14: advanceEvents RETURNS whether an active timed buff
+  // EXPIRED this sub-step — exactly like a challenge completion, that flips the effectiveMods ledger
+  // mid-span (the buff's in-flight multipliers fall back to the unbuffed bag), so we OR it into the
+  // sub-step's re-aggregation signal below so simulate refreshes the threaded `mods` before the next
+  // sub-step (online == offline across a buff expiry).
+  const buffExpired = advanceEvents(state, dt)
   // Automation (M5.1) runs LAST, after the world has fully settled this sub-step
   // (captures applied + barbarians removed by applyConquest, loyalty regenerated): so
   // auto-attack never targets a camp that was floored-and-removed this very step, and
@@ -209,10 +214,12 @@ function subStep(state: GameState, dt: number, mods: TechModifiers): boolean {
   // identical online / offline / sim because the sub-step grid makes the draw sequence
   // invariant to the `dt` split.
   state.rngState = rng.getState()
-  // Signal a mid-span challenge completion so simulate re-aggregates the threaded `mods`
-  // before the next sub-step (the constraint/reward this completion folded in/out changes
-  // what effectiveMods returns for the REMAINING sub-steps of a big-dt span).
-  return challengeCompleted
+  // Signal a mid-span ledger change so simulate re-aggregates the threaded `mods` before the next
+  // sub-step. TWO sources OR together: a challenge completion (constraint/reward folded in/out) and
+  // an M14 buff EXPIRY (the buff's in-flight multipliers fall back to the unbuffed bag). Both change
+  // what effectiveMods returns for the REMAINING sub-steps of a big-dt span, so either one must
+  // trigger the refresh — keeping online (one big step) == offline (many TICK_RATE steps).
+  return challengeCompleted || buffExpired
 }
 
 /**

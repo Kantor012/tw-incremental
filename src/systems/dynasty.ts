@@ -403,6 +403,8 @@ export function newDynasty(state: GameState): number {
     rngState: RNG.fromString(dynSeed + '::events').getState(),
     timer: EVENT_INTERVAL,
     active: null,
+    // M14: a fresh dynasty starts with no timed buff in force.
+    buff: null,
   }
 
   // Reconcile derived stats with the surviving dynasty multipliers (era + prestige empty).

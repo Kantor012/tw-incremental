@@ -1,7 +1,7 @@
 {
   "name": "tw-incremental",
   "private": true,
-  "version": "0.44.0",
+  "version": "0.45.0",
   "type": "module",
   "description": "Incremental/idle game set in the Tribal Wars world — static, client-only, graphics drawn purely in code.",
   "scripts": {

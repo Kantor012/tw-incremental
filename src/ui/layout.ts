@@ -779,6 +779,14 @@ export function buildShell(ctx: UiCtx, tabs: TabSpec[]): HTMLElement {
     // selectTab also runs on mount + keyboard nav, which must keep the list open.
     menuCurrent.textContent = entries[index].tab.dataset.label ?? ''
     persistTabId(entries[index].id)
+    // Re-entry hook BEFORE the first update(): a panel's update() does not run while
+    // it is hidden, so any real-time transition-detection state it keeps (e.g. the
+    // Events panel's last-seen buff id) goes stale off-tab. onShow lets it silently
+    // re-baseline on the very next update() so a change that happened off-tab is not
+    // announced as if it just occurred. selectTab is event-only (mount/click/keyboard),
+    // never per-frame, so this fires once per (re)entry — the steady per-frame path
+    // (effect → active panel.update()) deliberately does NOT call it.
+    entries[index].panel.onShow?.()
     entries[index].panel.update()
   }
 

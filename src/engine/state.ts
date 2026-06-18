@@ -307,6 +307,23 @@ export interface ActiveEvent {
 }
 
 /**
+ * One ACTIVE timed buff (M14) — the global TEMPORARY modifier currently in force after the player
+ * claimed a `kind: 'buff'` world event. `defId` indexes the WORLD_EVENTS catalogue
+ * (content/events.ts) to recover the buff's {@link TechModifiers} bag; `remaining` is the seconds
+ * left until it expires, counted down on the SAME fixed tick grid as the offer clock. A SINGLE
+ * slot ({@link EventState.buff}): claiming a new buff REPLACES any active one. Plain number
+ * (seconds) — the modifier amounts live in the catalogue, so the buff state itself stays
+ * Decimal-free and serializes trivially. This is the FIRST temporary modifier in the game (all
+ * tree/building mods are PERMANENT); it folds into effectiveMods via aggregateEventBuffMods only
+ * while it lasts, and reverts byte-identically on expiry (no recomputeDerived — v1 buffs touch
+ * only the in-flight axes, see content/events.ts).
+ */
+export interface ActiveBuff {
+  defId: string
+  remaining: number
+}
+
+/**
  * The single GLOBAL world-events schedule (M13) — one offer clock for the whole run, gated by
  * the manually-built WATCHTOWER (the `watchtower` building, autoBuildable:false). Draws from its
  * OWN seeded RNG stream ({@link rngState}, seeded from `seed + '::events'`) so it NEVER touches
@@ -322,6 +339,14 @@ export interface EventState {
   timer: number
   /** The offer currently on the table, or null when idle. */
   active: ActiveEvent | null
+  /**
+   * The ACTIVE timed buff (M14), or null when none is in force. A SINGLE slot — claiming a buff
+   * offer REPLACES any active one. Counted down by {@link advanceEvents} on the tick grid
+   * INDEPENDENTLY of the offer clock, and folded into effectiveMods via aggregateEventBuffMods
+   * only while set. With no watchtower it is always null (the gate), so the run stays
+   * byte-identical to pre-M14. See {@link ActiveBuff}.
+   */
+  buff: ActiveBuff | null
 }
 
 /**
@@ -1051,6 +1076,8 @@ export function createInitialState(seed: string, now: number): GameState {
       rngState: RNG.fromString(seed + '::events').getState(),
       timer: EVENT_INTERVAL,
       active: null,
+      // M14: no timed buff in force at run start (and never any until a watchtower stands).
+      buff: null,
     },
     tech: {},
     prestige: { points: 0, totalEarned: 0, ascensions: 0, nodes: {} },

@@ -653,6 +653,36 @@ async function main(): Promise<void> {
   }
   console.log('')
 
+  // --- M14 timed event buffs coverage (HARD proof-of-mechanic; reads the run's invariants) ---
+  // The buff TALLY (buffs claimed / expiries observed) rides the buffs-observed detail string (mirrors
+  // how the spawn/claim tally rides events-spawned/claimed). buffs-observed proves the lifecycle is
+  // reachable through the real offer→claim→tick path; buff-applies / buff-expires-reverts /
+  // buff-determinism / buff-inert are the deterministic effectiveMods + byte-identity proofs.
+  console.log('--- M14 timed event buffs: BUFFY CZASOWE (coverage) ---')
+  const m14Names = [
+    'buffs-observed',
+    'buff-applies',
+    'buff-expires-reverts',
+    'buff-determinism',
+    'buff-inert',
+  ]
+  for (const r of results) {
+    const line = m14Names
+      .map((name) => {
+        const inv = r.invariants.find((i) => i.name === name)
+        const mark = inv ? (inv.ok ? 'ok' : 'FAIL') : 'n/a'
+        return `${name}=${mark}`
+      })
+      .join('  ')
+    console.log(`${r.metrics.seed.padEnd(8)} | ${line}`)
+    // Surface each detail so a passing buff tally + apply / revert / determinism / inertness is visible.
+    for (const name of m14Names) {
+      const inv = r.invariants.find((i) => i.name === name)
+      if (inv?.detail) console.log(`      ${inv.ok ? 'ok  ' : 'FAIL'} ${name} — ${inv.detail}`)
+    }
+  }
+  console.log('')
+
   // --- Automation per seed (M5.1 idle routines; SEPARATE coverage run, automation ON) ---
   console.log('--- Automation (idle routines, separate coverage run) ---')
   console.log('seed     | auto-built (levels) | auto-recruited (units) | auto-attacked (resolved)')

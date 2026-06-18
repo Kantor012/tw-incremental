@@ -236,6 +236,8 @@ export function startChallenge(state: GameState, id: string): boolean {
     rngState: RNG.fromString(chalSeed + '::events').getState(),
     timer: EVENT_INTERVAL,
     active: null,
+    // M14: a fresh challenge run starts with no timed buff in force.
+    buff: null,
   }
 
   // Turn the challenge on (defensive: seed the record if a hand-edited save lacks it).
